@@ -5,3 +5,4 @@ edition.workspace = true
 
 [dependencies]
 maille-core = { path = "../maille-core" }
+maille-viewer = { path = "../maille-viewer" }

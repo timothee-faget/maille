@@ -20,7 +20,7 @@ const ELEMENTS: usize = 4;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     match std::env::args().nth(1).as_deref() {
         None | Some("console") => console(),
-        Some("kirsch") => Ok(kirsch::run()?),
+        Some("kirsch") => kirsch::run(),
         Some(other) => Err(format!("cas inconnu « {other} » : choisir console ou kirsch").into()),
     }
 }

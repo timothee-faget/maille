@@ -1,0 +1,10 @@
+[package]
+name = "maille-viewer"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+maille-core = { path = "../maille-core" }
+pollster = "1.0.1"
+wgpu = "30.0.1"
+winit = "0.30.13"

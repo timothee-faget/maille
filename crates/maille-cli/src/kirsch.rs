@@ -106,7 +106,8 @@ pub fn solve() -> Result<(Mesh, Field), MailleError> {
     Ok((mesh, field))
 }
 
-pub fn run() -> Result<(), MailleError> {
+/// Affiche le rapport face à Kirsch, puis ouvre le viewer.
+pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (mesh, field) = solve()?;
     let nodal = nodal_stresses(&mesh, &field)?;
 
@@ -130,5 +131,5 @@ pub fn run() -> Result<(), MailleError> {
         3.0 * SIGMA,
     );
     report("σyy en (a, 0) (MPa)", nodal[idx(0, 0)].sigma_yy, -SIGMA);
-    Ok(())
+    maille_viewer::show(&mesh, &field)
 }
