@@ -150,11 +150,12 @@ impl App {
         self.refresh();
     }
 
+    /// Seule la vue change : ni le champ ni la légende ne sont renvoyés au GPU.
     fn zoom(&mut self, factor: f64) {
-        if let Some(renderer) = &self.renderer {
+        if let Some(renderer) = self.renderer.as_mut() {
             self.view.zoom_at(factor, self.cursor, renderer.size());
             self.follow_window = false;
-            self.refresh();
+            renderer.set_view(self.view);
         }
     }
 }

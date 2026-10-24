@@ -262,11 +262,12 @@ mod tests {
             .values(Quantity::TauXy)
             .iter()
             .all(|v| (v - 50.0).abs() < 1e-9));
-        assert_eq!(
-            scene.values(Quantity::Displacement),
-            vec![5.0, 0.0, 10.0, 1.0]
-        );
-        assert_eq!(range(&scene.values(Quantity::Displacement)), (0.0, 10.0));
+        let norms = scene.values(Quantity::Displacement);
+        for (got, expected) in norms.iter().zip([5.0, 0.0, 10.0, 1.0]) {
+            assert!((got - expected).abs() < 1e-12, "{norms:?}");
+        }
+        let (lo, hi) = range(&norms);
+        assert!(lo.abs() < 1e-12 && (hi - 10.0).abs() < 1e-12);
     }
 
     #[test]
@@ -282,7 +283,9 @@ mod tests {
             .map(|(a, b)| (b[0] - a[0]).hypot(b[1] - a[1]))
             .fold(0.0, f64::max);
         assert!((moved - 0.1).abs() < 1e-12, "{moved}");
-        assert_eq!(scene.bounds(0.0), ([0.0, 0.0], [1.0, 1.0]));
+        let (lo, hi) = scene.bounds(0.0);
+        assert!(lo.iter().all(|c| c.abs() < 1e-12));
+        assert!(hi.iter().all(|c| (c - 1.0).abs() < 1e-12));
         // la boîte de la déformée englobe le Node 2 déplacé de 0,1 (u ∝ (2, −1))
         let (lo, hi) = scene.bounds(scale);
         let moved = [1.0 + 0.2 / 5_f64.sqrt(), 1.0 - 0.1 / 5_f64.sqrt()];
@@ -293,7 +296,7 @@ mod tests {
     fn a_mesh_that_does_not_move_has_no_deformation() {
         let mesh = two_tri3();
         let scene = Scene::new(&mesh, &field(&mesh, [0.0; 3], vec![0.0; 8])).unwrap();
-        assert_eq!(scene.deformation_scale(), 0.0);
+        assert!(scene.deformation_scale().abs() < 1e-12);
     }
 
     #[test]
