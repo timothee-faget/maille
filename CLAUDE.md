@@ -10,7 +10,7 @@ Les lire avant toute décision d'architecture. Ce fichier ne les duplique pas.
 
 ## État du projet
 
-M0 et M1 terminés (FEM 1D barre + poutre, puis élasticité plane Tri3/Tri6, validés contre l'analytique dont Kirsch). M2 (viewer minimal) à venir. Workspace Cargo : `crates/maille-core` (lib pure, zéro dépendance) et `crates/maille-cli` (client).
+M0, M1 et M2 terminés (FEM 1D barre + poutre, élasticité plane Tri3/Tri6 validée contre l'analytique dont Kirsch, viewer wgpu avec contraintes lissées aux Nodes). M3 (3D tétraèdres, thermique stationnaire, solveur creux) à venir. Workspace Cargo : `crates/maille-core` (lib pure, zéro dépendance), `crates/maille-viewer` (client : wgpu, winit, glyphon) et `crates/maille-cli` (client : `maille-cli kirsch` ouvre le viewer).
 
 Commandes :
 - `cargo build`
