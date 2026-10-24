@@ -3,7 +3,12 @@
 //! Client du cœur : aucun calcul mécanique ici, seulement de l'affichage.
 
 mod app;
+// branchés au rendu à l'étape 5 de M2 ; d'ici là, seuls leurs tests les utilisent
+#[allow(dead_code)]
+mod colormap;
 mod render;
+#[allow(dead_code)]
+mod scene;
 
 use maille_core::mesh::Mesh;
 use maille_core::results::Field;
