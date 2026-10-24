@@ -27,6 +27,9 @@ pub struct Renderer {
     config: wgpu::SurfaceConfiguration,
     fill_pipeline: wgpu::RenderPipeline,
     edge_pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    /// Uniforms, LUT de la colormap et son sampler.
     bind_group: wgpu::BindGroup,
     /// Échelle, décalage et (min, max) du champ : voir `Uniforms` dans shader.wgsl.
     uniforms: wgpu::Buffer,
@@ -146,27 +149,6 @@ impl Renderer {
         let fill_pipeline = pipeline(wgpu::PrimitiveTopology::TriangleList, "fs_fill");
         let edge_pipeline = pipeline(wgpu::PrimitiveTopology::LineList, "fs_edge");
 
-        // LUT : une texture 1D sRGB, lue sans interpolation (bandes nettes)
-        let lut = colormap.lut();
-        let texture = device.create_texture_with_data(
-            &queue,
-            &wgpu::TextureDescriptor {
-                label: None,
-                size: wgpu::Extent3d {
-                    width: lut.len() as u32,
-                    height: 1,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D1,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            },
-            wgpu::util::TextureDataOrder::LayerMajor,
-            lut.as_flattened(),
-        );
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor::default());
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
@@ -175,26 +157,14 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: uniforms.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(
-                        &texture.create_view(&Default::default()),
-                    ),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
-            ],
-        });
+        let bind_group = lut_bind_group(
+            &device,
+            &queue,
+            &bind_group_layout,
+            &uniforms,
+            &sampler,
+            colormap,
+        );
 
         let node_count = scene.positions(0.0).len() as u64;
         let vertex_buffer = |bytes_per_node: u64| {
@@ -225,6 +195,8 @@ impl Renderer {
             config,
             fill_pipeline,
             edge_pipeline,
+            bind_group_layout,
+            sampler,
             bind_group,
             uniforms,
             positions,
@@ -233,9 +205,25 @@ impl Renderer {
             triangles,
             edge_indices: (scene.edges.len() * 2) as u32,
             edges,
-            view: View::fit(scene.bounds(), [1.0, 1.0]),
+            view: View::fit(scene.bounds(0.0), [1.0, 1.0]),
             range: (0.0, 1.0),
         })
+    }
+
+    pub fn set_colormap(&mut self, colormap: Colormap) {
+        self.bind_group = lut_bind_group(
+            &self.device,
+            &self.queue,
+            &self.bind_group_layout,
+            &self.uniforms,
+            &self.sampler,
+            colormap,
+        );
+        self.window.request_redraw();
+    }
+
+    pub fn set_title(&self, title: &str) {
+        self.window.set_title(title);
     }
 
     /// Taille de la zone de dessin, en pixels.
@@ -334,4 +322,56 @@ impl Renderer {
         self.window.pre_present_notify();
         self.queue.present(frame);
     }
+}
+
+/// Bind group du shader : uniforms, LUT de `colormap` (texture 1D sRGB, lue sans interpolation pour
+/// des bandes nettes) et son sampler.
+fn lut_bind_group(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    layout: &wgpu::BindGroupLayout,
+    uniforms: &wgpu::Buffer,
+    sampler: &wgpu::Sampler,
+    colormap: Colormap,
+) -> wgpu::BindGroup {
+    let lut = colormap.lut();
+    let texture = device.create_texture_with_data(
+        queue,
+        &wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: lut.len() as u32,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D1,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        },
+        wgpu::util::TextureDataOrder::LayerMajor,
+        lut.as_flattened(),
+    );
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniforms.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(
+                    &texture.create_view(&Default::default()),
+                ),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
+    })
 }

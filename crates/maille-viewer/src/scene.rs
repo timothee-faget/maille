@@ -104,9 +104,9 @@ impl Scene {
             .collect()
     }
 
-    /// Coins (min, max) de la boîte englobante du Mesh non déformé.
-    pub fn bounds(&self) -> ([f64; 2], [f64; 2]) {
-        self.nodes.iter().fold(
+    /// Coins (min, max) de la boîte englobante des positions x + scale·u (scale = 0 : non déformé).
+    pub fn bounds(&self, scale: f64) -> ([f64; 2], [f64; 2]) {
+        self.positions(scale).iter().fold(
             ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]),
             |(lo, hi), p| {
                 (
@@ -120,7 +120,7 @@ impl Scene {
     /// Facteur d'amplification tel que le plus grand déplacement vaille 10 % de la taille du Mesh.
     /// Nul si rien ne bouge.
     pub fn deformation_scale(&self) -> f64 {
-        let (lo, hi) = self.bounds();
+        let (lo, hi) = self.bounds(0.0);
         let size = (hi[0] - lo[0]).max(hi[1] - lo[1]);
         let max_u = self
             .values(Quantity::Displacement)
@@ -282,7 +282,11 @@ mod tests {
             .map(|(a, b)| (b[0] - a[0]).hypot(b[1] - a[1]))
             .fold(0.0, f64::max);
         assert!((moved - 0.1).abs() < 1e-12, "{moved}");
-        assert_eq!(scene.bounds(), ([0.0, 0.0], [1.0, 1.0]));
+        assert_eq!(scene.bounds(0.0), ([0.0, 0.0], [1.0, 1.0]));
+        // la boîte de la déformée englobe le Node 2 déplacé de 0,1 (u ∝ (2, −1))
+        let (lo, hi) = scene.bounds(scale);
+        let moved = [1.0 + 0.2 / 5_f64.sqrt(), 1.0 - 0.1 / 5_f64.sqrt()];
+        assert!((hi[0] - moved[0]).abs() < 1e-12 && lo[1].abs() < 1e-12);
     }
 
     #[test]

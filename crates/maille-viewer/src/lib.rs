@@ -3,11 +3,8 @@
 //! Client du cœur : aucun calcul mécanique ici, seulement de l'affichage.
 
 mod app;
-// choix du champ, viridis et déformée branchés au clavier à l'étape 6 de M2
-#[allow(dead_code)]
 mod colormap;
 mod render;
-#[allow(dead_code)]
 mod scene;
 mod view;
 
@@ -24,6 +21,7 @@ pub fn show(mesh: &Mesh, field: &Field) -> Result<(), Box<dyn std::error::Error>
         field.displacements.len()
     );
     let scene = scene::Scene::new(mesh, field)?;
+    println!("{}", app::HELP);
     let event_loop = winit::event_loop::EventLoop::new()?;
     let mut app = app::App::new(title, scene);
     event_loop.run_app(&mut app)?;

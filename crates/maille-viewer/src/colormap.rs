@@ -44,6 +44,13 @@ impl Colormap {
         }
     }
 
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Rainbow => "arc-en-ciel",
+            Self::Viridis => "viridis",
+        }
+    }
+
     /// Couleur sRGB (composantes dans [0, 1]) en t, ramené dans [0, 1].
     pub fn color(self, t: f64) -> [f64; 3] {
         let t = t.clamp(0.0, 1.0);

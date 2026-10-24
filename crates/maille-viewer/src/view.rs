@@ -21,6 +21,33 @@ impl View {
         }
     }
 
+    /// Point du Mesh sous le pixel `cursor` (origine en haut à gauche, y vers le bas, comme winit).
+    pub fn model_point(&self, cursor: [f64; 2], size: [f64; 2]) -> [f64; 2] {
+        [
+            self.center[0] + (cursor[0] - size[0] / 2.0) / self.zoom,
+            self.center[1] - (cursor[1] - size[1] / 2.0) / self.zoom,
+        ]
+    }
+
+    /// Zoome d'un facteur `factor` (> 1 : on s'approche) en gardant fixe le point sous le curseur.
+    pub fn zoom_at(&mut self, factor: f64, cursor: [f64; 2], size: [f64; 2]) {
+        let anchor = self.model_point(cursor, size);
+        self.zoom *= factor;
+        let moved = self.model_point(cursor, size);
+        self.center = [
+            self.center[0] + anchor[0] - moved[0],
+            self.center[1] + anchor[1] - moved[1],
+        ];
+    }
+
+    /// Fait suivre la souris au Mesh : `delta` est le déplacement du curseur en pixels.
+    pub fn pan(&mut self, delta: [f64; 2]) {
+        self.center = [
+            self.center[0] - delta[0] / self.zoom,
+            self.center[1] + delta[1] / self.zoom,
+        ];
+    }
+
     /// (échelle, décalage) tels que clip = échelle · p + décalage, composante par composante.
     pub fn transform(&self, size: [f64; 2]) -> ([f32; 2], [f32; 2]) {
         let scale = [2.0 * self.zoom / size[0], 2.0 * self.zoom / size[1]];
@@ -69,5 +96,44 @@ mod tests {
         ];
         assert!((pixels[0] - pixels[1]).abs() < 1e-3, "{pixels:?}");
         assert!((pixels[1] - 0.9 * 300.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn the_window_center_shows_the_view_center_and_y_points_up() {
+        let size = [800.0, 600.0];
+        let view = View {
+            center: [5.0, 2.0],
+            zoom: 10.0,
+        };
+        let near =
+            |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).abs() < 1e-12 && (a[1] - b[1]).abs() < 1e-12;
+        assert!(near(view.model_point([400.0, 300.0], size), [5.0, 2.0]));
+        // 100 pixels plus haut à l'écran : y du Mesh plus grand de 100 / 10
+        assert!(near(view.model_point([400.0, 200.0], size), [5.0, 12.0]));
+    }
+
+    #[test]
+    fn zooming_keeps_the_point_under_the_cursor_fixed() {
+        let size = [800.0, 600.0];
+        let mut view = View::fit(([0.0, 0.0], [40.0, 40.0]), size);
+        let cursor = [123.0, 456.0];
+        let before = view.model_point(cursor, size);
+        view.zoom_at(2.5, cursor, size);
+        let after = view.model_point(cursor, size);
+        assert!((before[0] - after[0]).abs() < 1e-9 && (before[1] - after[1]).abs() < 1e-9);
+        // et le reste s'est bien rapproché
+        let (z0, z1) = (View::fit(([0.0, 0.0], [40.0, 40.0]), size).zoom, view.zoom);
+        assert!((z1 / z0 - 2.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn panning_moves_the_mesh_with_the_cursor() {
+        let size = [800.0, 600.0];
+        let mut view = View::fit(([0.0, 0.0], [40.0, 40.0]), size);
+        let grabbed = view.model_point([300.0, 200.0], size);
+        view.pan([50.0, -30.0]);
+        let under_cursor = view.model_point([350.0, 170.0], size);
+        assert!((grabbed[0] - under_cursor[0]).abs() < 1e-9);
+        assert!((grabbed[1] - under_cursor[1]).abs() < 1e-9);
     }
 }
