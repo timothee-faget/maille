@@ -1,7 +1,7 @@
 use crate::mesh::PlaneState;
-use crate::quadrature::GaussPoint;
-use crate::results::PlaneStress;
-use crate::shape::Mapping;
+use crate::quadrature::{GaussPoint, TetGaussPoint};
+use crate::results::Stress;
+use crate::shape::{Mapping, Mapping3d, SolidShapeFn};
 
 /// Matrice de rigidité d'une barre 1D : (EA/L) [[1, -1], [-1, 1]].
 pub fn bar_stiffness(young: f64, area: f64, length: f64) -> [[f64; 2]; 2] {
@@ -104,7 +104,7 @@ pub fn plane_stresses(
     u_e: &[f64],
     nu: f64,
     state: PlaneState,
-) -> Vec<PlaneStress> {
+) -> Vec<Stress> {
     rule.iter()
         .map(|g| {
             let (n, dn) = shape_at(g.xi, g.eta);
@@ -112,16 +112,104 @@ pub fn plane_stresses(
             let eps: [f64; 3] =
                 std::array::from_fn(|r| b.iter().zip(u_e).map(|(col, u)| col[r] * u).sum());
             let sigma: [f64; 3] = std::array::from_fn(|r| (0..3).map(|c| d[r][c] * eps[c]).sum());
-            PlaneStress {
+            Stress {
                 x: n.iter().zip(coords).map(|(n, c)| n * c[0]).sum(),
                 y: n.iter().zip(coords).map(|(n, c)| n * c[1]).sum(),
+                z: 0.0,
                 sigma_xx: sigma[0],
                 sigma_yy: sigma[1],
-                tau_xy: sigma[2],
                 sigma_zz: match state {
                     PlaneState::Stress => 0.0,
                     PlaneState::Strain => nu * (sigma[0] + sigma[1]),
                 },
+                tau_xy: sigma[2],
+                tau_yz: 0.0,
+                tau_xz: 0.0,
+            }
+        })
+        .collect()
+}
+
+/// Matrice D (6×6) de l'élasticité isotrope 3D, notation de Voigt (xx, yy, zz, yz, xz, xy),
+/// glissements γ en déformation d'ingénieur.
+pub fn solid_d(young: f64, nu: f64) -> [[f64; 6]; 6] {
+    let c = young / ((1.0 + nu) * (1.0 - 2.0 * nu));
+    let g = young / (2.0 * (1.0 + nu));
+    let mut d = [[0.0; 6]; 6];
+    for (i, row) in d.iter_mut().enumerate().take(3) {
+        for (j, v) in row.iter_mut().enumerate().take(3) {
+            *v = if i == j { c * (1.0 - nu) } else { c * nu };
+        }
+    }
+    for (i, row) in d.iter_mut().enumerate().skip(3) {
+        row[i] = g;
+    }
+    d
+}
+
+/// Matrice B (6 × 3n) stockée par colonne, ordre de Voigt de `solid_d`, DOF (ux, uy, uz) par Node.
+fn solid_strain_displacement(dn_dx: &[[f64; 3]]) -> Vec<[f64; 6]> {
+    dn_dx
+        .iter()
+        .flat_map(|&[gx, gy, gz]| {
+            [
+                [gx, 0.0, 0.0, 0.0, gz, gy],
+                [0.0, gy, 0.0, gz, 0.0, gx],
+                [0.0, 0.0, gz, gy, gx, 0.0],
+            ]
+        })
+        .collect()
+}
+
+/// Rigidité d'un tétraèdre : K = Σ_g w_g |det J| Bᵀ D B, DOF locaux (ux, uy, uz) par Node.
+pub fn solid_stiffness(
+    coords: &[[f64; 3]],
+    rule: &[TetGaussPoint],
+    shape_at: SolidShapeFn,
+    d: &[[f64; 6]; 6],
+) -> Vec<Vec<f64>> {
+    let m = 3 * coords.len();
+    let mut ke = vec![vec![0.0; m]; m];
+    for g in rule {
+        let map = Mapping3d::new(coords, &shape_at(g.xi, g.eta, g.zeta).1);
+        let b = solid_strain_displacement(&map.dn_dx);
+        let factor = g.weight * map.det.abs();
+        for i in 0..m {
+            let db: [f64; 6] = std::array::from_fn(|r| (0..6).map(|c| d[r][c] * b[i][c]).sum());
+            for j in 0..m {
+                ke[j][i] += factor * (0..6).map(|r| b[j][r] * db[r]).sum::<f64>();
+            }
+        }
+    }
+    ke
+}
+
+/// Contraintes σ = D B u aux points de Gauss d'un tétraèdre ; `u_e` : déplacements locaux (ux, uy, uz) par Node.
+pub fn solid_stresses(
+    coords: &[[f64; 3]],
+    rule: &[TetGaussPoint],
+    shape_at: SolidShapeFn,
+    d: &[[f64; 6]; 6],
+    u_e: &[f64],
+) -> Vec<Stress> {
+    rule.iter()
+        .map(|g| {
+            let (n, dn) = shape_at(g.xi, g.eta, g.zeta);
+            let b = solid_strain_displacement(&Mapping3d::new(coords, &dn).dn_dx);
+            let eps: [f64; 6] =
+                std::array::from_fn(|r| b.iter().zip(u_e).map(|(col, u)| col[r] * u).sum());
+            let sigma: [f64; 6] = std::array::from_fn(|r| (0..6).map(|c| d[r][c] * eps[c]).sum());
+            let at = |k: usize| n.iter().zip(coords).map(|(n, c)| n * c[k]).sum();
+            Stress {
+                x: at(0),
+                y: at(1),
+                z: at(2),
+                sigma_xx: sigma[0],
+                sigma_yy: sigma[1],
+                sigma_zz: sigma[2],
+                tau_yz: sigma[3],
+                tau_xz: sigma[4],
+                tau_xy: sigma[5],
             }
         })
         .collect()
@@ -328,6 +416,159 @@ mod tri6_tests {
                     (quad_form(&k, &u) - expected).abs() < 1e-9 * expected,
                     "{state:?} {eps:?}"
                 );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod solid_tests {
+    use super::*;
+    use crate::quadrature::{TETRA_1, TETRA_4};
+    use crate::shape::{tet10, tet4, TET10_EDGES};
+
+    const VERTICES: [[f64; 3]; 4] = [
+        [1.0, 0.5, 0.0],
+        [3.0, 1.0, 0.5],
+        [1.5, 2.5, 0.0],
+        [1.2, 1.0, 2.0],
+    ];
+
+    /// Sommets puis, pour le Tet10, milieux d'arêtes.
+    fn coords(quadratic: bool) -> Vec<[f64; 3]> {
+        let mut c = VERTICES.to_vec();
+        if quadratic {
+            for (a, b) in TET10_EDGES {
+                c.push(std::array::from_fn(|k| {
+                    (VERTICES[a][k] + VERTICES[b][k]) / 2.0
+                }));
+            }
+        }
+        c
+    }
+
+    fn volume() -> f64 {
+        let e = |k: usize| -> [f64; 3] { std::array::from_fn(|c| VERTICES[k][c] - VERTICES[0][c]) };
+        let (a, b, c) = (e(1), e(2), e(3));
+        (a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0])
+            + a[2] * (b[0] * c[1] - b[1] * c[0]))
+            / 6.0
+    }
+
+    /// (coordonnées, rigidité, D) du Tet4 puis du Tet10.
+    type Kernel = (Vec<[f64; 3]>, Vec<Vec<f64>>, [[f64; 6]; 6]);
+
+    fn kernels() -> [Kernel; 2] {
+        let d = solid_d(210e3, 0.3);
+        let (c4, c10) = (coords(false), coords(true));
+        let k4 = solid_stiffness(&c4, &TETRA_1, tet4, &d);
+        let k10 = solid_stiffness(&c10, &TETRA_4, tet10, &d);
+        [(c4, k4, d), (c10, k10, d)]
+    }
+
+    /// Déplacement u = ε·x d'une déformation uniforme (Voigt, glissements d'ingénieur).
+    fn uniform_strain(coords: &[[f64; 3]], eps: [f64; 6]) -> Vec<f64> {
+        coords
+            .iter()
+            .flat_map(|&[x, y, z]| {
+                [
+                    eps[0] * x + eps[5] / 2.0 * y + eps[4] / 2.0 * z,
+                    eps[5] / 2.0 * x + eps[1] * y + eps[3] / 2.0 * z,
+                    eps[4] / 2.0 * x + eps[3] / 2.0 * y + eps[2] * z,
+                ]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn solid_d_matches_lame_coefficients() {
+        let (e, nu) = (210e3, 0.3);
+        let d = solid_d(e, nu);
+        let lambda = e * nu / ((1.0 + nu) * (1.0 - 2.0 * nu));
+        let mu = e / (2.0 * (1.0 + nu));
+        assert!((d[0][0] - (lambda + 2.0 * mu)).abs() < 1e-9);
+        assert!((d[1][2] - lambda).abs() < 1e-9);
+        assert!((d[4][4] - mu).abs() < 1e-9);
+        assert!(d[0][3].abs() < 1e-15 && d[3][4].abs() < 1e-15);
+    }
+
+    #[test]
+    fn tet_stiffness_is_symmetric_and_ignores_the_six_rigid_motions() {
+        for (c, k, _) in kernels() {
+            let scale = k[0][0];
+            for (i, row) in k.iter().enumerate() {
+                for (j, v) in row.iter().enumerate() {
+                    assert!((v - k[j][i]).abs() < 1e-9 * scale);
+                }
+            }
+            let translations = (0..3).map(|axis| {
+                c.iter()
+                    .flat_map(|_| {
+                        std::array::from_fn::<f64, 3, _>(|a| if a == axis { 1.0 } else { 0.0 })
+                    })
+                    .collect::<Vec<f64>>()
+            });
+            // petites rotations ω × x autour de x, y, z
+            let rotations = (0..3).map(|axis| {
+                c.iter()
+                    .flat_map(|&[x, y, z]| match axis {
+                        0 => [0.0, -z, y],
+                        1 => [z, 0.0, -x],
+                        _ => [-y, x, 0.0],
+                    })
+                    .collect::<Vec<f64>>()
+            });
+            for u in translations.chain(rotations) {
+                for row in &k {
+                    let f: f64 = row.iter().zip(&u).map(|(a, b)| a * b).sum();
+                    assert!(f.abs() < 1e-9 * scale, "f = {f}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tet_strain_energy_of_a_uniform_strain_is_v_eps_d_eps() {
+        for (c, k, d) in kernels() {
+            for eps in [
+                [1e-3, 0.0, 0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 1e-3, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 1e-3, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0, 0.0, 1e-3],
+                [1e-3, -2e-3, 0.5e-3, 3e-3, -1e-3, 2e-3],
+            ] {
+                let u = uniform_strain(&c, eps);
+                let energy: f64 = k
+                    .iter()
+                    .zip(&u)
+                    .map(|(row, ui)| ui * row.iter().zip(&u).map(|(a, b)| a * b).sum::<f64>())
+                    .sum();
+                let expected = volume()
+                    * (0..6)
+                        .map(|r| eps[r] * (0..6).map(|s| d[r][s] * eps[s]).sum::<f64>())
+                        .sum::<f64>();
+                assert!((energy - expected).abs() < 1e-9 * expected, "{eps:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn tet_stresses_of_a_uniform_strain_are_d_eps_at_every_gauss_point() {
+        let eps = [1e-3, -2e-3, 0.5e-3, 3e-3, -1e-3, 2e-3];
+        for (c, _, d) in kernels() {
+            let (rule, shape): (&[TetGaussPoint], SolidShapeFn) = if c.len() == 4 {
+                (&TETRA_1, tet4)
+            } else {
+                (&TETRA_4, tet10)
+            };
+            let sigma: [f64; 6] = std::array::from_fn(|r| (0..6).map(|s| d[r][s] * eps[s]).sum());
+            for p in solid_stresses(&c, rule, shape, &d, &uniform_strain(&c, eps)) {
+                let got = [
+                    p.sigma_xx, p.sigma_yy, p.sigma_zz, p.tau_yz, p.tau_xz, p.tau_xy,
+                ];
+                for (g, e) in got.iter().zip(sigma) {
+                    assert!((g - e).abs() < 1e-9 * d[0][0] * 1e-3, "{got:?}");
+                }
             }
         }
     }

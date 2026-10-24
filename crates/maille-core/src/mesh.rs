@@ -1,5 +1,6 @@
 use crate::error::MailleError;
 use crate::material::{Material, Section};
+use crate::shape::TET10_EDGES;
 
 /// Position d'un Node. Les Bar et Beam (1D) n'utilisent que `x`, les triangles (2D) `x` et `y`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -21,7 +22,7 @@ impl Node {
 }
 
 /// Degré de liberté d'un Node : U déplacement axial (Bar), V flèche et Theta rotation (Beam),
-/// Ux et Uy déplacements dans le plan (triangles).
+/// Ux et Uy déplacements dans le plan (triangles), Ux, Uy et Uz (tétraèdres).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dof {
     U,
@@ -29,6 +30,7 @@ pub enum Dof {
     Theta,
     Ux,
     Uy,
+    Uz,
 }
 
 /// Élément barre entre deux Nodes (indices dans `Mesh::nodes`).
@@ -122,12 +124,48 @@ impl Tri6 {
     }
 }
 
+/// Tétraèdre à 4 Nodes (déformation constante). Vu depuis le Node 3, la face 0-1-2 tourne dans le
+/// sens antihoraire.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Tet4 {
+    pub nodes: [usize; 4],
+    pub material: Material,
+}
+
+impl Tet4 {
+    pub fn new(nodes: [usize; 4], material: Material) -> Result<Self, MailleError> {
+        if material.poisson.is_none() {
+            return Err(MailleError::MissingPoisson);
+        }
+        Ok(Self { nodes, material })
+    }
+}
+
+/// Tétraèdre quadratique à 10 Nodes : sommets 0 à 3 (orientés comme le Tet4), puis milieux d'arêtes
+/// 4 (0-1), 5 (1-2), 6 (2-0), 7 (0-3), 8 (1-3), 9 (2-3). Arêtes droites seulement.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Tet10 {
+    pub nodes: [usize; 10],
+    pub material: Material,
+}
+
+impl Tet10 {
+    pub fn new(nodes: [usize; 10], material: Material) -> Result<Self, MailleError> {
+        if material.poisson.is_none() {
+            return Err(MailleError::MissingPoisson);
+        }
+        Ok(Self { nodes, material })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Element {
     Bar(Bar),
     Beam(Beam),
     Tri3(Tri3),
     Tri6(Tri6),
+    Tet4(Tet4),
+    Tet10(Tet10),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,6 +173,7 @@ enum Family {
     Bar,
     Beam,
     Plane,
+    Solid,
 }
 
 impl Element {
@@ -144,6 +183,8 @@ impl Element {
             Self::Beam(e) => &e.nodes,
             Self::Tri3(e) => &e.nodes,
             Self::Tri6(e) => &e.nodes,
+            Self::Tet4(e) => &e.nodes,
+            Self::Tet10(e) => &e.nodes,
         }
     }
 
@@ -152,6 +193,7 @@ impl Element {
             Self::Bar(_) => Family::Bar,
             Self::Beam(_) => Family::Beam,
             Self::Tri3(_) | Self::Tri6(_) => Family::Plane,
+            Self::Tet4(_) | Self::Tet10(_) => Family::Solid,
         }
     }
 }
@@ -203,6 +245,20 @@ impl Mesh {
                         }
                     }
                 }
+                Element::Tet4(t) => mesh.check_tetrahedron(i, &t.nodes)?,
+                Element::Tet10(t) => {
+                    mesh.check_tetrahedron(i, &t.nodes)?;
+                    let c = mesh.coords_3d(&t.nodes);
+                    for (k, (a, b)) in TET10_EDGES.into_iter().enumerate() {
+                        let d = |p: &[f64; 3], q: &[f64; 3]| {
+                            (0..3).map(|j| (p[j] - q[j]).powi(2)).sum::<f64>().sqrt()
+                        };
+                        let middle = std::array::from_fn(|j| (c[a][j] + c[b][j]) / 2.0);
+                        if d(&c[4 + k], &middle) > 1e-9 * d(&c[a], &c[b]) {
+                            return Err(MailleError::CurvedTetrahedron { element: i });
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -235,6 +291,42 @@ impl Mesh {
         Ok(())
     }
 
+    /// Vérifie le volume et l'orientation d'un tétraèdre ; seuls ses 4 premiers Nodes (sommets) comptent.
+    /// ν est vérifié par `Tet4::new` et `Tet10::new`.
+    fn check_tetrahedron(&self, element: usize, nodes: &[usize]) -> Result<(), MailleError> {
+        let c = self.coords_3d(&nodes[..4]);
+        let e: [[f64; 3]; 3] =
+            std::array::from_fn(|k| std::array::from_fn(|j| c[k + 1][j] - c[0][j]));
+        // 6 V = e1 · (e2 × e3), positif pour l'orientation de `Tet4`
+        let six_v = e[0][0] * (e[1][1] * e[2][2] - e[1][2] * e[2][1])
+            - e[0][1] * (e[1][0] * e[2][2] - e[1][2] * e[2][0])
+            + e[0][2] * (e[1][0] * e[2][1] - e[1][1] * e[2][0]);
+        let longest = TET10_EDGES
+            .iter()
+            .map(|&(a, b)| {
+                (0..3)
+                    .map(|j| (c[b][j] - c[a][j]).powi(2))
+                    .sum::<f64>()
+                    .sqrt()
+            })
+            .fold(0.0_f64, f64::max);
+        if six_v.abs() <= 1e-12 * longest.powi(3) {
+            return Err(MailleError::DegenerateTetrahedron { element });
+        }
+        if six_v < 0.0 {
+            return Err(MailleError::InvertedTetrahedron { element });
+        }
+        Ok(())
+    }
+
+    /// Positions (x, y, z) des Nodes donnés (indices valides garantis par `new`).
+    pub fn coords_3d(&self, nodes: &[usize]) -> Vec<[f64; 3]> {
+        nodes
+            .iter()
+            .map(|&n| [self.nodes[n].x, self.nodes[n].y, self.nodes[n].z])
+            .collect()
+    }
+
     /// Positions (x, y) des Nodes donnés (indices valides garantis par `new`).
     pub fn coords(&self, nodes: &[usize]) -> Vec<[f64; 2]> {
         nodes
@@ -250,11 +342,13 @@ impl Mesh {
         (self.nodes[b].x - self.nodes[a].x).abs()
     }
 
-    /// 1 DOF par Node pour des Bar, 2 pour des Beam et des triangles (`new` interdit le mélange).
+    /// 1 DOF par Node pour des Bar, 2 pour des Beam et des triangles, 3 pour des tétraèdres
+    /// (`new` interdit le mélange).
     pub fn dofs_per_node(&self) -> usize {
         match self.elements[0].family() {
             Family::Bar => 1,
             Family::Beam | Family::Plane => 2,
+            Family::Solid => 3,
         }
     }
 
@@ -267,6 +361,9 @@ impl Mesh {
             (Family::Bar, Dof::U) => Ok(node),
             (Family::Beam, Dof::V) | (Family::Plane, Dof::Ux) => Ok(2 * node),
             (Family::Beam, Dof::Theta) | (Family::Plane, Dof::Uy) => Ok(2 * node + 1),
+            (Family::Solid, Dof::Ux) => Ok(3 * node),
+            (Family::Solid, Dof::Uy) => Ok(3 * node + 1),
+            (Family::Solid, Dof::Uz) => Ok(3 * node + 2),
             _ => Err(MailleError::InvalidDof { node, dof }),
         }
     }

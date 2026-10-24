@@ -89,7 +89,7 @@ impl Model {
             let equivalent = match e {
                 Element::Bar(_) => bar_equivalent_load(d.value, mesh.length(d.element)).to_vec(),
                 Element::Beam(_) => beam_equivalent_load(d.value, mesh.length(d.element)).to_vec(),
-                Element::Tri3(_) | Element::Tri6(_) => {
+                Element::Tri3(_) | Element::Tri6(_) | Element::Tet4(_) | Element::Tet10(_) => {
                     return Err(MailleError::UnsupportedDistributedLoad { element: d.element })
                 }
             };

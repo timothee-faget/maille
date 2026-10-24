@@ -51,10 +51,24 @@ pub enum MailleError {
     UnsupportedDistributedLoad {
         element: usize,
     },
+    /// Tétraèdre de volume nul : Nodes coplanaires ou confondus.
+    DegenerateTetrahedron {
+        element: usize,
+    },
+    /// Tétraèdre retourné (volume négatif) : échanger deux de ses Nodes.
+    InvertedTetrahedron {
+        element: usize,
+    },
+    /// Tet10 dont un Node milieu n'est pas au milieu de son arête (arêtes courbes non supportées).
+    CurvedTetrahedron {
+        element: usize,
+    },
     /// Matrice non définie positive : structure non contrainte ou mécanisme.
     Singular,
     /// Contraintes aux Nodes demandées sur un Mesh de Bar ou de Beam.
-    NoPlaneStresses,
+    NoStresses,
+    /// Traitement réservé aux triangles (le viewer est 2D).
+    PlaneMeshRequired,
     /// Le Field ne correspond pas au Mesh (nombre d'Elements ou de points de Gauss).
     FieldMeshMismatch,
 }
@@ -79,7 +93,7 @@ impl fmt::Display for MailleError {
             ),
             Self::MixedElementTypes => write!(
                 f,
-                "le Mesh mélange des Elements de familles différentes (Bar, Beam, triangles) : n'en garder qu'une"
+                "le Mesh mélange des Elements de familles différentes (Bar, Beam, triangles, tétraèdres) : n'en garder qu'une"
             ),
             Self::ReversedBeam { element } => write!(
                 f,
@@ -87,7 +101,7 @@ impl fmt::Display for MailleError {
             ),
             Self::InvalidDof { node, dof } => write!(
                 f,
-                "le DOF {dof:?} du Node {node} n'existe pas pour ce Mesh (Bar : U ; Beam : V, Theta ; triangles : Ux, Uy)"
+                "le DOF {dof:?} du Node {node} n'existe pas pour ce Mesh (Bar : U ; Beam : V, Theta ; triangles : Ux, Uy ; tétraèdres : Ux, Uy, Uz)"
             ),
             Self::UnknownElement { element } => {
                 write!(f, "l'Element {element} n'existe pas dans le Mesh")
@@ -106,20 +120,36 @@ impl fmt::Display for MailleError {
             ),
             Self::MissingPoisson => write!(
                 f,
-                "le Material d'un triangle n'a pas de coefficient de Poisson : le créer avec Material::with_poisson"
+                "le Material d'un triangle ou d'un tétraèdre n'a pas de coefficient de Poisson : le créer avec Material::with_poisson"
             ),
             Self::UnsupportedDistributedLoad { element } => write!(
                 f,
                 "l'Element {element} ne supporte pas de charge répartie (Bar et Beam seulement) : utiliser des Load nodales"
+            ),
+            Self::DegenerateTetrahedron { element } => write!(
+                f,
+                "le tétraèdre {element} a un volume nul : ses Nodes sont coplanaires ou confondus"
+            ),
+            Self::InvertedTetrahedron { element } => write!(
+                f,
+                "le tétraèdre {element} est retourné : vu depuis son Node 3, la face 0-1-2 doit tourner dans le sens antihoraire. Échanger les sommets 1 et 2 (pour un Tet10, échanger aussi les milieux 4 et 6, puis 8 et 9)"
+            ),
+            Self::CurvedTetrahedron { element } => write!(
+                f,
+                "le Tet10 {element} a un Node milieu qui n'est pas au milieu de son arête : seules les arêtes droites sont supportées"
             ),
             Self::Singular => write!(
                 f,
                 "système singulier : la structure n'est pas assez contrainte (mouvement de corps rigide) \
                  ou contient un mécanisme. Ajouter une BC ou vérifier la connectivité des Elements"
             ),
-            Self::NoPlaneStresses => write!(
+            Self::NoStresses => write!(
                 f,
-                "les contraintes aux Nodes n'existent que pour les triangles (Tri3, Tri6), pas pour les Bar et Beam"
+                "les contraintes aux Nodes n'existent que pour les triangles et les tétraèdres, pas pour les Bar et Beam"
+            ),
+            Self::PlaneMeshRequired => write!(
+                f,
+                "seuls les Mesh de triangles (Tri3, Tri6) sont pris en charge ici : le viewer est 2D pour l'instant"
             ),
             Self::FieldMeshMismatch => write!(
                 f,

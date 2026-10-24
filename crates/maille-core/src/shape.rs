@@ -2,6 +2,10 @@
 //! et passage aux coordonnées physiques (x, y).
 //!
 //! Numérotation Tri6 : sommets 0, 1, 2 puis milieux d'arêtes 3 (0-1), 4 (1-2), 5 (2-0).
+//!
+//! Même chose pour les tétraèdres sur le tétraèdre de référence (ξ, η, ζ), vers (x, y, z).
+//! Numérotation Tet10 (comme Abaqus) : sommets 0, 1, 2, 3 puis milieux d'arêtes 4 (0-1), 5 (1-2),
+//! 6 (2-0), 7 (0-3), 8 (1-3), 9 (2-3).
 
 /// Valeurs N_i et dérivées [∂N_i/∂ξ, ∂N_i/∂η] du Tri3 (linéaire).
 pub fn tri3(xi: f64, eta: f64) -> ([f64; 3], [[f64; 2]; 3]) {
@@ -79,6 +83,86 @@ impl Mapping {
                     (-j[1][0] * d[0] + j[0][0] * d[1]) / det,
                 ]
             })
+            .collect();
+        Self { det, dn_dx }
+    }
+}
+
+/// Fonction de forme d'un tétraèdre : (ξ, η, ζ) → (valeurs N_i, dérivées [∂N_i/∂ξ, ∂N_i/∂η, ∂N_i/∂ζ]).
+pub type SolidShapeFn = fn(f64, f64, f64) -> (Vec<f64>, Vec<[f64; 3]>);
+
+/// Coordonnées barycentriques L_i du tétraèdre de référence et leurs dérivées (constantes).
+fn tet_barycentric(xi: f64, eta: f64, zeta: f64) -> ([f64; 4], [[f64; 3]; 4]) {
+    (
+        [1.0 - xi - eta - zeta, xi, eta, zeta],
+        [
+            [-1.0, -1.0, -1.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+    )
+}
+
+/// Valeurs N_i = L_i et dérivées du Tet4 (linéaire).
+pub fn tet4(xi: f64, eta: f64, zeta: f64) -> (Vec<f64>, Vec<[f64; 3]>) {
+    let (l, dl) = tet_barycentric(xi, eta, zeta);
+    (l.to_vec(), dl.to_vec())
+}
+
+/// Arêtes du Tet10 dans l'ordre de ses Nodes milieux 4 à 9.
+pub const TET10_EDGES: [(usize, usize); 6] = [(0, 1), (1, 2), (2, 0), (0, 3), (1, 3), (2, 3)];
+
+/// Valeurs et dérivées du Tet10 (quadratique) : sommets L_i (2 L_i − 1), milieux 4 L_a L_b.
+pub fn tet10(xi: f64, eta: f64, zeta: f64) -> (Vec<f64>, Vec<[f64; 3]>) {
+    let (l, dl) = tet_barycentric(xi, eta, zeta);
+    let mut n = Vec::with_capacity(10);
+    let mut dn = Vec::with_capacity(10);
+    for i in 0..4 {
+        n.push(l[i] * (2.0 * l[i] - 1.0));
+        dn.push(dl[i].map(|d| (4.0 * l[i] - 1.0) * d));
+    }
+    for (a, b) in TET10_EDGES {
+        n.push(4.0 * l[a] * l[b]);
+        dn.push(std::array::from_fn(|c| {
+            4.0 * (l[a] * dl[b][c] + l[b] * dl[a][c])
+        }));
+    }
+    (n, dn)
+}
+
+/// Transformation du tétraèdre de référence vers l'Element réel, en un point.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Mapping3d {
+    /// Déterminant du jacobien J = ∂(x, y, z)/∂(ξ, η, ζ). Positif si le tétraèdre est bien orienté.
+    pub det: f64,
+    /// Dérivées physiques [∂N_i/∂x, ∂N_i/∂y, ∂N_i/∂z].
+    pub dn_dx: Vec<[f64; 3]>,
+}
+
+impl Mapping3d {
+    /// `coords` : positions (x, y, z) des Nodes ; `dn` : dérivées par rapport à (ξ, η, ζ) au même point.
+    /// Suppose `det ≠ 0` (garanti par `Mesh::new`, qui refuse les tétraèdres dégénérés).
+    pub fn new(coords: &[[f64; 3]], dn: &[[f64; 3]]) -> Self {
+        // j[i][c] = Σ_k ∂N_k/∂(ξ, η, ζ)[i] · coords_k[c]
+        let mut j = [[0.0; 3]; 3];
+        for (c, d) in coords.iter().zip(dn) {
+            for (row, dn_i) in j.iter_mut().zip(d) {
+                for (r, x) in row.iter_mut().zip(c) {
+                    *r += dn_i * x;
+                }
+            }
+        }
+        // J⁻¹ = cof(J)ᵀ / det
+        let cof = |r: usize, c: usize| {
+            let (r1, r2, c1, c2) = ((r + 1) % 3, (r + 2) % 3, (c + 1) % 3, (c + 2) % 3);
+            j[r1][c1] * j[r2][c2] - j[r1][c2] * j[r2][c1]
+        };
+        let det: f64 = (0..3).map(|c| j[0][c] * cof(0, c)).sum();
+        let inv: [[f64; 3]; 3] = std::array::from_fn(|r| std::array::from_fn(|c| cof(c, r) / det));
+        let dn_dx = dn
+            .iter()
+            .map(|d| std::array::from_fn(|r| (0..3).map(|c| inv[r][c] * d[c]).sum()))
             .collect();
         Self { det, dn_dx }
     }
@@ -211,5 +295,103 @@ mod tests {
             assert!((gx[0] - 1.0).abs() < 1e-13 && gx[1].abs() < 1e-13);
             assert!(gy[0].abs() < 1e-13 && (gy[1] - 1.0).abs() < 1e-13);
         }
+    }
+
+    const TET10_NODES: [[f64; 3]; 10] = [
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [0.5, 0.0, 0.0],
+        [0.5, 0.5, 0.0],
+        [0.0, 0.5, 0.0],
+        [0.0, 0.0, 0.5],
+        [0.5, 0.0, 0.5],
+        [0.0, 0.5, 0.5],
+    ];
+    const TET_SAMPLES: [[f64; 3]; 3] = [[0.1, 0.2, 0.3], [0.25, 0.25, 0.25], [0.6, 0.1, 0.05]];
+
+    #[test]
+    fn tet_shape_functions_are_one_at_their_node_and_zero_at_the_others() {
+        for (shape, count) in [(tet4 as SolidShapeFn, 4), (tet10, 10)] {
+            for (j, p) in TET10_NODES.iter().take(count).enumerate() {
+                let (n, _) = shape(p[0], p[1], p[2]);
+                for (i, v) in n.iter().enumerate() {
+                    assert!((v - if i == j { 1.0 } else { 0.0 }).abs() < 1e-15);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tet10_reproduces_quadratic_fields_and_its_derivatives_match_differences() {
+        let q = |x: f64, y: f64, z: f64| {
+            1.0 + x - 2.0 * y + z + 3.0 * x * x - x * y + 2.0 * y * z - z * z
+        };
+        let h = 1e-6;
+        for p in TET_SAMPLES {
+            let (n, d) = tet10(p[0], p[1], p[2]);
+            let interp: f64 = n
+                .iter()
+                .zip(TET10_NODES)
+                .map(|(n, c)| n * q(c[0], c[1], c[2]))
+                .sum();
+            assert!((interp - q(p[0], p[1], p[2])).abs() < 1e-14);
+            assert!((n.iter().sum::<f64>() - 1.0).abs() < 1e-15);
+            for c in 0..3 {
+                let mut plus = p;
+                let mut minus = p;
+                plus[c] += h;
+                minus[c] -= h;
+                let (np, _) = tet10(plus[0], plus[1], plus[2]);
+                let (nm, _) = tet10(minus[0], minus[1], minus[2]);
+                for i in 0..10 {
+                    assert!((d[i][c] - (np[i] - nm[i]) / (2.0 * h)).abs() < 1e-8);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tet_mapping_gives_volume_and_recovers_the_gradient_of_x_y_z() {
+        // tétraèdre quelconque, Tet10 à arêtes droites : 6 V = det, ∇x = (1, 0, 0), etc.
+        let v = [
+            [1.0, 0.5, 0.0],
+            [3.0, 1.0, 0.5],
+            [1.5, 2.5, 0.0],
+            [1.2, 1.0, 2.0],
+        ];
+        let mut coords = v.to_vec();
+        for (a, b) in TET10_EDGES {
+            coords.push(std::array::from_fn(|c| (v[a][c] + v[b][c]) / 2.0));
+        }
+        let edge = |k: usize| -> [f64; 3] { std::array::from_fn(|c| v[k][c] - v[0][c]) };
+        let (e1, e2, e3) = (edge(1), edge(2), edge(3));
+        let six_v = e1[0] * (e2[1] * e3[2] - e2[2] * e3[1])
+            - e1[1] * (e2[0] * e3[2] - e2[2] * e3[0])
+            + e1[2] * (e2[0] * e3[1] - e2[1] * e3[0]);
+        for p in TET_SAMPLES {
+            let (_, dn) = tet10(p[0], p[1], p[2]);
+            let m = Mapping3d::new(&coords, &dn);
+            assert!((m.det - six_v).abs() < 1e-13);
+            for x in 0..3 {
+                for k in 0..3 {
+                    let g: f64 = m.dn_dx.iter().zip(&coords).map(|(g, c)| g[k] * c[x]).sum();
+                    assert!((g - if k == x { 1.0 } else { 0.0 }).abs() < 1e-13);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn inverted_tetrahedron_has_negative_determinant() {
+        let coords = [
+            [0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        let (_, dn) = tet4(0.25, 0.25, 0.25);
+        assert!(Mapping3d::new(&coords, &dn).det < 0.0);
     }
 }

@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 
 use maille_core::mesh::{Element, Mesh};
-use maille_core::results::{nodal_stresses, Field, PlaneStress};
+use maille_core::results::{nodal_stresses, Field, Stress};
 use maille_core::MailleError;
 
 /// Part de la taille du Mesh occupée par le plus grand déplacement, dans la déformée amplifiée.
@@ -45,7 +45,7 @@ pub struct Scene {
     nodes: Vec<[f64; 2]>,
     /// (ux, uy) par Node.
     displacements: Vec<[f64; 2]>,
-    stresses: Vec<PlaneStress>,
+    stresses: Vec<Stress>,
     /// Triangles à remplir (indices de Nodes, antihoraires) : 1 par Tri3, 4 par Tri6.
     pub triangles: Vec<[u32; 3]>,
     /// Segments du contour des Elements, sans doublon : les arêtes internes des Tri6 découpés
@@ -54,7 +54,7 @@ pub struct Scene {
 }
 
 impl Scene {
-    /// Erreur si le Mesh n'est pas fait de triangles (Bar, Beam) ou si le Field vient d'un autre Mesh.
+    /// Erreur si le Mesh n'est pas fait de triangles (Bar, Beam, tétraèdres) ou si le Field vient d'un autre Mesh.
     pub fn new(mesh: &Mesh, field: &Field) -> Result<Self, MailleError> {
         let stresses = nodal_stresses(mesh, field)?;
         let mut triangles = Vec::new();
@@ -69,7 +69,8 @@ impl Scene {
                     &[[0, 3], [3, 1], [1, 4], [4, 2], [2, 5], [5, 0]],
                 ),
                 // déjà refusé par `nodal_stresses`
-                Element::Bar(_) | Element::Beam(_) => return Err(MailleError::NoPlaneStresses),
+                Element::Bar(_) | Element::Beam(_) => return Err(MailleError::NoStresses),
+                Element::Tet4(_) | Element::Tet10(_) => return Err(MailleError::PlaneMeshRequired),
             };
             triangles.extend(tris.iter().map(|t| t.map(|k| n[k])));
             edges.extend(
@@ -164,13 +165,16 @@ mod tests {
 
     /// Field fabriqué à la main : contrainte uniforme (σxx, σyy, τxy) et déplacements donnés.
     fn field(mesh: &Mesh, sigma: [f64; 3], displacements: Vec<f64>) -> Field {
-        let stress = PlaneStress {
+        let stress = Stress {
             x: 0.0,
             y: 0.0,
+            z: 0.0,
             sigma_xx: sigma[0],
             sigma_yy: sigma[1],
-            tau_xy: sigma[2],
             sigma_zz: 0.0,
+            tau_xy: sigma[2],
+            tau_yz: 0.0,
+            tau_xz: 0.0,
         };
         let stresses = mesh
             .elements
@@ -315,7 +319,7 @@ mod tests {
         };
         assert_eq!(
             Scene::new(&mesh, &field).err(),
-            Some(MailleError::NoPlaneStresses)
+            Some(MailleError::NoStresses)
         );
     }
 }

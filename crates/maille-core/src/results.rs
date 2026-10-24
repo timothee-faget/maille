@@ -1,24 +1,31 @@
 use crate::error::MailleError;
 use crate::mesh::{Element, Mesh};
 
-/// Contraintes planes en un point de Gauss d'un triangle.
+/// Contraintes en un point (point de Gauss ou Node).
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PlaneStress {
-    /// Position (x, y) du point.
+pub struct Stress {
+    /// Position (x, y, z) du point.
     pub x: f64,
     pub y: f64,
+    pub z: f64,
     pub sigma_xx: f64,
     pub sigma_yy: f64,
-    pub tau_xy: f64,
-    /// Nulle en contraintes planes, ν (σxx + σyy) en déformations planes.
+    /// Triangles : nulle en contraintes planes, ν (σxx + σyy) en déformations planes.
     pub sigma_zz: f64,
+    pub tau_xy: f64,
+    /// Nulle pour les triangles.
+    pub tau_yz: f64,
+    /// Nulle pour les triangles.
+    pub tau_xz: f64,
 }
 
-impl PlaneStress {
+impl Stress {
     /// Contrainte équivalente de von Mises.
     pub fn von_mises(&self) -> f64 {
         let (a, b, c) = (self.sigma_xx, self.sigma_yy, self.sigma_zz);
-        (a * a + b * b + c * c - a * b - b * c - c * a + 3.0 * self.tau_xy * self.tau_xy).sqrt()
+        let shear =
+            self.tau_xy * self.tau_xy + self.tau_yz * self.tau_yz + self.tau_xz * self.tau_xz;
+        (a * a + b * b + c * c - a * b - b * c - c * a + 3.0 * shear).sqrt()
     }
 }
 
@@ -30,11 +37,14 @@ pub struct Field {
     pub reactions: Vec<f64>,
     /// Contraintes aux points de Gauss de chaque Element (indexé comme `Mesh::elements`).
     /// Vide pour les Bar et Beam.
-    pub stresses: Vec<Vec<PlaneStress>>,
+    pub stresses: Vec<Vec<Stress>>,
 }
 
 /// Extrapolation du Tri3 : son unique point de Gauss donne la valeur de ses 3 Nodes.
 const TRI3_EXTRAPOLATION: [&[f64]; 3] = [&[1.0]; 3];
+
+/// Extrapolation du Tet4 : même principe que le Tri3.
+const TET4_EXTRAPOLATION: [&[f64]; 4] = [&[1.0]; 4];
 
 /// Extrapolation du Tri6 : la ligne k donne les poids des 3 points de Gauss (`TRIANGLE_3`, le point g
 /// est près du sommet g) pour la valeur au Node k. Les points de Gauss forment le triangle de
@@ -49,31 +59,56 @@ const TRI6_EXTRAPOLATION: [&[f64]; 6] = [
     &[2.0 / 3.0, -1.0 / 3.0, 2.0 / 3.0], // milieu 2-0
 ];
 
-/// Contraintes lissées aux Nodes (indexées comme `Mesh::nodes`, `x`, `y` = position du Node) :
+/// Extrapolation du Tet10 depuis les 4 points de Gauss de `TETRA_4` (le point g est près du sommet g,
+/// coordonnée barycentrique a sur ce sommet, b sur les trois autres). Pour un champ linéaire de
+/// valeurs c_k aux sommets, f_g = (a − b) c_g + b Σc et Σf = Σc, donc c_k = Σ_g (δ_kg − b) f_g / (a − b),
+/// avec 1/(a − b) = √5 : poids (3√5 + 1)/4 sur son point, −(√5 − 1)/4 sur les autres. Un milieu
+/// d'arête prend la moyenne de ses deux sommets : φ/2 = (√5 + 1)/4 sur les deux points proches.
+const TET10_VERTEX: f64 = 1.927_050_983_124_842_4;
+const TET10_MIDDLE: f64 = 0.809_016_994_374_947_5;
+const TET10_OTHER: f64 = -0.309_016_994_374_947_45;
+const TET10_EXTRAPOLATION: [&[f64]; 10] = [
+    &[TET10_VERTEX, TET10_OTHER, TET10_OTHER, TET10_OTHER],
+    &[TET10_OTHER, TET10_VERTEX, TET10_OTHER, TET10_OTHER],
+    &[TET10_OTHER, TET10_OTHER, TET10_VERTEX, TET10_OTHER],
+    &[TET10_OTHER, TET10_OTHER, TET10_OTHER, TET10_VERTEX],
+    &[TET10_MIDDLE, TET10_MIDDLE, TET10_OTHER, TET10_OTHER], // milieu 0-1
+    &[TET10_OTHER, TET10_MIDDLE, TET10_MIDDLE, TET10_OTHER], // milieu 1-2
+    &[TET10_MIDDLE, TET10_OTHER, TET10_MIDDLE, TET10_OTHER], // milieu 2-0
+    &[TET10_MIDDLE, TET10_OTHER, TET10_OTHER, TET10_MIDDLE], // milieu 0-3
+    &[TET10_OTHER, TET10_MIDDLE, TET10_OTHER, TET10_MIDDLE], // milieu 1-3
+    &[TET10_OTHER, TET10_OTHER, TET10_MIDDLE, TET10_MIDDLE], // milieu 2-3
+];
+
+/// Contraintes lissées aux Nodes (indexées comme `Mesh::nodes`, `x`, `y`, `z` = position du Node) :
 /// extrapolées des points de Gauss vers les Nodes de chaque Element, puis moyennées composante par
 /// composante entre les Elements qui partagent un Node. Un Node isolé reçoit des contraintes nulles.
-pub fn nodal_stresses(mesh: &Mesh, field: &Field) -> Result<Vec<PlaneStress>, MailleError> {
+pub fn nodal_stresses(mesh: &Mesh, field: &Field) -> Result<Vec<Stress>, MailleError> {
     if field.stresses.len() != mesh.elements.len() {
         return Err(MailleError::FieldMeshMismatch);
     }
-    // somme de (σxx, σyy, τxy, σzz) et nombre d'Elements, par Node
-    let mut sum = vec![[0.0; 4]; mesh.nodes.len()];
+    // somme de (σxx, σyy, σzz, τxy, τyz, τxz) et nombre d'Elements, par Node
+    let mut sum = vec![[0.0; 6]; mesh.nodes.len()];
     let mut count = vec![0_usize; mesh.nodes.len()];
     for (e, points) in mesh.elements.iter().zip(&field.stresses) {
         let extrapolation: &[&[f64]] = match e {
             Element::Tri3(_) => &TRI3_EXTRAPOLATION,
             Element::Tri6(_) => &TRI6_EXTRAPOLATION,
-            Element::Bar(_) | Element::Beam(_) => return Err(MailleError::NoPlaneStresses),
+            Element::Tet4(_) => &TET4_EXTRAPOLATION,
+            Element::Tet10(_) => &TET10_EXTRAPOLATION,
+            Element::Bar(_) | Element::Beam(_) => return Err(MailleError::NoStresses),
         };
         if points.len() != extrapolation[0].len() {
             return Err(MailleError::FieldMeshMismatch);
         }
         for (&n, weights) in e.nodes().iter().zip(extrapolation) {
             for (p, w) in points.iter().zip(weights.iter()) {
-                sum[n][0] += w * p.sigma_xx;
-                sum[n][1] += w * p.sigma_yy;
-                sum[n][2] += w * p.tau_xy;
-                sum[n][3] += w * p.sigma_zz;
+                let components = [
+                    p.sigma_xx, p.sigma_yy, p.sigma_zz, p.tau_xy, p.tau_yz, p.tau_xz,
+                ];
+                for (s, c) in sum[n].iter_mut().zip(components) {
+                    *s += w * c;
+                }
             }
             count[n] += 1;
         }
@@ -84,13 +119,16 @@ pub fn nodal_stresses(mesh: &Mesh, field: &Field) -> Result<Vec<PlaneStress>, Ma
         .zip(sum.iter().zip(&count))
         .map(|(node, (s, &c))| {
             let c = c.max(1) as f64;
-            PlaneStress {
+            Stress {
                 x: node.x,
                 y: node.y,
+                z: node.z,
                 sigma_xx: s[0] / c,
                 sigma_yy: s[1] / c,
-                tau_xy: s[2] / c,
-                sigma_zz: s[3] / c,
+                sigma_zz: s[2] / c,
+                tau_xy: s[3] / c,
+                tau_yz: s[4] / c,
+                tau_xz: s[5] / c,
             }
         })
         .collect())
@@ -101,7 +139,7 @@ mod tests {
     use super::*;
     use crate::material::{Material, Section};
     use crate::mesh::{Bar, Node, PlaneState, Tri3};
-    use crate::quadrature::TRIANGLE_3;
+    use crate::quadrature::{TETRA_4, TRIANGLE_3};
 
     #[test]
     fn tri6_extrapolation_reproduces_a_linear_function_at_the_six_nodes() {
@@ -123,6 +161,28 @@ mod tests {
     }
 
     #[test]
+    fn tet10_extrapolation_reproduces_a_linear_function_at_the_ten_nodes() {
+        let f = |xi: f64, eta: f64, zeta: f64| 2.0 + 3.0 * xi - 5.0 * eta + 7.0 * zeta;
+        let at_gauss: Vec<f64> = TETRA_4.iter().map(|g| f(g.xi, g.eta, g.zeta)).collect();
+        let nodes = [
+            (0.0, 0.0, 0.0),
+            (1.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0),
+            (0.0, 0.0, 1.0),
+            (0.5, 0.0, 0.0),
+            (0.5, 0.5, 0.0),
+            (0.0, 0.5, 0.0),
+            (0.0, 0.0, 0.5),
+            (0.5, 0.0, 0.5),
+            (0.0, 0.5, 0.5),
+        ];
+        for (k, (weights, (xi, eta, zeta))) in TET10_EXTRAPOLATION.iter().zip(nodes).enumerate() {
+            let got: f64 = weights.iter().zip(&at_gauss).map(|(w, v)| w * v).sum();
+            assert!((got - f(xi, eta, zeta)).abs() < 1e-12, "Node {k}");
+        }
+    }
+
+    #[test]
     fn nodal_stresses_refuse_1d_meshes_and_foreign_fields() {
         let nodes = vec![Node::new_2d(0.0, 0.0), Node::new_2d(1.0, 0.0)];
         let bar = Bar {
@@ -136,10 +196,7 @@ mod tests {
             reactions: vec![0.0; 2],
             stresses: vec![Vec::new()],
         };
-        assert_eq!(
-            nodal_stresses(&bars, &empty),
-            Err(MailleError::NoPlaneStresses)
-        );
+        assert_eq!(nodal_stresses(&bars, &empty), Err(MailleError::NoStresses));
 
         let tri = Tri3::new(
             [0, 1, 2],
@@ -164,14 +221,17 @@ mod tests {
         );
     }
 
-    fn stress(sxx: f64, syy: f64, txy: f64, szz: f64) -> PlaneStress {
-        PlaneStress {
+    fn stress(sxx: f64, syy: f64, txy: f64, szz: f64) -> Stress {
+        Stress {
             x: 0.0,
             y: 0.0,
+            z: 0.0,
             sigma_xx: sxx,
             sigma_yy: syy,
-            tau_xy: txy,
             sigma_zz: szz,
+            tau_xy: txy,
+            tau_yz: 0.0,
+            tau_xz: 0.0,
         }
     }
 
@@ -188,6 +248,16 @@ mod tests {
     #[test]
     fn von_mises_of_hydrostatic_stress_is_zero() {
         assert!(stress(80.0, 80.0, 0.0, 80.0).von_mises().abs() < 1e-12);
+    }
+
+    #[test]
+    fn von_mises_of_out_of_plane_shear_is_sqrt3_tau() {
+        let s = Stress {
+            tau_yz: 30.0,
+            tau_xz: 40.0,
+            ..stress(0.0, 0.0, 0.0, 0.0)
+        };
+        assert!((s.von_mises() - 50.0 * 3.0_f64.sqrt()).abs() < 1e-12);
     }
 
     #[test]

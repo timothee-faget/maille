@@ -1,9 +1,12 @@
-use crate::element::{bar_stiffness, beam_stiffness, plane_d, plane_stiffness, plane_stresses};
+use crate::element::{
+    bar_stiffness, beam_stiffness, plane_d, plane_stiffness, plane_stresses, solid_d,
+    solid_stiffness, solid_stresses,
+};
 use crate::material::Material;
-use crate::mesh::{Element, Mesh, PlaneState, Tri3, Tri6};
-use crate::quadrature::{GaussPoint, TRIANGLE_1, TRIANGLE_3};
-use crate::results::PlaneStress;
-use crate::shape::{tri3_vec, tri6_vec, ShapeFn};
+use crate::mesh::{Element, Mesh, PlaneState, Tet10, Tet4, Tri3, Tri6};
+use crate::quadrature::{GaussPoint, TetGaussPoint, TETRA_1, TETRA_4, TRIANGLE_1, TRIANGLE_3};
+use crate::results::Stress;
+use crate::shape::{tet10, tet4, tri3_vec, tri6_vec, ShapeFn, SolidShapeFn};
 
 /// Indices globaux des DOF de l'Element `e`, dans l'ordre de sa matrice élémentaire.
 pub fn element_dofs(e: &Element) -> Vec<usize> {
@@ -13,6 +16,10 @@ pub fn element_dofs(e: &Element) -> Vec<usize> {
         Element::Beam(_) | Element::Tri3(_) | Element::Tri6(_) => {
             nodes.iter().flat_map(|&n| [2 * n, 2 * n + 1]).collect()
         }
+        Element::Tet4(_) | Element::Tet10(_) => nodes
+            .iter()
+            .flat_map(|&n| [3 * n, 3 * n + 1, 3 * n + 2])
+            .collect(),
     }
 }
 
@@ -29,6 +36,8 @@ pub fn element_stiffness(mesh: &Mesh, i: usize) -> Vec<Vec<f64>> {
             .collect(),
         Element::Tri3(t) => PlaneKernel::tri3(t).stiffness(mesh),
         Element::Tri6(t) => PlaneKernel::tri6(t).stiffness(mesh),
+        Element::Tet4(t) => SolidKernel::tet4(t).stiffness(mesh),
+        Element::Tet10(t) => SolidKernel::tet10(t).stiffness(mesh),
     }
 }
 
@@ -82,7 +91,7 @@ impl<'a> PlaneKernel<'a> {
         )
     }
 
-    fn stresses(&self, mesh: &Mesh, u: &[f64]) -> Vec<PlaneStress> {
+    fn stresses(&self, mesh: &Mesh, u: &[f64]) -> Vec<Stress> {
         let nu = self.nu();
         let d = plane_d(self.material.young, nu, self.state);
         let u_e: Vec<f64> = self
@@ -102,12 +111,72 @@ impl<'a> PlaneKernel<'a> {
     }
 }
 
+/// Ce qui distingue un tétraèdre d'un autre : règle de Gauss et fonctions de forme.
+struct SolidKernel<'a> {
+    nodes: &'a [usize],
+    material: &'a Material,
+    rule: &'static [TetGaussPoint],
+    shape: SolidShapeFn,
+}
+
+impl<'a> SolidKernel<'a> {
+    fn tet4(t: &'a Tet4) -> Self {
+        Self {
+            nodes: &t.nodes,
+            material: &t.material,
+            rule: &TETRA_1,
+            shape: tet4,
+        }
+    }
+
+    /// 4 points de Gauss : exact pour la rigidité d'un Tet10 à arêtes droites.
+    fn tet10(t: &'a Tet10) -> Self {
+        Self {
+            nodes: &t.nodes,
+            material: &t.material,
+            rule: &TETRA_4,
+            shape: tet10,
+        }
+    }
+
+    /// `Tet4::new` et `Tet10::new` garantissent que ν est présent.
+    fn d(&self) -> [[f64; 6]; 6] {
+        solid_d(self.material.young, self.material.poisson.unwrap_or(0.0))
+    }
+
+    fn stiffness(&self, mesh: &Mesh) -> Vec<Vec<f64>> {
+        solid_stiffness(
+            &mesh.coords_3d(self.nodes),
+            self.rule,
+            self.shape,
+            &self.d(),
+        )
+    }
+
+    fn stresses(&self, mesh: &Mesh, u: &[f64]) -> Vec<Stress> {
+        let u_e: Vec<f64> = self
+            .nodes
+            .iter()
+            .flat_map(|&n| [u[3 * n], u[3 * n + 1], u[3 * n + 2]])
+            .collect();
+        solid_stresses(
+            &mesh.coords_3d(self.nodes),
+            self.rule,
+            self.shape,
+            &self.d(),
+            &u_e,
+        )
+    }
+}
+
 /// Contraintes aux points de Gauss de l'Element `i`, à partir des déplacements globaux `u`.
 /// Vide pour les Bar et Beam.
-pub fn element_stresses(mesh: &Mesh, i: usize, u: &[f64]) -> Vec<PlaneStress> {
+pub fn element_stresses(mesh: &Mesh, i: usize, u: &[f64]) -> Vec<Stress> {
     match &mesh.elements[i] {
         Element::Tri3(t) => PlaneKernel::tri3(t).stresses(mesh, u),
         Element::Tri6(t) => PlaneKernel::tri6(t).stresses(mesh, u),
+        Element::Tet4(t) => SolidKernel::tet4(t).stresses(mesh, u),
+        Element::Tet10(t) => SolidKernel::tet10(t).stresses(mesh, u),
         Element::Bar(_) | Element::Beam(_) => Vec::new(),
     }
 }
