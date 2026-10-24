@@ -48,8 +48,15 @@ pub enum MailleError {
     CurvedTriangle {
         element: usize,
     },
-    /// Un Element 2D a besoin de ν : construire le Material avec `Material::with_poisson`.
-    MissingPoisson,
+    /// Un triangle ou un tétraèdre a besoin de ν en statique : construire le Material avec
+    /// `Material::with_poisson`.
+    MissingPoisson {
+        element: usize,
+    },
+    /// Une analyse statique a besoin de E.
+    MissingYoung {
+        element: usize,
+    },
     UnsupportedDistributedLoad {
         element: usize,
     },
@@ -118,9 +125,13 @@ impl fmt::Display for MailleError {
                 f,
                 "le Tri6 {element} a un Node milieu qui n'est pas au milieu de son arête : seuls les côtés droits sont supportés"
             ),
-            Self::MissingPoisson => write!(
+            Self::MissingPoisson { element } => write!(
                 f,
-                "le Material d'un triangle ou d'un tétraèdre n'a pas de coefficient de Poisson : le créer avec Material::with_poisson"
+                "le Material de l'Element {element} n'a pas de coefficient de Poisson, requis en statique pour un triangle ou un tétraèdre : le créer avec Material::with_poisson"
+            ),
+            Self::MissingYoung { element } => write!(
+                f,
+                "le Material de l'Element {element} n'a pas de module d'Young, requis en statique : le créer avec Material::new ou Material::with_poisson"
             ),
             Self::UnsupportedDistributedLoad { element } => write!(
                 f,

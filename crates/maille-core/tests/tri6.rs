@@ -271,15 +271,6 @@ fn gauss_points_of_a_tri6_are_centered_on_the_centroid() {
 #[test]
 fn invalid_tri6_inputs_are_typed_errors() {
     let m = Material::with_poisson(E, NU).unwrap();
-    assert_eq!(
-        Tri6::new(
-            [0, 1, 2, 3, 4, 5],
-            Material::new(E).unwrap(),
-            1.0,
-            PlaneState::Stress
-        ),
-        Err(MailleError::MissingPoisson)
-    );
     // Node milieu 3 (arête 0-1) déplacé : côté courbe refusé
     let mut nodes = vec![
         Node::new_2d(0.0, 0.0),
@@ -291,6 +282,19 @@ fn invalid_tri6_inputs_are_typed_errors() {
     ];
     let element = Element::Tri6(Tri6::new([0, 1, 2, 3, 4, 5], m, 1.0, PlaneState::Stress).unwrap());
     assert!(Mesh::new(nodes.clone(), vec![element]).is_ok());
+    // ν manquant : refusé par le Model statique
+    let no_poisson = Tri6::new(
+        [0, 1, 2, 3, 4, 5],
+        Material::new(E).unwrap(),
+        1.0,
+        PlaneState::Stress,
+    )
+    .unwrap();
+    let mesh = Mesh::new(nodes.clone(), vec![Element::Tri6(no_poisson)]).unwrap();
+    assert_eq!(
+        maille_core::model::Model::new(mesh, Vec::new(), Vec::new()),
+        Err(MailleError::MissingPoisson { element: 0 })
+    );
     nodes[3].y = 0.1;
     assert_eq!(
         Mesh::new(nodes.clone(), vec![element]),

@@ -280,15 +280,30 @@ fn invalid_plane_inputs_are_typed_errors() {
     let make =
         |nodes: [usize; 3]| Element::Tri3(Tri3::new(nodes, m, 1.0, PlaneState::Stress).unwrap());
 
-    // Poisson manquant ou hors bornes, épaisseur invalide
+    // Poisson manquant (refusé par le Model statique) ou hors bornes, épaisseur invalide
+    let no_poisson = Tri3::new(
+        [0, 1, 2],
+        Material::new(210e3).unwrap(),
+        1.0,
+        PlaneState::Stress,
+    )
+    .unwrap();
+    let mesh = Mesh::new(unit.clone(), vec![Element::Tri3(no_poisson)]).unwrap();
     assert_eq!(
-        Tri3::new(
-            [0, 1, 2],
-            Material::new(210e3).unwrap(),
-            1.0,
-            PlaneState::Stress
-        ),
-        Err(MailleError::MissingPoisson)
+        maille_core::model::Model::new(mesh, Vec::new(), Vec::new()),
+        Err(MailleError::MissingPoisson { element: 0 })
+    );
+    let thermal_only = Tri3::new(
+        [0, 1, 2],
+        Material::conductive(50.0).unwrap(),
+        1.0,
+        PlaneState::Stress,
+    )
+    .unwrap();
+    let mesh = Mesh::new(unit.clone(), vec![Element::Tri3(thermal_only)]).unwrap();
+    assert_eq!(
+        maille_core::model::Model::new(mesh, Vec::new(), Vec::new()),
+        Err(MailleError::MissingYoung { element: 0 })
     );
     for nu in [0.5, -1.0, f64::NAN] {
         assert!(matches!(

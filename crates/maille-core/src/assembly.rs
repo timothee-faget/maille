@@ -23,14 +23,19 @@ pub fn element_dofs(e: &Element) -> Vec<usize> {
     }
 }
 
+/// E du Material, que `Model::new` garantit présent en statique.
+fn young(material: &Material) -> f64 {
+    material.young.unwrap_or(0.0)
+}
+
 /// Matrice de rigidité de l'Element `i`, DOF dans l'ordre de `element_dofs`.
 pub fn element_stiffness(mesh: &Mesh, i: usize) -> Vec<Vec<f64>> {
     match &mesh.elements[i] {
-        Element::Bar(b) => bar_stiffness(b.material.young, b.section.area, mesh.length(i))
+        Element::Bar(b) => bar_stiffness(young(&b.material), b.section.area, mesh.length(i))
             .iter()
             .map(|r| r.to_vec())
             .collect(),
-        Element::Beam(b) => beam_stiffness(b.material.young, b.inertia, mesh.length(i))
+        Element::Beam(b) => beam_stiffness(young(&b.material), b.inertia, mesh.length(i))
             .iter()
             .map(|r| r.to_vec())
             .collect(),
@@ -75,13 +80,13 @@ impl<'a> PlaneKernel<'a> {
         }
     }
 
-    /// `Mesh::new` garantit que ν est présent.
+    /// `Model::new` garantit que ν est présent.
     fn nu(&self) -> f64 {
         self.material.poisson.unwrap_or(0.0)
     }
 
     fn stiffness(&self, mesh: &Mesh) -> Vec<Vec<f64>> {
-        let d = plane_d(self.material.young, self.nu(), self.state);
+        let d = plane_d(young(self.material), self.nu(), self.state);
         plane_stiffness(
             &mesh.coords(self.nodes),
             self.rule,
@@ -93,7 +98,7 @@ impl<'a> PlaneKernel<'a> {
 
     fn stresses(&self, mesh: &Mesh, u: &[f64]) -> Vec<Stress> {
         let nu = self.nu();
-        let d = plane_d(self.material.young, nu, self.state);
+        let d = plane_d(young(self.material), nu, self.state);
         let u_e: Vec<f64> = self
             .nodes
             .iter()
@@ -139,9 +144,9 @@ impl<'a> SolidKernel<'a> {
         }
     }
 
-    /// `Mesh::new` garantit que ν est présent.
+    /// `Model::new` garantit que ν est présent.
     fn d(&self) -> [[f64; 6]; 6] {
-        solid_d(self.material.young, self.material.poisson.unwrap_or(0.0))
+        solid_d(young(self.material), self.material.poisson.unwrap_or(0.0))
     }
 
     fn stiffness(&self, mesh: &Mesh) -> Vec<Vec<f64>> {

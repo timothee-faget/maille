@@ -26,13 +26,13 @@ fn box_mesh(n: [usize; 3], size: [f64; 3], quadratic: bool) -> Mesh {
         let elements = q
             .elements
             .iter()
-            .map(|&t| Element::Tet10(Tet10::new(t, material()).unwrap()))
+            .map(|&t| Element::Tet10(Tet10::new(t, material())))
             .collect();
         Mesh::new(q.nodes, elements).unwrap()
     } else {
         let elements = tets
             .iter()
-            .map(|&t| Element::Tet4(Tet4::new(t, material()).unwrap()))
+            .map(|&t| Element::Tet4(Tet4::new(t, material())))
             .collect();
         Mesh::new(nodes, elements).unwrap()
     }
@@ -287,7 +287,7 @@ fn bad_tetrahedra_are_refused_with_their_index() {
         Node::new(0.0, 0.0, 1.0),
         Node::new(1.0, 1.0, 0.0),
     ];
-    let tet = |n| Element::Tet4(Tet4::new(n, material()).unwrap());
+    let tet = |n| Element::Tet4(Tet4::new(n, material()));
     assert_eq!(
         Mesh::new(nodes.clone(), vec![tet([0, 1, 2, 3]), tet([0, 2, 1, 3])]),
         Err(MailleError::InvertedTetrahedron { element: 1 })
@@ -296,16 +296,12 @@ fn bad_tetrahedra_are_refused_with_their_index() {
         Mesh::new(nodes.clone(), vec![tet([0, 1, 2, 4])]),
         Err(MailleError::DegenerateTetrahedron { element: 0 })
     );
-    assert_eq!(
-        Tet4::new([0, 1, 2, 3], Material::new(E).unwrap()),
-        Err(MailleError::MissingPoisson)
-    );
 
     // Tet10 dont le milieu de l'arête 0-1 est déplacé
     let mut q = to_quadratic_tet(&nodes[..4], &[[0, 1, 2, 3]]);
     let m01 = q.mid(0, 1);
     q.nodes[m01].y += 0.1;
-    let tet10 = Element::Tet10(Tet10::new(q.elements[0], material()).unwrap());
+    let tet10 = Element::Tet10(Tet10::new(q.elements[0], material()));
     assert_eq!(
         Mesh::new(q.nodes, vec![tet10]),
         Err(MailleError::CurvedTetrahedron { element: 0 })
@@ -327,20 +323,17 @@ fn tetrahedra_have_three_dofs_and_no_rotation() {
 }
 
 #[test]
-fn tetrahedron_built_by_hand_without_poisson_is_refused() {
-    // champs publics : sans `Tet4::new`, c'est `Mesh::new` qui doit refuser ν absent
+fn tetrahedron_without_poisson_is_refused_by_the_static_model() {
     let nodes = vec![
         Node::new(0.0, 0.0, 0.0),
         Node::new(1.0, 0.0, 0.0),
         Node::new(0.0, 1.0, 0.0),
         Node::new(0.0, 0.0, 1.0),
     ];
-    let tet = Tet4 {
-        nodes: [0, 1, 2, 3],
-        material: Material::new(E).unwrap(),
-    };
+    let tet = Tet4::new([0, 1, 2, 3], Material::new(E).unwrap());
+    let mesh = Mesh::new(nodes, vec![Element::Tet4(tet)]).unwrap();
     assert_eq!(
-        Mesh::new(nodes, vec![Element::Tet4(tet)]),
-        Err(MailleError::MissingPoisson)
+        Model::new(mesh, Vec::new(), Vec::new()),
+        Err(MailleError::MissingPoisson { element: 0 })
     );
 }

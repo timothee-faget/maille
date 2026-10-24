@@ -83,9 +83,6 @@ impl Tri3 {
         thickness: f64,
         state: PlaneState,
     ) -> Result<Self, MailleError> {
-        if material.poisson.is_none() {
-            return Err(MailleError::MissingPoisson);
-        }
         Ok(Self {
             nodes,
             material,
@@ -112,9 +109,6 @@ impl Tri6 {
         thickness: f64,
         state: PlaneState,
     ) -> Result<Self, MailleError> {
-        if material.poisson.is_none() {
-            return Err(MailleError::MissingPoisson);
-        }
         Ok(Self {
             nodes,
             material,
@@ -133,11 +127,8 @@ pub struct Tet4 {
 }
 
 impl Tet4 {
-    pub fn new(nodes: [usize; 4], material: Material) -> Result<Self, MailleError> {
-        if material.poisson.is_none() {
-            return Err(MailleError::MissingPoisson);
-        }
-        Ok(Self { nodes, material })
+    pub fn new(nodes: [usize; 4], material: Material) -> Self {
+        Self { nodes, material }
     }
 }
 
@@ -150,11 +141,8 @@ pub struct Tet10 {
 }
 
 impl Tet10 {
-    pub fn new(nodes: [usize; 10], material: Material) -> Result<Self, MailleError> {
-        if material.poisson.is_none() {
-            return Err(MailleError::MissingPoisson);
-        }
-        Ok(Self { nodes, material })
+    pub fn new(nodes: [usize; 10], material: Material) -> Self {
+        Self { nodes, material }
     }
 }
 
@@ -185,6 +173,17 @@ impl Element {
             Self::Tri6(e) => &e.nodes,
             Self::Tet4(e) => &e.nodes,
             Self::Tet10(e) => &e.nodes,
+        }
+    }
+
+    pub fn material(&self) -> &Material {
+        match self {
+            Self::Bar(e) => &e.material,
+            Self::Beam(e) => &e.material,
+            Self::Tri3(e) => &e.material,
+            Self::Tri6(e) => &e.material,
+            Self::Tet4(e) => &e.material,
+            Self::Tet10(e) => &e.material,
         }
     }
 
@@ -232,16 +231,16 @@ impl Mesh {
                         return Err(MailleError::ReversedBeam { element: i });
                     }
                 }
-                Element::Tri3(t) => mesh.check_triangle(i, &t.nodes, &t.material)?,
+                Element::Tri3(t) => mesh.check_triangle(i, &t.nodes)?,
                 Element::Tri6(t) => {
-                    mesh.check_triangle(i, &t.nodes, &t.material)?;
+                    mesh.check_triangle(i, &t.nodes)?;
                     if !straight_edges(&mesh.coords(&t.nodes), &TRI6_EDGES, 3) {
                         return Err(MailleError::CurvedTriangle { element: i });
                     }
                 }
-                Element::Tet4(t) => mesh.check_tetrahedron(i, &t.nodes, &t.material)?,
+                Element::Tet4(t) => mesh.check_tetrahedron(i, &t.nodes)?,
                 Element::Tet10(t) => {
-                    mesh.check_tetrahedron(i, &t.nodes, &t.material)?;
+                    mesh.check_tetrahedron(i, &t.nodes)?;
                     if !straight_edges(&mesh.coords_3d(&t.nodes), &TET10_EDGES, 4) {
                         return Err(MailleError::CurvedTetrahedron { element: i });
                     }
@@ -252,16 +251,8 @@ impl Mesh {
         Ok(mesh)
     }
 
-    /// Vérifie ν, l'aire et l'orientation d'un triangle ; seuls ses 3 premiers Nodes (sommets) comptent.
-    fn check_triangle(
-        &self,
-        element: usize,
-        nodes: &[usize],
-        material: &Material,
-    ) -> Result<(), MailleError> {
-        if material.poisson.is_none() {
-            return Err(MailleError::MissingPoisson);
-        }
+    /// Vérifie l'aire et l'orientation d'un triangle ; seuls ses 3 premiers Nodes (sommets) comptent.
+    fn check_triangle(&self, element: usize, nodes: &[usize]) -> Result<(), MailleError> {
         let c = self.coords(&nodes[..3]);
         let area2 =
             (c[1][0] - c[0][0]) * (c[2][1] - c[0][1]) - (c[2][0] - c[0][0]) * (c[1][1] - c[0][1]);
@@ -278,16 +269,8 @@ impl Mesh {
         Ok(())
     }
 
-    /// Vérifie ν, le volume et l'orientation d'un tétraèdre ; seuls ses 4 premiers Nodes (sommets) comptent.
-    fn check_tetrahedron(
-        &self,
-        element: usize,
-        nodes: &[usize],
-        material: &Material,
-    ) -> Result<(), MailleError> {
-        if material.poisson.is_none() {
-            return Err(MailleError::MissingPoisson);
-        }
+    /// Vérifie le volume et l'orientation d'un tétraèdre ; seuls ses 4 premiers Nodes (sommets) comptent.
+    fn check_tetrahedron(&self, element: usize, nodes: &[usize]) -> Result<(), MailleError> {
         let c = self.coords_3d(&nodes[..4]);
         let e: [[f64; 3]; 3] =
             std::array::from_fn(|k| std::array::from_fn(|j| c[k + 1][j] - c[0][j]));

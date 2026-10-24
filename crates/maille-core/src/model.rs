@@ -37,7 +37,19 @@ pub struct Model {
 }
 
 impl Model {
+    /// Analyse statique linéaire. Le Material de chaque Element doit avoir E, et ν pour les
+    /// triangles et tétraèdres.
     pub fn new(mesh: Mesh, bcs: Vec<Bc>, loads: Vec<Load>) -> Result<Self, MailleError> {
+        for (i, e) in mesh.elements.iter().enumerate() {
+            let m = e.material();
+            if m.young.is_none() {
+                return Err(MailleError::MissingYoung { element: i });
+            }
+            let plane_or_solid = !matches!(e, Element::Bar(_) | Element::Beam(_));
+            if plane_or_solid && m.poisson.is_none() {
+                return Err(MailleError::MissingPoisson { element: i });
+            }
+        }
         let mut seen = vec![false; mesh.nodes.len() * mesh.dofs_per_node()];
         for bc in &bcs {
             let i = mesh.dof_index(bc.node, bc.dof)?;

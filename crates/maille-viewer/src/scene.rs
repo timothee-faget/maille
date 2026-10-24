@@ -361,7 +361,7 @@ mod tests {
             Node::new(0.0, 1.0, 0.0),
             Node::new(0.0, 0.0, 1.0),
         ];
-        let tet = Tet4::new([0, 1, 2, 3], material()).unwrap();
+        let tet = Tet4::new([0, 1, 2, 3], material());
         let mesh = Mesh::new(nodes, vec![Element::Tet4(tet)]).unwrap();
         let field = field(&mesh, [0.0; 3], vec![0.0; 12]);
         assert_eq!(Scene::new(&mesh, &field).err(), Some(SceneError::Solid));
