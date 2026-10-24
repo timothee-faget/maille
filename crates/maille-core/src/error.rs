@@ -53,6 +53,10 @@ pub enum MailleError {
     },
     /// Matrice non définie positive : structure non contrainte ou mécanisme.
     Singular,
+    /// Contraintes aux Nodes demandées sur un Mesh de Bar ou de Beam.
+    NoPlaneStresses,
+    /// Le Field ne correspond pas au Mesh (nombre d'Elements ou de points de Gauss).
+    FieldMeshMismatch,
 }
 
 impl fmt::Display for MailleError {
@@ -112,6 +116,14 @@ impl fmt::Display for MailleError {
                 f,
                 "système singulier : la structure n'est pas assez contrainte (mouvement de corps rigide) \
                  ou contient un mécanisme. Ajouter une BC ou vérifier la connectivité des Elements"
+            ),
+            Self::NoPlaneStresses => write!(
+                f,
+                "les contraintes aux Nodes n'existent que pour les triangles (Tri3, Tri6), pas pour les Bar et Beam"
+            ),
+            Self::FieldMeshMismatch => write!(
+                f,
+                "le Field ne vient pas de ce Mesh : passer le Field renvoyé par la résolution du Model construit sur ce Mesh"
             ),
         }
     }

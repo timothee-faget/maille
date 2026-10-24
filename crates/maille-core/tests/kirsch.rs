@@ -9,7 +9,7 @@ use maille_core::element::plane_d;
 use maille_core::material::Material;
 use maille_core::mesh::{Dof, Element, Mesh, Node, PlaneState, Tri3, Tri6};
 use maille_core::model::{Bc, Model};
-use maille_core::results::Field;
+use maille_core::results::{nodal_stresses, Field};
 
 const E: f64 = 210e3;
 const NU: f64 = 0.3;
@@ -99,6 +99,7 @@ fn kirsch_displacements_derive_to_kirsch_stresses() {
 }
 
 struct Solved {
+    mesh: Mesh,
     field: Field,
     dofs: usize,
 }
@@ -175,9 +176,12 @@ fn solve_kirsch(nr: usize, ntheta: usize, quadratic: bool) -> Solved {
         }
     }
     let mesh = Mesh::new(nodes, elements).unwrap();
-    let field = Model::new(mesh, bcs, vec![]).unwrap().solve().unwrap();
+    let field = Model::new(mesh.clone(), bcs, vec![])
+        .unwrap()
+        .solve()
+        .unwrap();
     let dofs = field.displacements.len();
-    Solved { field, dofs }
+    Solved { mesh, field, dofs }
 }
 
 /// (erreur RMS relative, erreur max / (3σ)) des contraintes aux points de Gauss contre Kirsch.
@@ -260,4 +264,36 @@ fn tri6_finds_the_stress_concentration_at_the_hole() {
         peak.sigma_xx
     );
     assert!(peak.sigma_xx > 0.95 * 3.0 * SIGMA && peak.sigma_xx < 3.0 * SIGMA);
+}
+
+#[test]
+fn nodal_smoothing_brings_the_hole_peak_closer_to_three_sigma() {
+    // Le Node (0, a) est au bord du trou : σxx lissé y est comparé directement à Kt σ = 3σ,
+    // alors que les points de Gauss restent à l'intérieur des Elements.
+    let s = solve_kirsch(16, 16, true);
+    let nodal = nodal_stresses(&s.mesh, &s.field).unwrap();
+    let at_hole = nodal
+        .iter()
+        .find(|p| p.x.abs() < 1e-9 && (p.y - A).abs() < 1e-9)
+        .unwrap();
+    let gauss_peak = s
+        .field
+        .stresses
+        .iter()
+        .flatten()
+        .map(|p| p.sigma_xx)
+        .fold(f64::MIN, f64::max);
+    let (nodal_gap, gauss_gap) = (
+        (at_hole.sigma_xx - 3.0 * SIGMA).abs(),
+        (gauss_peak - 3.0 * SIGMA).abs(),
+    );
+    assert!(
+        nodal_gap < gauss_gap,
+        "lissé {nodal_gap} contre Gauss {gauss_gap}"
+    );
+    assert!(
+        nodal_gap < 0.01 * 3.0 * SIGMA,
+        "écart lissé / 3σ : {}",
+        nodal_gap / (3.0 * SIGMA)
+    );
 }

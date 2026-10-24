@@ -4,7 +4,7 @@ use maille_core::element::plane_d;
 use maille_core::material::Material;
 use maille_core::mesh::{Bar, Dof, Element, Mesh, Node, PlaneState, Tri3};
 use maille_core::model::{Bc, DistributedLoad, Load, Model};
-use maille_core::results::Field;
+use maille_core::results::{nodal_stresses, Field};
 use maille_core::MailleError;
 
 const RTOL: f64 = 1e-10;
@@ -208,7 +208,10 @@ fn patch_test_linear_displacement_field_is_reproduced_exactly() {
             })
             .collect();
         let nodes = mesh.nodes.clone();
-        let f = Model::new(mesh, bcs, vec![]).unwrap().solve().unwrap();
+        let f = Model::new(mesh.clone(), bcs, vec![])
+            .unwrap()
+            .solve()
+            .unwrap();
         for n in [4, 5] {
             let (u, v) = field(nodes[n].x, nodes[n].y);
             assert!(close(ux(&f, n), u, 1e-3), "{state:?} ux {n}");
@@ -235,6 +238,16 @@ fn patch_test_linear_displacement_field_is_reproduced_exactly() {
                 close(p.tau_xy, sigma[2], scale),
                 "{state:?} τxy élément {e}"
             );
+        }
+        // lissage aux Nodes : une contrainte constante reste exacte à chaque Node
+        let nodal = nodal_stresses(&mesh, &f).unwrap();
+        assert_eq!(nodal.len(), nodes.len());
+        for (n, p) in nodal.iter().enumerate() {
+            let scale = sigma.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+            assert!(close(p.x, nodes[n].x, 1.0) && close(p.y, nodes[n].y, 1.0));
+            assert!(close(p.sigma_xx, sigma[0], scale), "{state:?} σxx Node {n}");
+            assert!(close(p.sigma_yy, sigma[1], scale), "{state:?} σyy Node {n}");
+            assert!(close(p.tau_xy, sigma[2], scale), "{state:?} τxy Node {n}");
         }
     }
 }

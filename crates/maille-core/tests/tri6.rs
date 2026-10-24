@@ -7,7 +7,7 @@ use maille_core::element::plane_d;
 use maille_core::material::Material;
 use maille_core::mesh::{Dof, Element, Mesh, Node, PlaneState, Tri6};
 use maille_core::model::{Bc, DistributedLoad, Load, Model};
-use maille_core::results::Field;
+use maille_core::results::{nodal_stresses, Field};
 use maille_core::MailleError;
 
 const E: f64 = 210e3;
@@ -160,7 +160,10 @@ fn run_patch(field: impl Fn(f64, f64) -> (f64, f64), stress: impl Fn(f64, f64) -
             value: v,
         });
     }
-    let f = Model::new(mesh, bcs, vec![]).unwrap().solve().unwrap();
+    let f = Model::new(mesh.clone(), bcs, vec![])
+        .unwrap()
+        .solve()
+        .unwrap();
 
     let mut interior = 0;
     for (n, node) in q.nodes.iter().enumerate().filter(|(_, p)| !boundary(p)) {
@@ -182,6 +185,19 @@ fn run_patch(field: impl Fn(f64, f64) -> (f64, f64), stress: impl Fn(f64, f64) -
             assert!(close(p.sigma_yy, s[1], scale), "σyy élément {e}");
             assert!(close(p.tau_xy, s[2], scale), "τxy élément {e}");
         }
+    }
+
+    // lissage aux Nodes : la contrainte est au plus linéaire, l'extrapolation des 3 points de Gauss
+    // la retrouve exactement à chaque Node, bord compris
+    let nodal = nodal_stresses(&mesh, &f).unwrap();
+    assert_eq!(nodal.len(), q.nodes.len());
+    for (n, p) in nodal.iter().enumerate() {
+        let s = stress(q.nodes[n].x, q.nodes[n].y);
+        let scale = 1.0 + s.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+        assert!(close(p.x, q.nodes[n].x, 1.0) && close(p.y, q.nodes[n].y, 1.0));
+        assert!(close(p.sigma_xx, s[0], scale), "σxx Node {n}");
+        assert!(close(p.sigma_yy, s[1], scale), "σyy Node {n}");
+        assert!(close(p.tau_xy, s[2], scale), "τxy Node {n}");
     }
 }
 
