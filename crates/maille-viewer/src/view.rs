@@ -12,12 +12,19 @@ pub struct View {
 }
 
 impl View {
-    /// Cadre la boîte (min, max) au centre d'une fenêtre de `size` pixels.
-    pub fn fit(bounds: ([f64; 2], [f64; 2]), size: [f64; 2]) -> Self {
+    /// Cadre la boîte (min, max) dans une fenêtre de `size` pixels dont les `reserved_left` premiers
+    /// pixels à gauche sont laissés libres (légende) : centrée dans la partie restante.
+    pub fn fit(bounds: ([f64; 2], [f64; 2]), size: [f64; 2], reserved_left: f64) -> Self {
         let (lo, hi) = bounds;
+        let width = (size[0] - reserved_left).max(1.0);
+        let zoom = FILL * (width / (hi[0] - lo[0])).min(size[1] / (hi[1] - lo[1]));
         Self {
-            center: [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0],
-            zoom: FILL * (size[0] / (hi[0] - lo[0])).min(size[1] / (hi[1] - lo[1])),
+            // le centre de la fenêtre est décalé de reserved_left / 2 à gauche du centre du Mesh
+            center: [
+                (lo[0] + hi[0]) / 2.0 - reserved_left / 2.0 / zoom,
+                (lo[1] + hi[1]) / 2.0,
+            ],
+            zoom,
         }
     }
 
@@ -78,17 +85,29 @@ mod tests {
         // Mesh 40 × 10 dans une fenêtre 800 × 600 : la largeur limite
         let bounds = ([0.0, 0.0], [40.0, 10.0]);
         let size = [800.0, 600.0];
-        let view = View::fit(bounds, size);
+        let view = View::fit(bounds, size, 0.0);
         let (lo, hi) = (clip(&view, size, bounds.0), clip(&view, size, bounds.1));
         assert!((lo[0] + 0.9).abs() < 1e-6 && (hi[0] - 0.9).abs() < 1e-6);
         assert!(lo[1] > -0.9 && hi[1] < 0.9 && (lo[1] + hi[1]).abs() < 1e-6);
     }
 
     #[test]
+    fn the_mesh_is_centered_in_the_part_of_the_window_left_free_by_the_legend() {
+        // 200 pixels réservés à gauche : le Mesh remplit 90 % des 600 pixels restants, centré dessus
+        let bounds = ([0.0, 0.0], [40.0, 10.0]);
+        let size = [800.0, 600.0];
+        let view = View::fit(bounds, size, 200.0);
+        let pixel_x = |p: [f64; 2]| (clip(&view, size, p)[0] + 1.0) / 2.0 * size[0];
+        let (left, right) = (pixel_x(bounds.0), pixel_x(bounds.1));
+        assert!((right - left - 0.9 * 600.0).abs() < 1e-3, "{left} {right}");
+        assert!(((left + right) / 2.0 - 500.0).abs() < 1e-3);
+    }
+
+    #[test]
     fn proportions_are_kept_whatever_the_window_shape() {
         // un carré du Mesh reste un carré à l'écran : même nombre de pixels en x et en y
         let size = [1200.0, 300.0];
-        let view = View::fit(([0.0, 0.0], [1.0, 1.0]), size);
+        let view = View::fit(([0.0, 0.0], [1.0, 1.0]), size, 0.0);
         let (scale, _) = view.transform(size);
         let pixels = [
             f64::from(scale[0]) * size[0] / 2.0,
@@ -115,21 +134,24 @@ mod tests {
     #[test]
     fn zooming_keeps_the_point_under_the_cursor_fixed() {
         let size = [800.0, 600.0];
-        let mut view = View::fit(([0.0, 0.0], [40.0, 40.0]), size);
+        let mut view = View::fit(([0.0, 0.0], [40.0, 40.0]), size, 0.0);
         let cursor = [123.0, 456.0];
         let before = view.model_point(cursor, size);
         view.zoom_at(2.5, cursor, size);
         let after = view.model_point(cursor, size);
         assert!((before[0] - after[0]).abs() < 1e-9 && (before[1] - after[1]).abs() < 1e-9);
         // et le reste s'est bien rapproché
-        let (z0, z1) = (View::fit(([0.0, 0.0], [40.0, 40.0]), size).zoom, view.zoom);
+        let (z0, z1) = (
+            View::fit(([0.0, 0.0], [40.0, 40.0]), size, 0.0).zoom,
+            view.zoom,
+        );
         assert!((z1 / z0 - 2.5).abs() < 1e-12);
     }
 
     #[test]
     fn panning_moves_the_mesh_with_the_cursor() {
         let size = [800.0, 600.0];
-        let mut view = View::fit(([0.0, 0.0], [40.0, 40.0]), size);
+        let mut view = View::fit(([0.0, 0.0], [40.0, 40.0]), size, 0.0);
         let grabbed = view.model_point([300.0, 200.0], size);
         view.pan([50.0, -30.0]);
         let under_cursor = view.model_point([350.0, 170.0], size);

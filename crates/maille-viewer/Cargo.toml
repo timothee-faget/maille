@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 bytemuck = "1.25.2"
+glyphon = "0.12.0"
 maille-core = { path = "../maille-core" }
 pollster = "1.0.1"
 wgpu = "30.0.1"

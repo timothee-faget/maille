@@ -10,6 +10,7 @@ use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use crate::colormap::Colormap;
+use crate::legend;
 use crate::render::Renderer;
 use crate::scene::{range, Quantity, Scene};
 use crate::view::View;
@@ -43,7 +44,7 @@ impl App {
     pub fn new(title: String, scene: Scene) -> Self {
         Self {
             title,
-            view: View::fit(scene.bounds(0.0), [1.0, 1.0]),
+            view: View::fit(scene.bounds(0.0), [1.0, 1.0], 0.0),
             scene,
             quantity: Quantity::VonMises,
             colormap: Colormap::Rainbow,
@@ -74,7 +75,7 @@ impl App {
         }
     }
 
-    /// Envoie au GPU le champ, les positions et la vue courants, et met le titre à jour.
+    /// Envoie au GPU le champ, les positions, la vue et la légende courants.
     fn refresh(&mut self) {
         let values = self.scene.values(self.quantity);
         let (lo, hi) = range(&values);
@@ -85,22 +86,25 @@ impl App {
         renderer.set_values(&values, (lo, hi));
         renderer.set_positions(&self.scene.positions(scale));
         renderer.set_view(self.view);
-        let deformation = if self.deformed {
-            format!(" — déformée ×{scale:.3e}")
-        } else {
-            String::new()
-        };
-        renderer.set_title(&format!(
-            "{} — {} de {lo:.4e} à {hi:.4e} — {}{deformation}",
-            self.title,
-            self.quantity.label(),
-            self.colormap.label()
-        ));
+        let layout = legend::layout(
+            renderer.size(),
+            (lo, hi),
+            self.colormap,
+            renderer.scale_factor(),
+        );
+        let mut title = self.quantity.label().to_string();
+        if self.deformed {
+            let factor = legend::format_value(scale);
+            title += &format!("\nDéformée ×{}", factor.trim_start_matches('+'));
+        }
+        renderer.set_legend(&layout, &title);
     }
 
     fn refit(&mut self) {
         if let Some(renderer) = &self.renderer {
-            self.view = View::fit(self.scene.bounds(self.deformation_scale()), renderer.size());
+            let reserved = legend::reserved_width(renderer.scale_factor());
+            let bounds = self.scene.bounds(self.deformation_scale());
+            self.view = View::fit(bounds, renderer.size(), reserved);
             self.follow_window = true;
         }
     }

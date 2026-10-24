@@ -8,8 +8,12 @@ use winit::event_loop::ActiveEventLoop;
 use winit::window::Window;
 
 use crate::colormap::Colormap;
+use crate::legend::{Layout, FONT_SIZE, TITLE_FONT_SIZE};
 use crate::scene::Scene;
 use crate::view::View;
+
+/// Couleur du texte de la légende, proche du gris foncé des arêtes.
+const TEXT_COLOR: glyphon::Color = glyphon::Color::rgb(38, 38, 38);
 
 /// Fond gris clair, sur lequel les couleurs de la colormap et le texte noir restent lisibles.
 const BACKGROUND: wgpu::Color = wgpu::Color {
@@ -43,6 +47,31 @@ pub struct Renderer {
     edge_indices: u32,
     view: View,
     range: (f64, f64),
+    /// Barre de couleurs (`vs_screen` + `fs_fill`) et ses traits (`vs_screen` + `fs_edge`).
+    legend_fill_pipeline: wgpu::RenderPipeline,
+    legend_line_pipeline: wgpu::RenderPipeline,
+    legend: Option<LegendBuffers>,
+    text: Text,
+}
+
+/// Géométrie de la légende, en coordonnées de clip : les 4 coins de la barre (valeurs min en bas,
+/// max en haut, colorées par le même shader que le Mesh), puis 2 sommets par graduation.
+struct LegendBuffers {
+    positions: wgpu::Buffer,
+    values: wgpu::Buffer,
+    bar: wgpu::Buffer,
+    lines: wgpu::Buffer,
+    line_indices: u32,
+}
+
+/// Texte de la légende (glyphon) : polices, cache de glyphes, et un bloc de texte par position.
+struct Text {
+    fonts: glyphon::FontSystem,
+    swash_cache: glyphon::SwashCache,
+    viewport: glyphon::Viewport,
+    atlas: glyphon::TextAtlas,
+    renderer: glyphon::TextRenderer,
+    blocks: Vec<(glyphon::Buffer, [f32; 2])>,
 }
 
 impl Renderer {
@@ -120,13 +149,13 @@ impl Renderer {
                 attributes: &wgpu::vertex_attr_array![1 => Float32],
             }),
         ];
-        let pipeline = |topology, fragment| {
+        let pipeline = |vertex, topology, fragment| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: None,
                 layout: Some(&layout),
                 vertex: wgpu::VertexState {
                     module: &shader,
-                    entry_point: Some("vs_main"),
+                    entry_point: Some(vertex),
                     compilation_options: Default::default(),
                     buffers: &vertex_buffers,
                 },
@@ -146,8 +175,26 @@ impl Renderer {
                 cache: None,
             })
         };
-        let fill_pipeline = pipeline(wgpu::PrimitiveTopology::TriangleList, "fs_fill");
-        let edge_pipeline = pipeline(wgpu::PrimitiveTopology::LineList, "fs_edge");
+        let (triangle_list, line_list) = (
+            wgpu::PrimitiveTopology::TriangleList,
+            wgpu::PrimitiveTopology::LineList,
+        );
+        let fill_pipeline = pipeline("vs_main", triangle_list, "fs_fill");
+        let edge_pipeline = pipeline("vs_main", line_list, "fs_edge");
+        let legend_fill_pipeline = pipeline("vs_screen", triangle_list, "fs_fill");
+        let legend_line_pipeline = pipeline("vs_screen", line_list, "fs_edge");
+
+        let fonts = glyphon::FontSystem::new();
+        let cache = glyphon::Cache::new(&device);
+        let mut atlas = glyphon::TextAtlas::new(&device, &queue, &cache, config.format);
+        let text = Text {
+            renderer: glyphon::TextRenderer::new(&mut atlas, &device, Default::default(), None),
+            viewport: glyphon::Viewport::new(&device, &cache),
+            swash_cache: glyphon::SwashCache::new(),
+            blocks: Vec::new(),
+            fonts,
+            atlas,
+        };
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor::default());
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
@@ -205,9 +252,88 @@ impl Renderer {
             triangles,
             edge_indices: (scene.edges.len() * 2) as u32,
             edges,
-            view: View::fit(scene.bounds(0.0), [1.0, 1.0]),
+            view: View::fit(scene.bounds(0.0), [1.0, 1.0], 0.0),
             range: (0.0, 1.0),
+            legend_fill_pipeline,
+            legend_line_pipeline,
+            legend: None,
+            text,
         })
+    }
+
+    /// Facteur d'échelle de l'écran : 2 sur un écran Retina (pixels physiques par pixel logique).
+    pub fn scale_factor(&self) -> f64 {
+        self.window.scale_factor()
+    }
+
+    /// Légende : barre de couleurs et graduations de `layout`, et `title` au-dessus (une ligne par
+    /// `\n`). La barre prend le (min, max) du dernier `set_values`.
+    pub fn set_legend(&mut self, layout: &Layout, title: &str) {
+        let [w, h] = self.size();
+        let clip = |x: f64, y: f64| [(2.0 * x / w - 1.0) as f32, (1.0 - 2.0 * y / h) as f32];
+        let [left, top, right, bottom] = layout.bar;
+        let (lo, hi) = (self.range.0 as f32, self.range.1 as f32);
+        let mut positions = vec![
+            clip(left, bottom),
+            clip(right, bottom),
+            clip(right, top),
+            clip(left, top),
+        ];
+        let mut values = vec![lo, lo, hi, hi];
+        let mut lines: Vec<u32> = vec![0, 1, 1, 2, 2, 3, 3, 0];
+        for tick in &layout.ticks {
+            lines.extend([positions.len() as u32, positions.len() as u32 + 1]);
+            positions.extend([
+                clip(right, tick.y),
+                clip(right + layout.tick_length, tick.y),
+            ]);
+            values.extend([0.0, 0.0]);
+        }
+        let buffer = |contents: &[u8], usage| {
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: None,
+                    contents,
+                    usage,
+                })
+        };
+        self.legend = Some(LegendBuffers {
+            positions: buffer(bytemuck::cast_slice(&positions), wgpu::BufferUsages::VERTEX),
+            values: buffer(bytemuck::cast_slice(&values), wgpu::BufferUsages::VERTEX),
+            bar: buffer(
+                bytemuck::cast_slice(&[0_u32, 1, 2, 0, 2, 3]),
+                wgpu::BufferUsages::INDEX,
+            ),
+            lines: buffer(bytemuck::cast_slice(&lines), wgpu::BufferUsages::INDEX),
+            line_indices: lines.len() as u32,
+        });
+
+        let scale = self.scale_factor();
+        let mut blocks = vec![self.text_block(title, TITLE_FONT_SIZE * scale, layout.title)];
+        for tick in &layout.ticks {
+            let size = FONT_SIZE * scale;
+            // étiquette centrée verticalement sur sa graduation
+            let block = self.text_block(&tick.label, size, [layout.label_x, tick.y - 0.6 * size]);
+            blocks.push(block);
+        }
+        self.text.blocks = blocks;
+        self.window.request_redraw();
+    }
+
+    /// Bloc de texte de `size` pixels dont le coin haut gauche est en `at`.
+    fn text_block(&mut self, text: &str, size: f64, at: [f64; 2]) -> (glyphon::Buffer, [f32; 2]) {
+        let fonts = &mut self.text.fonts;
+        let mut buffer =
+            glyphon::Buffer::new(fonts, glyphon::Metrics::new(size as f32, 1.2 * size as f32));
+        buffer.set_size(None, None);
+        buffer.set_text(
+            text,
+            &glyphon::Attrs::new().family(glyphon::Family::SansSerif),
+            glyphon::Shaping::Advanced,
+            None,
+        );
+        buffer.shape_until_scroll(fonts, false);
+        (buffer, [at[0] as f32, at[1] as f32])
     }
 
     pub fn set_colormap(&mut self, colormap: Colormap) {
@@ -220,10 +346,6 @@ impl Renderer {
             colormap,
         );
         self.window.request_redraw();
-    }
-
-    pub fn set_title(&self, title: &str) {
-        self.window.set_title(title);
     }
 
     /// Taille de la zone de dessin, en pixels.
@@ -293,6 +415,7 @@ impl Renderer {
             _ => return,
         };
         let view = frame.texture.create_view(&Default::default());
+        let text_ready = self.prepare_text();
         let mut encoder = self.device.create_command_encoder(&Default::default());
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -317,10 +440,70 @@ impl Renderer {
             pass.set_pipeline(&self.edge_pipeline);
             pass.set_index_buffer(self.edges.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..self.edge_indices, 0, 0..1);
+            // légende par-dessus le Mesh
+            if let Some(legend) = &self.legend {
+                pass.set_vertex_buffer(0, legend.positions.slice(..));
+                pass.set_vertex_buffer(1, legend.values.slice(..));
+                pass.set_pipeline(&self.legend_fill_pipeline);
+                pass.set_index_buffer(legend.bar.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..6, 0, 0..1);
+                pass.set_pipeline(&self.legend_line_pipeline);
+                pass.set_index_buffer(legend.lines.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..legend.line_indices, 0, 0..1);
+            }
+            if text_ready {
+                let t = &self.text;
+                if let Err(e) = t.renderer.render(&t.atlas, &t.viewport, &mut pass) {
+                    eprintln!("légende : texte non affiché ({e})");
+                }
+            }
         }
         self.queue.submit([encoder.finish()]);
         self.window.pre_present_notify();
         self.queue.present(frame);
+        self.text.atlas.trim();
+    }
+
+    /// Envoie les glyphes de la légende au GPU ; faux (texte sauté pour cette image) en cas d'échec.
+    fn prepare_text(&mut self) -> bool {
+        let t = &mut self.text;
+        t.viewport.update(
+            &self.queue,
+            glyphon::Resolution {
+                width: self.config.width,
+                height: self.config.height,
+            },
+        );
+        let bounds = glyphon::TextBounds {
+            left: 0,
+            top: 0,
+            right: self.config.width as i32,
+            bottom: self.config.height as i32,
+        };
+        let areas = t.blocks.iter().map(|(buffer, at)| glyphon::TextArea {
+            buffer,
+            left: at[0],
+            top: at[1],
+            scale: 1.0,
+            bounds,
+            default_color: TEXT_COLOR,
+            custom_glyphs: &[],
+        });
+        match t.renderer.prepare(
+            &self.device,
+            &self.queue,
+            &mut t.fonts,
+            &mut t.atlas,
+            &t.viewport,
+            areas,
+            &mut t.swash_cache,
+        ) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("légende : texte non affiché ({e})");
+                false
+            }
+        }
     }
 }
 

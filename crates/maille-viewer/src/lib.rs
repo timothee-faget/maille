@@ -4,6 +4,7 @@
 
 mod app;
 mod colormap;
+mod legend;
 mod render;
 mod scene;
 mod view;

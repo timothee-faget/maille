@@ -26,6 +26,15 @@ fn vs_main(@location(0) position: vec2<f32>, @location(1) value: f32) -> VertexO
     return out;
 }
 
+// Légende : positions déjà en coordonnées de clip, ni zoom ni déplacement.
+@vertex
+fn vs_screen(@location(0) position: vec2<f32>, @location(1) value: f32) -> VertexOut {
+    var out: VertexOut;
+    out.clip = vec4<f32>(position, 0.0, 1.0);
+    out.value = value;
+    return out;
+}
+
 @fragment
 fn fs_fill(in: VertexOut) -> @location(0) vec4<f32> {
     // champ constant : intervalle nul, on évite la division par zéro
