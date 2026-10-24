@@ -1,6 +1,6 @@
 use crate::assembly::{
     element_conduction, element_dofs, element_heat_fluxes, element_heat_source, element_stiffness,
-    element_stresses,
+    element_stresses, face_convection, FaceConvection,
 };
 use crate::element::{bar_equivalent_load, beam_equivalent_load};
 use crate::error::MailleError;
@@ -39,6 +39,18 @@ pub struct HeatSource {
     pub value: f64,
 }
 
+/// Convection h (T − T∞) sur une face d'un Element (thermique). Numérotation des faces :
+/// voir `Element::face_nodes`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Convection {
+    pub element: usize,
+    pub face: usize,
+    /// Coefficient d'échange h (puissance par unité de surface et par degré).
+    pub film: f64,
+    /// Température du fluide T∞.
+    pub sink: f64,
+}
+
 /// Physique résolue sur le Mesh.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Analysis {
@@ -56,6 +68,7 @@ pub struct Model {
     loads: Vec<Load>,
     distributed: Vec<DistributedLoad>,
     heat_sources: Vec<HeatSource>,
+    convection: Vec<Convection>,
 }
 
 impl Model {
@@ -111,6 +124,7 @@ impl Model {
             loads,
             distributed: Vec::new(),
             heat_sources: Vec::new(),
+            convection: Vec::new(),
         })
     }
 
@@ -143,6 +157,33 @@ impl Model {
         Ok(self)
     }
 
+    /// Convection sur des faces, en analyse thermique seulement.
+    pub fn with_convection(mut self, convection: Vec<Convection>) -> Result<Self, MailleError> {
+        if self.analysis != Analysis::Thermal {
+            return Err(MailleError::ThermalOnly);
+        }
+        for c in &convection {
+            let Some(e) = self.mesh.elements.get(c.element) else {
+                return Err(MailleError::UnknownElement { element: c.element });
+            };
+            if e.face_nodes(c.face).is_none() {
+                return Err(MailleError::UnknownFace {
+                    element: c.element,
+                    face: c.face,
+                });
+            }
+            crate::material::positive("h (coefficient d'échange)", c.film)?;
+            if !c.sink.is_finite() {
+                return Err(MailleError::InvalidProperty {
+                    name: "T∞ (température du fluide), doit être finie",
+                    value: c.sink,
+                });
+            }
+        }
+        self.convection = convection;
+        Ok(self)
+    }
+
     /// Résout K_ff u_f = F_f − K_fc u_c (K : rigidité en statique, conduction en thermique), puis
     /// réactions R = K u − F sur les DOF contraints. K n'est jamais formée en entier : K_ff est
     /// assemblée en ligne de ciel, les réactions sont recalculées Element par Element.
@@ -157,9 +198,26 @@ impl Model {
                 Analysis::Thermal => e.nodes().to_vec(),
             })
             .collect();
+        // convection : termes de face, regroupés par Element, ajoutés à sa matrice et à F
+        let mut faces: Vec<Vec<FaceConvection>> = vec![Vec::new(); mesh.elements.len()];
+        for c in &self.convection {
+            if let Some(terms) = face_convection(mesh, c.element, c.face, c.film, c.sink) {
+                faces[c.element].push(terms);
+            }
+        }
         let matrix = |i: usize| match self.analysis {
             Analysis::Static => element_stiffness(mesh, i),
-            Analysis::Thermal => element_conduction(mesh, i),
+            Analysis::Thermal => {
+                let mut k = element_conduction(mesh, i);
+                for face in &faces[i] {
+                    for (row, &a) in face.matrix.iter().zip(&face.positions) {
+                        for (v, &b) in row.iter().zip(&face.positions) {
+                            k[a][b] += v;
+                        }
+                    }
+                }
+                k
+            }
         };
 
         let mut f = vec![0.0; n];
@@ -183,6 +241,13 @@ impl Model {
             let equivalent = element_heat_source(mesh, s.element, s.value);
             for (&g, v) in dofs[s.element].iter().zip(equivalent) {
                 f[g] += v;
+            }
+        }
+        for (i, terms) in faces.iter().enumerate() {
+            for face in terms {
+                for (&p, v) in face.positions.iter().zip(&face.load) {
+                    f[dofs[i][p]] += v;
+                }
             }
         }
         let mut u = vec![0.0; n];

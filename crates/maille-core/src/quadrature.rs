@@ -1,5 +1,5 @@
-//! Intégration de Gauss sur le triangle de référence (0,0), (1,0), (0,1), d'aire 1/2, et sur le
-//! tétraèdre de référence (0,0,0), (1,0,0), (0,1,0), (0,0,1), de volume 1/6.
+//! Intégration de Gauss sur le triangle de référence (0,0), (1,0), (0,1), d'aire 1/2, sur le
+//! tétraèdre de référence (0,0,0), (1,0,0), (0,1,0), (0,0,1), de volume 1/6, et sur le segment [0, 1].
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GaussPoint {
@@ -31,6 +31,60 @@ pub const TRIANGLE_3: [GaussPoint; 3] = [
         xi: 1.0 / 6.0,
         eta: 2.0 / 3.0,
         weight: 1.0 / 6.0,
+    },
+];
+
+/// 6 points (Dunavant) : exacte pour les polynômes de degré ≤ 4. Sert aux faces des Tet10.
+pub const TRIANGLE_6: [GaussPoint; 6] = {
+    const A: f64 = 0.445_948_490_915_965;
+    const WA: f64 = 0.223_381_589_678_011 / 2.0;
+    const B: f64 = 0.091_576_213_509_771;
+    const WB: f64 = 0.109_951_743_655_322 / 2.0;
+    const fn p(xi: f64, eta: f64, weight: f64) -> GaussPoint {
+        GaussPoint { xi, eta, weight }
+    }
+    [
+        p(A, A, WA),
+        p(1.0 - 2.0 * A, A, WA),
+        p(A, 1.0 - 2.0 * A, WA),
+        p(B, B, WB),
+        p(1.0 - 2.0 * B, B, WB),
+        p(B, 1.0 - 2.0 * B, WB),
+    ]
+};
+
+/// Point de Gauss sur le segment [0, 1].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LinePoint {
+    pub s: f64,
+    pub weight: f64,
+}
+
+/// 2 points : exacte pour les polynômes de degré ≤ 3. 1/2 ∓ 1/(2√3).
+pub const LINE_2: [LinePoint; 2] = [
+    LinePoint {
+        s: 0.211_324_865_405_187_1,
+        weight: 0.5,
+    },
+    LinePoint {
+        s: 0.788_675_134_594_812_9,
+        weight: 0.5,
+    },
+];
+
+/// 3 points : exacte pour les polynômes de degré ≤ 5. 1/2 ∓ √(3/5)/2 (poids 5/18), 1/2 (poids 4/9).
+pub const LINE_3: [LinePoint; 3] = [
+    LinePoint {
+        s: 0.112_701_665_379_258_3,
+        weight: 5.0 / 18.0,
+    },
+    LinePoint {
+        s: 0.5,
+        weight: 4.0 / 9.0,
+    },
+    LinePoint {
+        s: 0.887_298_334_620_741_7,
+        weight: 5.0 / 18.0,
     },
 ];
 
@@ -159,6 +213,37 @@ mod tests {
                 "ξ^{a} η^{b} ζ^{c}"
             );
         }
+    }
+
+    #[test]
+    fn six_point_rule_is_exact_up_to_degree_4() {
+        for a in 0..=4 {
+            for b in 0..=4 - a {
+                assert!(
+                    (integrate(&TRIANGLE_6, a, b) - exact(a, b)).abs() < 1e-14,
+                    "ξ^{a} η^{b}"
+                );
+            }
+        }
+        assert!((integrate(&TRIANGLE_6, 6, 0) - exact(6, 0)).abs() > 1e-6);
+    }
+
+    #[test]
+    fn line_rules_are_exact_up_to_their_degree() {
+        let integrate = |rule: &[LinePoint], d: i32| -> f64 {
+            rule.iter().map(|p| p.weight * p.s.powi(d)).sum()
+        };
+        for d in 0..=5 {
+            let exact = 1.0 / f64::from(d + 1);
+            if d <= 3 {
+                assert!((integrate(&LINE_2, d) - exact).abs() < 1e-15, "s^{d}");
+            }
+            assert!((integrate(&LINE_3, d) - exact).abs() < 1e-15, "s^{d}");
+        }
+        assert!((integrate(&LINE_2, 4) - 0.2).abs() > 1e-4);
+        let r = |x: f64| x.sqrt();
+        assert!((LINE_2[0].s - (0.5 - 0.5 / r(3.0))).abs() < 1e-16);
+        assert!((LINE_3[0].s - (0.5 - r(0.6) / 2.0)).abs() < 1e-16);
     }
 
     #[test]

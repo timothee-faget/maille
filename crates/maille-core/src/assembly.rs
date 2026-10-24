@@ -4,9 +4,12 @@ use crate::element::{
 };
 use crate::material::Material;
 use crate::mesh::{Element, Mesh, PlaneState, Tet10, Tet4, Tri3, Tri6};
-use crate::quadrature::{GaussPoint, TetGaussPoint, TETRA_1, TETRA_4, TRIANGLE_1, TRIANGLE_3};
+use crate::quadrature::{
+    GaussPoint, LinePoint, TetGaussPoint, LINE_2, LINE_3, TETRA_1, TETRA_4, TRIANGLE_1, TRIANGLE_3,
+    TRIANGLE_6,
+};
 use crate::results::{HeatFlux, Stress};
-use crate::shape::{tet10, tet4, tri3_vec, tri6_vec, ShapeFn, SolidShapeFn};
+use crate::shape::{line2, line3, tet10, tet4, tri3_vec, tri6_vec, ShapeFn, SolidShapeFn};
 
 /// Indices globaux des DOF de l'Element `e`, dans l'ordre de sa matrice élémentaire.
 pub fn element_dofs(e: &Element) -> Vec<usize> {
@@ -261,4 +264,79 @@ fn nodal_source<const D: usize>(points: &[GaussData<D>], q: f64) -> Vec<f64> {
         }
     }
     f
+}
+
+/// Termes de convection h (T − T∞) sur une face : `matrix` = h ∫ N Nᵀ dS et `load` = h T∞ ∫ N dS,
+/// indexés comme `positions` (positions des Nodes de la face dans ceux de l'Element).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FaceConvection {
+    pub positions: Vec<usize>,
+    pub matrix: Vec<Vec<f64>>,
+    pub load: Vec<f64>,
+}
+
+/// Convection de coefficient `film` vers la température `sink` sur la face `face` de l'Element `i`
+/// (numérotation de `Element::face_nodes`). `None` si la face n'existe pas. En 2D, la face est une
+/// arête et l'épaisseur t multiplie l'intégrale.
+pub fn face_convection(
+    mesh: &Mesh,
+    i: usize,
+    face: usize,
+    film: f64,
+    sink: f64,
+) -> Option<FaceConvection> {
+    let e = &mesh.elements[i];
+    let positions = e.face_positions(face)?;
+    let global: Vec<usize> = positions.iter().map(|&k| e.nodes()[k]).collect();
+    // (poids w |dS|, valeurs N) aux points de Gauss de la face
+    let points: Vec<(f64, Vec<f64>)> = match e {
+        Element::Tri3(Tri3 { thickness, .. }) | Element::Tri6(Tri6 { thickness, .. }) => {
+            let c = mesh.coords(&global);
+            let length = (c[1][0] - c[0][0]).hypot(c[1][1] - c[0][1]);
+            let linear = global.len() == 2;
+            let rule: &[LinePoint] = if linear { &LINE_2 } else { &LINE_3 };
+            let shape = if linear { line2 } else { line3 };
+            rule.iter()
+                .map(|p| (p.weight * length * thickness, shape(p.s)))
+                .collect()
+        }
+        Element::Tet4(_) | Element::Tet10(_) => {
+            let c = mesh.coords_3d(&global);
+            let (u, v): ([f64; 3], [f64; 3]) = (
+                std::array::from_fn(|k| c[1][k] - c[0][k]),
+                std::array::from_fn(|k| c[2][k] - c[0][k]),
+            );
+            let cross = [
+                u[1] * v[2] - u[2] * v[1],
+                u[2] * v[0] - u[0] * v[2],
+                u[0] * v[1] - u[1] * v[0],
+            ];
+            let twice_area = cross.iter().map(|x| x * x).sum::<f64>().sqrt();
+            let (rule, shape): (&[GaussPoint], ShapeFn) = if global.len() == 3 {
+                (&TRIANGLE_3, tri3_vec)
+            } else {
+                (&TRIANGLE_6, tri6_vec)
+            };
+            rule.iter()
+                .map(|g| (g.weight * twice_area, shape(g.xi, g.eta).0))
+                .collect()
+        }
+        Element::Bar(_) | Element::Beam(_) => return None,
+    };
+    let m = positions.len();
+    let mut matrix = vec![vec![0.0; m]; m];
+    let mut load = vec![0.0; m];
+    for (w, n) in &points {
+        for a in 0..m {
+            load[a] += film * sink * w * n[a];
+            for b in 0..m {
+                matrix[a][b] += film * w * n[a] * n[b];
+            }
+        }
+    }
+    Some(FaceConvection {
+        positions,
+        matrix,
+        load,
+    })
 }

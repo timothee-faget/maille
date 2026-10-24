@@ -1,6 +1,6 @@
 use crate::error::MailleError;
 use crate::material::{Material, Section};
-use crate::shape::{TET10_EDGES, TRI6_EDGES};
+use crate::shape::{TET10_EDGES, TET_FACES, TRI6_EDGES};
 
 /// Position d'un Node. Les Bar et Beam (1D) n'utilisent que `x`, les triangles (2D) `x` et `y`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -176,6 +176,33 @@ impl Element {
             Self::Tet4(e) => &e.nodes,
             Self::Tet10(e) => &e.nodes,
         }
+    }
+
+    /// Nodes de la face `face`, en positions dans `nodes()` : sommets, puis milieux pour les Elements
+    /// quadratiques (dans l'ordre des arêtes de la face). Faces d'un triangle : ses arêtes 0-1, 1-2,
+    /// 2-0 ; d'un tétraèdre : 0-1-2, 0-3-1, 1-3-2, 2-3-0 (comme Abaqus). `None` si la face n'existe pas.
+    pub(crate) fn face_positions(&self, face: usize) -> Option<Vec<usize>> {
+        let tet_mid = |a: usize, b: usize| {
+            let k = TET10_EDGES.iter().position(|&e| e == (a, b) || e == (b, a));
+            4 + k.unwrap_or(0)
+        };
+        match self {
+            Self::Bar(_) | Self::Beam(_) => None,
+            Self::Tri3(_) => TRI6_EDGES.get(face).map(|&(a, b)| vec![a, b]),
+            Self::Tri6(_) => TRI6_EDGES.get(face).map(|&(a, b)| vec![a, b, 3 + face]),
+            Self::Tet4(_) => TET_FACES.get(face).map(|f| f.to_vec()),
+            Self::Tet10(_) => TET_FACES
+                .get(face)
+                .map(|&[a, b, c]| vec![a, b, c, tet_mid(a, b), tet_mid(b, c), tet_mid(c, a)]),
+        }
+    }
+
+    /// Indices (dans `Mesh::nodes`) des Nodes de la face `face`, voir `face_positions` pour la
+    /// numérotation. `None` si la face n'existe pas.
+    pub fn face_nodes(&self, face: usize) -> Option<Vec<usize>> {
+        let nodes = self.nodes();
+        self.face_positions(face)
+            .map(|p| p.into_iter().map(|k| nodes[k]).collect())
     }
 
     pub fn material(&self) -> &Material {

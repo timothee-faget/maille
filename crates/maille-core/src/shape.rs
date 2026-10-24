@@ -110,6 +110,24 @@ pub fn tet4(xi: f64, eta: f64, zeta: f64) -> (Vec<f64>, Vec<[f64; 3]>) {
     (l.to_vec(), dl.to_vec())
 }
 
+/// Fonctions de forme d'une arête paramétrée par s ∈ [0, 1] : linéaire (extrémités a, b), ou
+/// quadratique (a, b, puis milieu).
+pub fn line2(s: f64) -> Vec<f64> {
+    vec![1.0 - s, s]
+}
+
+pub fn line3(s: f64) -> Vec<f64> {
+    vec![
+        (1.0 - s) * (1.0 - 2.0 * s),
+        s * (2.0 * s - 1.0),
+        4.0 * s * (1.0 - s),
+    ]
+}
+
+/// Faces des tétraèdres (sommets), numérotées comme Abaqus : S1 = 0-1-2, S2 = 0-3-1, S3 = 1-3-2,
+/// S4 = 2-3-0 (ici 0 à 3). Chaque face tourne vers l'extérieur.
+pub const TET_FACES: [[usize; 3]; 4] = [[0, 1, 2], [0, 3, 1], [1, 3, 2], [2, 3, 0]];
+
 /// Arêtes du Tri6 dans l'ordre de ses Nodes milieux 3 à 5.
 pub const TRI6_EDGES: [(usize, usize); 3] = [(0, 1), (1, 2), (2, 0)];
 

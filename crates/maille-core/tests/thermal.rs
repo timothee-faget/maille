@@ -5,7 +5,7 @@ mod common;
 use common::{box_grid, rect_grid, to_quadratic, to_quadratic_tet};
 use maille_core::material::{Material, Section};
 use maille_core::mesh::{Bar, Dof, Element, Mesh, Node, PlaneState, Tet10, Tet4, Tri3, Tri6};
-use maille_core::model::{Analysis, Bc, HeatSource, Load, Model};
+use maille_core::model::{Analysis, Bc, Convection, HeatSource, Load, Model};
 use maille_core::results::{nodal_stresses, Field};
 use maille_core::MailleError;
 
@@ -382,4 +382,170 @@ fn heat_sources_need_a_thermal_model_and_a_known_element() {
         thermal.with_heat_sources(source(2)),
         Err(MailleError::UnknownElement { element: 2 })
     );
+}
+
+/// (Element, face) dont tous les Nodes vérifient `on`.
+fn faces_where(mesh: &Mesh, on: impl Fn(&Node) -> bool) -> Vec<(usize, usize)> {
+    let mut faces = Vec::new();
+    for (i, e) in mesh.elements.iter().enumerate() {
+        for face in 0..4 {
+            if let Some(nodes) = e.face_nodes(face) {
+                if nodes.iter().all(|&n| on(&mesh.nodes[n])) {
+                    faces.push((i, face));
+                }
+            }
+        }
+    }
+    faces
+}
+
+fn convective(faces: &[(usize, usize)], film: f64, sink: f64) -> Vec<Convection> {
+    faces
+        .iter()
+        .map(|&(element, face)| Convection {
+            element,
+            face,
+            film,
+            sink,
+        })
+        .collect()
+}
+
+fn solve_with_convection(mesh: &Mesh, bcs: Vec<Bc>, convection: Vec<Convection>) -> Field {
+    Model::with_analysis(mesh.clone(), Analysis::Thermal, bcs, Vec::new())
+        .unwrap()
+        .with_convection(convection)
+        .unwrap()
+        .solve()
+        .unwrap()
+}
+
+#[test]
+fn wall_cooled_by_convection_is_exact() {
+    // T = T1 en x = 0, convection h (T − T∞) sur x = L : T = T1 + (T∞ − T1) h x / (k + h L)
+    let (t1, h, sink) = (20.0, 30.0, 300.0);
+    let power = H * T * K * h * (sink - t1) / (K + h * L);
+    for (name, mesh) in all_meshes() {
+        let faces = faces_where(&mesh, |p| (p.x - L).abs() < 1e-12);
+        assert!(!faces.is_empty(), "{name}");
+        let field = solve_with_convection(
+            &mesh,
+            fix_plane(&mesh, 0.0, t1),
+            convective(&faces, h, sink),
+        );
+        for (n, p) in mesh.nodes.iter().enumerate() {
+            let exact = t1 + (sink - t1) * h * p.x / (K + h * L);
+            assert!(
+                (field.temperatures[n] - exact).abs() < 1e-10,
+                "{name} Node {n}"
+            );
+        }
+        // la chaleur venue du fluide sort par la face à T imposée
+        let out: f64 = nodes_at(&mesh, 0.0).map(|n| field.reactions[n]).sum();
+        assert!(
+            (out + power).abs() < 1e-9 * power,
+            "{name} : {out} au lieu de {}",
+            -power
+        );
+    }
+}
+
+/// Ailette de longueur `length`, encastrée à T0 en x = 0, refroidie par convection sur ses faces
+/// latérales (`lateral`), bout isolé. Théorie des ailettes (Biot petit) :
+/// θ / θ0 = cosh m (L − x) / cosh m L, m² = h P / (k A). Renvoie l'écart maximal aux Nodes,
+/// rapporté à θ0.
+fn fin_error(mesh: &Mesh, length: f64, m: f64, h: f64, lateral: impl Fn(&Node) -> bool) -> f64 {
+    let (t0, sink) = (100.0, 20.0);
+    let faces = faces_where(mesh, lateral);
+    let field = solve_with_convection(mesh, fix_plane(mesh, 0.0, t0), convective(&faces, h, sink));
+    mesh.nodes
+        .iter()
+        .zip(&field.temperatures)
+        .map(|(p, t)| {
+            let exact = sink + (t0 - sink) * (m * (length - p.x)).cosh() / (m * length).cosh();
+            (t - exact).abs() / (t0 - sink)
+        })
+        .fold(0.0, f64::max)
+}
+
+#[test]
+fn thin_fins_match_fin_theory() {
+    // h H / 2k = 10⁻³ : la température est quasi uniforme dans l'épaisseur, la théorie 1D s'applique
+    let (h, length) = (0.1, 16.0);
+
+    // 2D : bande length × H d'épaisseur T, convection sur y = 0 et y = H (P = 2 T, A = H T)
+    let (nodes, tris) = rect_grid(32, 2, length, H);
+    let q = to_quadratic(&nodes, &tris);
+    let elements = q
+        .elements
+        .iter()
+        .map(|&n| Element::Tri6(Tri6::new(n, material(), T, PlaneState::Stress).unwrap()))
+        .collect();
+    let strip = Mesh::new(q.nodes, elements).unwrap();
+    let m = (2.0 * h / (K * H)).sqrt();
+    let e = fin_error(&strip, length, m, h, |p| {
+        p.y.abs() < 1e-12 || (p.y - H).abs() < 1e-12
+    });
+    assert!(e < 0.002, "Tri6 : écart {e}");
+
+    // 3D : barre length × H × T, convection sur les 4 faces latérales (P = 2 (H + T), A = H T)
+    let (nodes, tets) = box_grid([16, 1, 1], [length, H, T]);
+    let q = to_quadratic_tet(&nodes, &tets);
+    let elements = q
+        .elements
+        .iter()
+        .map(|&t| Element::Tet10(Tet10::new(t, material())))
+        .collect();
+    let bar = Mesh::new(q.nodes, elements).unwrap();
+    let m = (h * 2.0 * (H + T) / (K * H * T)).sqrt();
+    let side = |c: f64, l: f64| c.abs() < 1e-12 || (c - l).abs() < 1e-12;
+    let e = fin_error(&bar, length, m, h, |p| side(p.y, H) || side(p.z, T));
+    assert!(e < 0.002, "Tet10 : écart {e}");
+}
+
+#[test]
+fn faces_follow_the_abaqus_numbering() {
+    let mesh = solid_mesh([1, 1, 1], true);
+    let e = &mesh.elements[0];
+    let n = e.nodes();
+    // face 1 = 0-3-1, puis milieux 0-3 (Node 7), 3-1 (8), 1-0 (4)
+    assert_eq!(
+        e.face_nodes(1),
+        Some(vec![n[0], n[3], n[1], n[7], n[8], n[4]])
+    );
+    assert_eq!(e.face_nodes(4), None);
+    let tri = &plane_mesh(1, 1, true).elements[0];
+    let t = tri.nodes();
+    assert_eq!(tri.face_nodes(2), Some(vec![t[2], t[0], t[5]]));
+    assert_eq!(tri.face_nodes(3), None);
+}
+
+#[test]
+fn convection_inputs_are_typed_errors() {
+    let mesh = plane_mesh(1, 1, false);
+    let thermal =
+        || Model::with_analysis(mesh.clone(), Analysis::Thermal, Vec::new(), Vec::new()).unwrap();
+    let c = |element, face, film| {
+        vec![Convection {
+            element,
+            face,
+            film,
+            sink: 20.0,
+        }]
+    };
+    assert_eq!(
+        thermal().with_convection(c(0, 3, 10.0)),
+        Err(MailleError::UnknownFace {
+            element: 0,
+            face: 3
+        })
+    );
+    assert_eq!(
+        thermal().with_convection(c(5, 0, 10.0)),
+        Err(MailleError::UnknownElement { element: 5 })
+    );
+    assert!(matches!(
+        thermal().with_convection(c(0, 0, 0.0)),
+        Err(MailleError::InvalidProperty { .. })
+    ));
 }

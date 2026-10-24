@@ -61,6 +61,11 @@ pub enum MailleError {
     MissingConductivity {
         element: usize,
     },
+    /// Face inexistante (triangle : 0 à 2, tétraèdre : 0 à 3 ; aucune pour Bar et Beam).
+    UnknownFace {
+        element: usize,
+        face: usize,
+    },
     /// Donnée thermique (source, convection) sur un Model qui n'est pas thermique.
     ThermalOnly,
     /// Bar et Beam n'ont pas de version thermique.
@@ -142,6 +147,10 @@ impl fmt::Display for MailleError {
             Self::MissingConductivity { element } => write!(
                 f,
                 "le Material de l'Element {element} n'a pas de conductivité thermique, requise en thermique : le créer avec Material::conductive ou ajouter with_conductivity"
+            ),
+            Self::UnknownFace { element, face } => write!(
+                f,
+                "l'Element {element} n'a pas de face {face} : un triangle a les faces 0 à 2 (arêtes 0-1, 1-2, 2-0), un tétraèdre les faces 0 à 3 (0-1-2, 0-3-1, 1-3-2, 2-3-0)"
             ),
             Self::ThermalOnly => write!(
                 f,
