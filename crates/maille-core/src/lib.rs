@@ -9,7 +9,9 @@ pub mod error;
 pub mod material;
 pub mod mesh;
 pub mod model;
+pub mod quadrature;
 pub mod results;
+pub mod shape;
 pub mod solve;
 
 pub use error::MailleError;
