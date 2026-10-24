@@ -12,10 +12,10 @@ pub fn rect_grid(nx: usize, ny: usize, w: f64, h: f64) -> (Vec<Node>, Vec<[usize
     let mut nodes = Vec::new();
     for j in 0..=ny {
         for i in 0..=nx {
-            nodes.push(Node {
-                x: w * i as f64 / nx as f64,
-                y: h * j as f64 / ny as f64,
-            });
+            nodes.push(Node::new_2d(
+                w * i as f64 / nx as f64,
+                h * j as f64 / ny as f64,
+            ));
         }
     }
     let mut tris = Vec::new();
@@ -56,10 +56,8 @@ pub fn to_quadratic(nodes: &[Node], tris: &[[usize; 3]]) -> Quadratic {
                 return m;
             }
             let (pa, pb) = (q.nodes[a], q.nodes[b]);
-            q.nodes.push(Node {
-                x: (pa.x + pb.x) / 2.0,
-                y: (pa.y + pb.y) / 2.0,
-            });
+            q.nodes
+                .push(Node::new_2d((pa.x + pb.x) / 2.0, (pa.y + pb.y) / 2.0));
             q.mids.insert(key, q.nodes.len() - 1);
             q.nodes.len() - 1
         };

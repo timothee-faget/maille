@@ -190,7 +190,7 @@ mod tests {
     /// Carré unité coupé en deux Tri3 qui partagent l'arête 0-2.
     fn two_tri3() -> Mesh {
         let nodes = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
-            .map(|(x, y)| Node { x, y })
+            .map(|(x, y)| Node::new_2d(x, y))
             .to_vec();
         let tri = |n| Element::Tri3(Tri3::new(n, material(), 1.0, PlaneState::Stress).unwrap());
         Mesh::new(nodes, vec![tri([0, 1, 2]), tri([0, 2, 3])]).unwrap()
@@ -205,7 +205,7 @@ mod tests {
             (1.0, 1.0),
             (0.0, 1.0),
         ]
-        .map(|(x, y)| Node { x, y })
+        .map(|(x, y)| Node::new_2d(x, y))
         .to_vec();
         let tri6 = Tri6::new([0, 1, 2, 3, 4, 5], material(), 1.0, PlaneState::Stress).unwrap();
         Mesh::new(nodes, vec![Element::Tri6(tri6)]).unwrap()
@@ -301,7 +301,7 @@ mod tests {
 
     #[test]
     fn bars_cannot_be_shown() {
-        let nodes = vec![Node { x: 0.0, y: 0.0 }, Node { x: 1.0, y: 0.0 }];
+        let nodes = vec![Node::new_2d(0.0, 0.0), Node::new_2d(1.0, 0.0)];
         let bar = Bar {
             nodes: [0, 1],
             material: Material::new(1.0).unwrap(),

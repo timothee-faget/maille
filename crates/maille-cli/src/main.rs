@@ -28,10 +28,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn console() -> Result<(), Box<dyn std::error::Error>> {
     let material = Material::new(YOUNG)?;
     let nodes = (0..=ELEMENTS)
-        .map(|i| Node {
-            x: LENGTH * i as f64 / ELEMENTS as f64,
-            y: 0.0,
-        })
+        .map(|i| Node::new_2d(LENGTH * i as f64 / ELEMENTS as f64, 0.0))
         .collect();
     let elements = (0..ELEMENTS)
         .map(|i| Beam::new([i, i + 1], material, INERTIA).map(Element::Beam))

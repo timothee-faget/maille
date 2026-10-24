@@ -1,11 +1,23 @@
 use crate::error::MailleError;
 use crate::material::{Material, Section};
 
-/// Position d'un Node. Les Bar et Beam (1D) n'utilisent que `x` et ignorent `y`.
+/// Position d'un Node. Les Bar et Beam (1D) n'utilisent que `x`, les triangles (2D) `x` et `y`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Node {
     pub x: f64,
     pub y: f64,
+    pub z: f64,
+}
+
+impl Node {
+    pub fn new(x: f64, y: f64, z: f64) -> Self {
+        Self { x, y, z }
+    }
+
+    /// Node du plan z = 0, pour les Mesh 1D et 2D.
+    pub fn new_2d(x: f64, y: f64) -> Self {
+        Self::new(x, y, 0.0)
+    }
 }
 
 /// Degré de liberté d'un Node : U déplacement axial (Bar), V flèche et Theta rotation (Beam),

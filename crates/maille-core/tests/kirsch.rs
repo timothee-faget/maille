@@ -111,10 +111,7 @@ fn solve_kirsch(nr: usize, ntheta: usize, quadratic: bool) -> Solved {
         .iter()
         .map(|g| {
             let (r, t) = (A * (R / A).powf(g.x), std::f64::consts::FRAC_PI_2 * g.y);
-            Node {
-                x: r * t.cos(),
-                y: r * t.sin(),
-            }
+            Node::new_2d(r * t.cos(), r * t.sin())
         })
         .collect();
     let material = Material::with_poisson(E, NU).unwrap();

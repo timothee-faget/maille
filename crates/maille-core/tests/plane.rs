@@ -39,10 +39,10 @@ fn rect_mesh(nx: usize, ny: usize, w: f64, h: f64, nu: f64, state: PlaneState) -
     let mut nodes = Vec::new();
     for j in 0..=ny {
         for i in 0..=nx {
-            nodes.push(Node {
-                x: w * i as f64 / nx as f64,
-                y: h * j as f64 / ny as f64,
-            });
+            nodes.push(Node::new_2d(
+                w * i as f64 / nx as f64,
+                h * j as f64 / ny as f64,
+            ));
         }
     }
     let mut elements = Vec::new();
@@ -168,7 +168,7 @@ fn patch_mesh(state: PlaneState) -> Mesh {
         (0.7, 0.6),
         (1.3, 1.2),
     ]
-    .map(|(x, y)| Node { x, y })
+    .map(|(x, y)| Node::new_2d(x, y))
     .to_vec();
     let elements = [
         [0, 1, 4],
@@ -273,9 +273,9 @@ fn unconstrained_plate_is_reported_as_singular() {
 fn invalid_plane_inputs_are_typed_errors() {
     let m = Material::with_poisson(210e3, 0.3).unwrap();
     let unit = vec![
-        Node { x: 0.0, y: 0.0 },
-        Node { x: 1.0, y: 0.0 },
-        Node { x: 0.0, y: 1.0 },
+        Node::new_2d(0.0, 0.0),
+        Node::new_2d(1.0, 0.0),
+        Node::new_2d(0.0, 1.0),
     ];
     let make =
         |nodes: [usize; 3]| Element::Tri3(Tri3::new(nodes, m, 1.0, PlaneState::Stress).unwrap());
@@ -307,9 +307,9 @@ fn invalid_plane_inputs_are_typed_errors() {
         Err(MailleError::ClockwiseTriangle { element: 0 })
     );
     let aligned = vec![
-        Node { x: 0.0, y: 0.0 },
-        Node { x: 1.0, y: 1.0 },
-        Node { x: 2.0, y: 2.0 },
+        Node::new_2d(0.0, 0.0),
+        Node::new_2d(1.0, 1.0),
+        Node::new_2d(2.0, 2.0),
     ];
     assert_eq!(
         Mesh::new(aligned, vec![make([0, 1, 2])]),

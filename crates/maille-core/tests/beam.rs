@@ -17,10 +17,7 @@ fn close(a: f64, b: f64) -> bool {
 
 fn beam_mesh(n: usize) -> Mesh {
     let nodes = (0..=n)
-        .map(|i| Node {
-            x: L * i as f64 / n as f64,
-            y: 0.0,
-        })
+        .map(|i| Node::new_2d(L * i as f64 / n as f64, 0.0))
         .collect();
     let m = Material::new(E).unwrap();
     let elements = (0..n)
@@ -226,7 +223,7 @@ fn invalid_beam_inputs_are_typed_errors() {
     let beam = Element::Beam(Beam::new([1, 0], m, I).unwrap());
     assert_eq!(
         Mesh::new(
-            vec![Node { x: 0.0, y: 0.0 }, Node { x: 1.0, y: 0.0 }],
+            vec![Node::new_2d(0.0, 0.0), Node::new_2d(1.0, 0.0)],
             vec![beam]
         ),
         Err(MailleError::ReversedBeam { element: 0 })
@@ -239,9 +236,9 @@ fn invalid_beam_inputs_are_typed_errors() {
     });
     let beam = Element::Beam(Beam::new([0, 1], m, I).unwrap());
     let nodes = vec![
-        Node { x: 0.0, y: 0.0 },
-        Node { x: 1.0, y: 0.0 },
-        Node { x: 2.0, y: 0.0 },
+        Node::new_2d(0.0, 0.0),
+        Node::new_2d(1.0, 0.0),
+        Node::new_2d(2.0, 0.0),
     ];
     assert_eq!(
         Mesh::new(nodes, vec![beam, bar]),

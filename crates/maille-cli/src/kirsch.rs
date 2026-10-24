@@ -50,10 +50,7 @@ pub fn solve() -> Result<(Mesh, Field), MailleError> {
         .iter()
         .map(|g| {
             let (r, t) = (HOLE * (OUTER / HOLE).powf(g.x), FRAC_PI_2 * g.y);
-            Node {
-                x: r * t.cos(),
-                y: r * t.sin(),
-            }
+            Node::new_2d(r * t.cos(), r * t.sin())
         })
         .collect();
     let q = to_quadratic(&corners, &tris);

@@ -124,7 +124,7 @@ mod tests {
 
     #[test]
     fn nodal_stresses_refuse_1d_meshes_and_foreign_fields() {
-        let nodes = vec![Node { x: 0.0, y: 0.0 }, Node { x: 1.0, y: 0.0 }];
+        let nodes = vec![Node::new_2d(0.0, 0.0), Node::new_2d(1.0, 0.0)];
         let bar = Bar {
             nodes: [0, 1],
             material: Material::new(1.0).unwrap(),
@@ -150,9 +150,9 @@ mod tests {
         .unwrap();
         let triangle = Mesh::new(
             vec![
-                Node { x: 0.0, y: 0.0 },
-                Node { x: 1.0, y: 0.0 },
-                Node { x: 0.0, y: 1.0 },
+                Node::new_2d(0.0, 0.0),
+                Node::new_2d(1.0, 0.0),
+                Node::new_2d(0.0, 1.0),
             ],
             vec![Element::Tri3(tri)],
         )
