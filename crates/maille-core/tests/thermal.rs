@@ -549,3 +549,86 @@ fn convection_inputs_are_typed_errors() {
         Err(MailleError::InvalidProperty { .. })
     ));
 }
+
+/// Cylindre creux rᵢ < r < rₑ (quart, symétries adiabatiques naturelles), T(r) exacte imposée sur
+/// les deux bords : T = Tᵢ + (Tₑ − Tᵢ) ln(r/rᵢ) / ln(rₑ/rᵢ). Grille polaire `n` × `n`, rayons
+/// régulièrement espacés (en progression géométrique, la solution serait linéaire dans l'indice
+/// radial et le Tri3 exact aux Nodes : le test ne départagerait rien). Renvoie l'écart maximal aux Nodes rapporté à Tᵢ − Tₑ, et la puissance
+/// qui entre par le bord intérieur rapportée à la valeur exacte (π/2) k t (Tᵢ − Tₑ) / ln(rₑ/rᵢ).
+fn hollow_cylinder(n: usize, quadratic: bool) -> (f64, f64) {
+    let (ri, ro, ti, to) = (10.0, 40.0, 200.0, 20.0);
+    let exact = |p: &Node| ti + (to - ti) * (p.x.hypot(p.y) / ri).ln() / (ro / ri).ln();
+    let (grid, tris) = rect_grid(n, n, 1.0, 1.0);
+    let corners: Vec<Node> = grid
+        .iter()
+        .map(|g| {
+            let (r, t) = (ri + (ro - ri) * g.x, std::f64::consts::FRAC_PI_2 * g.y);
+            Node::new_2d(r * t.cos(), r * t.sin())
+        })
+        .collect();
+    let idx = |i: usize, j: usize| i + j * (n + 1);
+    // bords r = rᵢ (i = 0) et r = rₑ (i = n) : sommets, et milieux de leurs arêtes en Tri6
+    let mut inner: Vec<usize> = (0..=n).map(|j| idx(0, j)).collect();
+    let mut outer: Vec<usize> = (0..=n).map(|j| idx(n, j)).collect();
+    let (nodes, elements): (Vec<Node>, Vec<Element>) = if quadratic {
+        let q = to_quadratic(&corners, &tris);
+        inner.extend((0..n).map(|j| q.mid(idx(0, j), idx(0, j + 1))));
+        outer.extend((0..n).map(|j| q.mid(idx(n, j), idx(n, j + 1))));
+        let elements = q
+            .elements
+            .iter()
+            .map(|&e| Element::Tri6(Tri6::new(e, material(), T, PlaneState::Stress).unwrap()))
+            .collect();
+        (q.nodes, elements)
+    } else {
+        let elements = tris
+            .iter()
+            .map(|&e| Element::Tri3(Tri3::new(e, material(), T, PlaneState::Stress).unwrap()))
+            .collect();
+        (corners, elements)
+    };
+    let bcs = inner
+        .iter()
+        .chain(&outer)
+        .map(|&node| Bc {
+            node,
+            dof: Dof::T,
+            value: exact(&nodes[node]),
+        })
+        .collect();
+    let mesh = Mesh::new(nodes, elements).unwrap();
+    let field = solve(&mesh, bcs, Vec::new());
+    let error = mesh
+        .nodes
+        .iter()
+        .zip(&field.temperatures)
+        .map(|(p, t)| (t - exact(p)).abs())
+        .fold(0.0, f64::max);
+    let power = std::f64::consts::FRAC_PI_2 * K * T * (ti - to) / (ro / ri).ln();
+    let entering: f64 = inner.iter().map(|&n| field.reactions[n]).sum();
+    (error / (ti - to), entering / power)
+}
+
+#[test]
+fn hollow_cylinder_converges_to_the_logarithmic_profile() {
+    let (e8, p8) = hollow_cylinder(8, false);
+    let (e16, p16) = hollow_cylinder(16, false);
+    let (q8, pq8) = hollow_cylinder(8, true);
+    let (q16, _) = hollow_cylinder(16, true);
+    // Tri3 : ordre 2 en T et en puissance (erreur divisée par ~4 quand h est divisé par 2)
+    assert!(
+        (3.5..4.5).contains(&(e8 / e16)),
+        "Tri3 : {e8:.2e} puis {e16:.2e}"
+    );
+    let (d8, d16) = ((p8 - 1.0).abs(), (p16 - 1.0).abs());
+    assert!(
+        (3.5..4.5).contains(&(d8 / d16)),
+        "Tri3 : {p8:.5} puis {p16:.5}"
+    );
+    // Tri6 : ordre plus élevé, et déjà 1e-4 près en 8 × 8
+    assert!(q8 / q16 > 8.0, "Tri6 : {q8:.2e} puis {q16:.2e}");
+    assert!(
+        q8 < 2e-4 && (pq8 - 1.0).abs() < 1e-4,
+        "Tri6 : {q8:.2e}, puissance {pq8:.6}"
+    );
+}

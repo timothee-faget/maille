@@ -20,10 +20,12 @@ pub enum Quantity {
     TauXy,
     /// Norme du déplacement |u|.
     Displacement,
+    Temperature,
 }
 
 impl Quantity {
-    pub const ALL: [Self; 5] = [
+    /// Champs d'un Field statique, dans l'ordre des touches 1 à 5.
+    pub const MECHANICAL: [Self; 5] = [
         Self::VonMises,
         Self::SigmaXx,
         Self::SigmaYy,
@@ -38,6 +40,7 @@ impl Quantity {
             Self::SigmaYy => "σyy",
             Self::TauXy => "τxy",
             Self::Displacement => "|u|",
+            Self::Temperature => "T",
         }
     }
 }
@@ -46,7 +49,10 @@ pub struct Scene {
     nodes: Vec<[f64; 2]>,
     /// (ux, uy) par Node.
     displacements: Vec<[f64; 2]>,
+    /// Vide pour un Field thermique.
     stresses: Vec<Stress>,
+    /// Vide pour un Field statique.
+    temperatures: Vec<f64>,
     /// Triangles à remplir (indices de Nodes, antihoraires) : 1 par Tri3, 4 par Tri6.
     pub triangles: Vec<[u32; 3]>,
     /// Segments du contour des Elements, sans doublon : les arêtes internes des Tri6 découpés
@@ -86,7 +92,12 @@ impl From<MailleError> for SceneError {
 impl Scene {
     /// Erreur si le Mesh n'est pas fait de triangles (Bar, Beam, tétraèdres) ou si le Field vient d'un autre Mesh.
     pub fn new(mesh: &Mesh, field: &Field) -> Result<Self, SceneError> {
-        let stresses = nodal_stresses(mesh, field)?;
+        let thermal = !field.temperatures.is_empty();
+        let stresses = if thermal {
+            Vec::new()
+        } else {
+            nodal_stresses(mesh, field)?
+        };
         let mut triangles = Vec::new();
         let mut edges = HashSet::new();
         for e in &mesh.elements {
@@ -113,26 +124,47 @@ impl Scene {
         edges.sort_unstable();
         Ok(Self {
             nodes: mesh.nodes.iter().map(|p| [p.x, p.y]).collect(),
-            displacements: field.displacements.as_chunks::<2>().0.to_vec(),
+            displacements: if thermal {
+                vec![[0.0; 2]; mesh.nodes.len()]
+            } else {
+                field.displacements.as_chunks::<2>().0.to_vec()
+            },
             stresses,
+            temperatures: field.temperatures.clone(),
             triangles,
             edges,
         })
     }
 
-    /// Valeur du champ à chaque Node.
+    /// Champs affichables : la température pour un Field thermique, sinon les champs mécaniques.
+    pub fn quantities(&self) -> &'static [Quantity] {
+        if self.temperatures.is_empty() {
+            &Quantity::MECHANICAL
+        } else {
+            &[Quantity::Temperature]
+        }
+    }
+
+    /// Vrai si le Field a des déplacements à amplifier (statique).
+    pub fn has_displacements(&self) -> bool {
+        self.temperatures.is_empty()
+    }
+
+    /// Valeur du champ à chaque Node (vide si le champ n'est pas dans `quantities`).
     pub fn values(&self, quantity: Quantity) -> Vec<f64> {
-        self.stresses
-            .iter()
-            .zip(&self.displacements)
-            .map(|(s, u)| match quantity {
-                Quantity::VonMises => s.von_mises(),
-                Quantity::SigmaXx => s.sigma_xx,
-                Quantity::SigmaYy => s.sigma_yy,
-                Quantity::TauXy => s.tau_xy,
-                Quantity::Displacement => u[0].hypot(u[1]),
-            })
-            .collect()
+        let stress = |f: fn(&Stress) -> f64| self.stresses.iter().map(f).collect();
+        match quantity {
+            Quantity::VonMises => stress(Stress::von_mises),
+            Quantity::SigmaXx => stress(|s| s.sigma_xx),
+            Quantity::SigmaYy => stress(|s| s.sigma_yy),
+            Quantity::TauXy => stress(|s| s.tau_xy),
+            Quantity::Displacement => self
+                .displacements
+                .iter()
+                .map(|u| u[0].hypot(u[1]))
+                .collect(),
+            Quantity::Temperature => self.temperatures.clone(),
+        }
     }
 
     /// Coins (min, max) de la boîte englobante des positions x + scale·u (scale = 0 : non déformé).
@@ -355,6 +387,30 @@ mod tests {
             Scene::new(&mesh, &field).err(),
             Some(SceneError::Core(MailleError::NoStresses))
         );
+    }
+
+    #[test]
+    fn a_thermal_field_shows_only_the_temperature_without_deformation() {
+        let mesh = two_tri3();
+        let temperatures = vec![10.0, 20.0, 30.0, 40.0];
+        let field = Field {
+            displacements: Vec::new(),
+            reactions: vec![0.0; 4],
+            stresses: Vec::new(),
+            temperatures: temperatures.clone(),
+            heat_fluxes: Vec::new(),
+        };
+        let scene = Scene::new(&mesh, &field).unwrap();
+        assert_eq!(scene.quantities(), &[Quantity::Temperature]);
+        assert!(!scene.has_displacements());
+        for (v, t) in scene
+            .values(Quantity::Temperature)
+            .iter()
+            .zip(&temperatures)
+        {
+            assert!((v - t).abs() < 1e-12);
+        }
+        assert!(scene.deformation_scale().abs() < 1e-12);
     }
 
     #[test]

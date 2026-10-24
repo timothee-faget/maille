@@ -1,6 +1,7 @@
-//! Viewer de Maille : affiche un Mesh 2D et ses Fields dans une fenêtre (wgpu + winit).
+//! Viewer de Maille : affiche un Mesh 2D et ses Fields (statiques ou thermiques) dans une fenêtre
+//! (wgpu + winit).
 //!
-//! Client du cœur : aucun calcul mécanique ici, seulement de l'affichage.
+//! Client du cœur : aucun calcul ici, seulement de l'affichage.
 
 mod app;
 mod colormap;
@@ -19,7 +20,8 @@ pub fn show(mesh: &Mesh, field: &Field) -> Result<(), Box<dyn std::error::Error>
         "Maille — {} Elements, {} Nodes, {} DOF",
         mesh.elements.len(),
         mesh.nodes.len(),
-        field.displacements.len()
+        // un seul des deux est rempli, selon l'analyse
+        field.displacements.len() + field.temperatures.len()
     );
     let scene = scene::Scene::new(mesh, field)?;
     println!("{}", app::HELP);

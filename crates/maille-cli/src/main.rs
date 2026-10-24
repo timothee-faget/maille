@@ -1,9 +1,11 @@
 //! Cas d'exemple comparés à la solution analytique :
 //! - `console` (par défaut) : console en acier chargée en bout ;
-//! - `kirsch` : plaque trouée de Kirsch, voir `kirsch.rs`.
+//! - `kirsch` : plaque trouée de Kirsch, voir `kirsch.rs` ;
+//! - `cylindre` : conduction dans un cylindre creux, voir `cylinder.rs`.
 //!
-//! Unités cohérentes (N, mm, MPa) : le cœur ne convertit rien.
+//! Unités cohérentes (N, mm, MPa en mécanique ; W, mm, K en thermique) : le cœur ne convertit rien.
 
+mod cylinder;
 mod grid;
 mod kirsch;
 
@@ -21,7 +23,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match std::env::args().nth(1).as_deref() {
         None | Some("console") => console(),
         Some("kirsch") => kirsch::run(),
-        Some(other) => Err(format!("cas inconnu « {other} » : choisir console ou kirsch").into()),
+        Some("cylindre") => cylinder::run(),
+        Some(other) => {
+            Err(format!("cas inconnu « {other} » : choisir console, kirsch ou cylindre").into())
+        }
     }
 }
 

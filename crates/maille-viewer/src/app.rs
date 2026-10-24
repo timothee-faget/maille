@@ -16,7 +16,8 @@ use crate::scene::{range, Quantity, Scene};
 use crate::view::View;
 
 /// Touches et souris, rappelées dans le terminal à l'ouverture.
-pub const HELP: &str = "Touches : 1 von Mises, 2 σxx, 3 σyy, 4 τxy, 5 |u|, D déformée, \
+pub const HELP: &str =
+    "Touches : 1 von Mises, 2 σxx, 3 σyy, 4 τxy, 5 |u| (thermique : 1 T), D déformée, \
 C colormap, R recadrer, Échap quitter. Souris : molette pour zoomer, glisser pour déplacer.";
 
 /// Facteur de zoom par cran de molette.
@@ -45,8 +46,8 @@ impl App {
         Self {
             title,
             view: View::fit(scene.bounds(0.0), [1.0, 1.0], 0.0),
+            quantity: scene.quantities()[0],
             scene,
-            quantity: Quantity::VonMises,
             colormap: Colormap::Rainbow,
             deformed: false,
             follow_window: true,
@@ -123,12 +124,15 @@ impl App {
             _ => None,
         };
         if let Some(k) = digit {
-            self.quantity = Quantity::ALL[k];
+            match self.scene.quantities().get(k) {
+                Some(&q) => self.quantity = q,
+                None => return,
+            }
         } else {
             match &event.logical_key {
                 Key::Named(NamedKey::Escape) => return event_loop.exit(),
                 Key::Character(c) => match c.to_lowercase().as_str() {
-                    "d" => {
+                    "d" if self.scene.has_displacements() => {
                         self.deformed = !self.deformed;
                         // la déformée déborde du cadrage du Mesh non déformé
                         if self.follow_window {
