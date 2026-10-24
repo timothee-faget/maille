@@ -8,12 +8,15 @@ pub struct Node {
     pub y: f64,
 }
 
-/// Degré de liberté d'un Node : U déplacement axial (Bar), V flèche et Theta rotation (Beam).
+/// Degré de liberté d'un Node : U déplacement axial (Bar), V flèche et Theta rotation (Beam),
+/// Ux et Uy déplacements dans le plan (triangles).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dof {
     U,
     V,
     Theta,
+    Ux,
+    Uy,
 }
 
 /// Élément barre entre deux Nodes (indices dans `Mesh::nodes`).
@@ -43,10 +46,53 @@ impl Beam {
     }
 }
 
+/// Hypothèse 2D : contraintes planes (plaque mince) ou déformations planes (corps long).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaneState {
+    Stress,
+    Strain,
+}
+
+/// Triangle à 3 Nodes (déformation constante), Nodes dans le sens antihoraire.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Tri3 {
+    pub nodes: [usize; 3],
+    pub material: Material,
+    pub thickness: f64,
+    pub state: PlaneState,
+}
+
+impl Tri3 {
+    pub fn new(
+        nodes: [usize; 3],
+        material: Material,
+        thickness: f64,
+        state: PlaneState,
+    ) -> Result<Self, MailleError> {
+        if material.poisson.is_none() {
+            return Err(MailleError::MissingPoisson);
+        }
+        Ok(Self {
+            nodes,
+            material,
+            thickness: crate::material::positive("t (épaisseur)", thickness)?,
+            state,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Element {
     Bar(Bar),
     Beam(Beam),
+    Tri3(Tri3),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Family {
+    Bar,
+    Beam,
+    Plane,
 }
 
 impl Element {
@@ -54,6 +100,15 @@ impl Element {
         match self {
             Self::Bar(e) => &e.nodes,
             Self::Beam(e) => &e.nodes,
+            Self::Tri3(e) => &e.nodes,
+        }
+    }
+
+    fn family(&self) -> Family {
+        match self {
+            Self::Bar(_) => Family::Bar,
+            Self::Beam(_) => Family::Beam,
+            Self::Tri3(_) => Family::Plane,
         }
     }
 }
@@ -70,9 +125,9 @@ impl Mesh {
             return Err(MailleError::EmptyMesh);
         }
         let mesh = Self { nodes, elements };
-        let first_is_bar = matches!(mesh.elements[0], Element::Bar(_));
+        let family = mesh.elements[0].family();
         for (i, e) in mesh.elements.iter().enumerate() {
-            if matches!(e, Element::Bar(_)) != first_is_bar {
+            if e.family() != family {
                 return Err(MailleError::MixedElementTypes);
             }
             for &n in e.nodes() {
@@ -80,30 +135,62 @@ impl Mesh {
                     return Err(MailleError::UnknownNode { node: n });
                 }
             }
-            if mesh.length(i) == 0.0 {
-                return Err(MailleError::ZeroLengthElement { element: i });
-            }
-            if let Element::Beam(b) = e {
-                if mesh.nodes[b.nodes[1]].x < mesh.nodes[b.nodes[0]].x {
-                    return Err(MailleError::ReversedBeam { element: i });
+            match e {
+                Element::Bar(_) if mesh.length(i) == 0.0 => {
+                    return Err(MailleError::ZeroLengthElement { element: i });
                 }
+                Element::Beam(b) => {
+                    if mesh.length(i) == 0.0 {
+                        return Err(MailleError::ZeroLengthElement { element: i });
+                    }
+                    if mesh.nodes[b.nodes[1]].x < mesh.nodes[b.nodes[0]].x {
+                        return Err(MailleError::ReversedBeam { element: i });
+                    }
+                }
+                Element::Tri3(t) => {
+                    if t.material.poisson.is_none() {
+                        return Err(MailleError::MissingPoisson);
+                    }
+                    let c = mesh.coords(&t.nodes);
+                    let area2 = (c[1][0] - c[0][0]) * (c[2][1] - c[0][1])
+                        - (c[2][0] - c[0][0]) * (c[1][1] - c[0][1]);
+                    let longest = [(0, 1), (1, 2), (2, 0)]
+                        .iter()
+                        .map(|&(a, b)| (c[b][0] - c[a][0]).hypot(c[b][1] - c[a][1]))
+                        .fold(0.0_f64, f64::max);
+                    if area2.abs() <= 1e-12 * longest * longest {
+                        return Err(MailleError::DegenerateTriangle { element: i });
+                    }
+                    if area2 < 0.0 {
+                        return Err(MailleError::ClockwiseTriangle { element: i });
+                    }
+                }
+                _ => {}
             }
         }
         Ok(mesh)
     }
 
-    /// Longueur de l'Element `i` (indice valide garanti par `new`).
+    /// Positions (x, y) des Nodes donnés (indices valides garantis par `new`).
+    pub fn coords(&self, nodes: &[usize]) -> Vec<[f64; 2]> {
+        nodes
+            .iter()
+            .map(|&n| [self.nodes[n].x, self.nodes[n].y])
+            .collect()
+    }
+
+    /// Longueur de l'Element 1D `i` (indice valide garanti par `new`).
     pub fn length(&self, i: usize) -> f64 {
         let nodes = self.elements[i].nodes();
         let (a, b) = (nodes[0], nodes[1]);
         (self.nodes[b].x - self.nodes[a].x).abs()
     }
 
-    /// 1 DOF par Node pour des Bar, 2 pour des Beam (`new` interdit le mélange).
+    /// 1 DOF par Node pour des Bar, 2 pour des Beam et des triangles (`new` interdit le mélange).
     pub fn dofs_per_node(&self) -> usize {
-        match self.elements[0] {
-            Element::Bar(_) => 1,
-            Element::Beam(_) => 2,
+        match self.elements[0].family() {
+            Family::Bar => 1,
+            Family::Beam | Family::Plane => 2,
         }
     }
 
@@ -112,10 +199,10 @@ impl Mesh {
         if node >= self.nodes.len() {
             return Err(MailleError::UnknownNode { node });
         }
-        match (self.dofs_per_node(), dof) {
-            (1, Dof::U) => Ok(node),
-            (2, Dof::V) => Ok(2 * node),
-            (2, Dof::Theta) => Ok(2 * node + 1),
+        match (self.elements[0].family(), dof) {
+            (Family::Bar, Dof::U) => Ok(node),
+            (Family::Beam, Dof::V) | (Family::Plane, Dof::Ux) => Ok(2 * node),
+            (Family::Beam, Dof::Theta) | (Family::Plane, Dof::Uy) => Ok(2 * node + 1),
             _ => Err(MailleError::InvalidDof { node, dof }),
         }
     }

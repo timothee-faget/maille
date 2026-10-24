@@ -85,10 +85,12 @@ impl Model {
         }
         for d in &self.distributed {
             let e = &mesh.elements[d.element];
-            let length = mesh.length(d.element);
             let equivalent = match e {
-                Element::Bar(_) => bar_equivalent_load(d.value, length).to_vec(),
-                Element::Beam(_) => beam_equivalent_load(d.value, length).to_vec(),
+                Element::Bar(_) => bar_equivalent_load(d.value, mesh.length(d.element)).to_vec(),
+                Element::Beam(_) => beam_equivalent_load(d.value, mesh.length(d.element)).to_vec(),
+                Element::Tri3(_) => {
+                    return Err(MailleError::UnsupportedDistributedLoad { element: d.element })
+                }
             };
             for (g, v) in element_dofs(e).into_iter().zip(equivalent) {
                 f[g] += v;
