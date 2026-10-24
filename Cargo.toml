@@ -5,3 +5,8 @@ members = ["crates/maille-core", "crates/maille-cli"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
+
+# Solveur dense en O(n³) : les maillages 2D des tests sont trop lents sans optimisation.
+# À retirer quand le solveur creux arrive (M3).
+[profile.test]
+opt-level = 3
