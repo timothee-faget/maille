@@ -1,0 +1,7 @@
+[package]
+name = "maille-cli"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+maille-core = { path = "../maille-core" }
