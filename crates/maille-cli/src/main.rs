@@ -1,6 +1,11 @@
-//! Cas d'exemple : console en acier chargée en bout, comparée à la solution analytique.
+//! Cas d'exemple comparés à la solution analytique :
+//! - `console` (par défaut) : console en acier chargée en bout ;
+//! - `kirsch` : plaque trouée de Kirsch, voir `kirsch.rs`.
 //!
 //! Unités cohérentes (N, mm, MPa) : le cœur ne convertit rien.
+
+mod grid;
+mod kirsch;
 
 use maille_core::material::Material;
 use maille_core::mesh::{Beam, Dof, Element, Mesh, Node};
@@ -13,6 +18,14 @@ const TIP_LOAD: f64 = 100.0; // N
 const ELEMENTS: usize = 4;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    match std::env::args().nth(1).as_deref() {
+        None | Some("console") => console(),
+        Some("kirsch") => Ok(kirsch::run()?),
+        Some(other) => Err(format!("cas inconnu « {other} » : choisir console ou kirsch").into()),
+    }
+}
+
+fn console() -> Result<(), Box<dyn std::error::Error>> {
     let material = Material::new(YOUNG)?;
     let nodes = (0..=ELEMENTS)
         .map(|i| Node {
