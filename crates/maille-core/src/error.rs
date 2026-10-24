@@ -61,6 +61,8 @@ pub enum MailleError {
     MissingConductivity {
         element: usize,
     },
+    /// Donnée thermique (source, convection) sur un Model qui n'est pas thermique.
+    ThermalOnly,
     /// Bar et Beam n'ont pas de version thermique.
     UnsupportedThermalElement {
         element: usize,
@@ -140,6 +142,10 @@ impl fmt::Display for MailleError {
             Self::MissingConductivity { element } => write!(
                 f,
                 "le Material de l'Element {element} n'a pas de conductivité thermique, requise en thermique : le créer avec Material::conductive ou ajouter with_conductivity"
+            ),
+            Self::ThermalOnly => write!(
+                f,
+                "les sources de chaleur et la convection n'existent qu'en thermique : créer le Model avec Model::with_analysis(mesh, Analysis::Thermal, ...)"
             ),
             Self::UnsupportedThermalElement { element } => write!(
                 f,

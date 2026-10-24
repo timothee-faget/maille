@@ -1,5 +1,6 @@
 use crate::assembly::{
-    element_conduction, element_dofs, element_heat_fluxes, element_stiffness, element_stresses,
+    element_conduction, element_dofs, element_heat_fluxes, element_heat_source, element_stiffness,
+    element_stresses,
 };
 use crate::element::{bar_equivalent_load, beam_equivalent_load};
 use crate::error::MailleError;
@@ -31,6 +32,13 @@ pub struct DistributedLoad {
     pub value: f64,
 }
 
+/// Source de chaleur uniforme dans un Element, par unité de volume (thermique).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HeatSource {
+    pub element: usize,
+    pub value: f64,
+}
+
 /// Physique résolue sur le Mesh.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Analysis {
@@ -47,6 +55,7 @@ pub struct Model {
     bcs: Vec<Bc>,
     loads: Vec<Load>,
     distributed: Vec<DistributedLoad>,
+    heat_sources: Vec<HeatSource>,
 }
 
 impl Model {
@@ -101,6 +110,7 @@ impl Model {
             bcs,
             loads,
             distributed: Vec::new(),
+            heat_sources: Vec::new(),
         })
     }
 
@@ -115,6 +125,21 @@ impl Model {
             return Err(MailleError::UnknownElement { element: d.element });
         }
         self.distributed = distributed;
+        Ok(self)
+    }
+
+    /// Sources de chaleur volumiques, en analyse thermique seulement.
+    pub fn with_heat_sources(mut self, sources: Vec<HeatSource>) -> Result<Self, MailleError> {
+        if self.analysis != Analysis::Thermal {
+            return Err(MailleError::ThermalOnly);
+        }
+        if let Some(s) = sources
+            .iter()
+            .find(|s| s.element >= self.mesh.elements.len())
+        {
+            return Err(MailleError::UnknownElement { element: s.element });
+        }
+        self.heat_sources = sources;
         Ok(self)
     }
 
@@ -151,6 +176,12 @@ impl Model {
                 }
             };
             for (&g, v) in dofs[d.element].iter().zip(equivalent) {
+                f[g] += v;
+            }
+        }
+        for s in &self.heat_sources {
+            let equivalent = element_heat_source(mesh, s.element, s.value);
+            for (&g, v) in dofs[s.element].iter().zip(equivalent) {
                 f[g] += v;
             }
         }

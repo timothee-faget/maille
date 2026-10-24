@@ -5,7 +5,7 @@ mod common;
 use common::{box_grid, rect_grid, to_quadratic, to_quadratic_tet};
 use maille_core::material::{Material, Section};
 use maille_core::mesh::{Bar, Dof, Element, Mesh, Node, PlaneState, Tet10, Tet4, Tri3, Tri6};
-use maille_core::model::{Analysis, Bc, Load, Model};
+use maille_core::model::{Analysis, Bc, HeatSource, Load, Model};
 use maille_core::results::{nodal_stresses, Field};
 use maille_core::MailleError;
 
@@ -276,4 +276,110 @@ fn one_material_serves_both_analyses() {
     for t in &field.temperatures {
         assert!((t - 5.0).abs() < 1e-12, "sans flux, T uniforme");
     }
+}
+
+/// Dalle de largeur L (T = 0 en x = 0 et x = L), source Q uniforme : T = Q x (L − x) / 2k et
+/// qx = Q (x − L/2). Vérifie le bilan (toute la chaleur produite, Q V, sort par les deux faces) et
+/// renvoie les écarts maximaux de T aux Nodes et de qx aux points de Gauss, rapportés à leurs
+/// maximums Q L² / 8k et Q L / 2.
+fn slab_errors(mesh: &Mesh) -> (f64, f64) {
+    let q = 1e3;
+    let sources = (0..mesh.elements.len())
+        .map(|element| HeatSource { element, value: q })
+        .collect();
+    let mut bcs = fix_plane(mesh, 0.0, 0.0);
+    bcs.extend(fix_plane(mesh, L, 0.0));
+    let field = Model::with_analysis(mesh.clone(), Analysis::Thermal, bcs, Vec::new())
+        .unwrap()
+        .with_heat_sources(sources)
+        .unwrap()
+        .solve()
+        .unwrap();
+    let produced = q * L * H * T;
+    let out: f64 = field.reactions.iter().sum();
+    assert!(
+        (out + produced).abs() < 1e-9 * produced,
+        "bilan {out} contre {produced}"
+    );
+    let temperature = mesh
+        .nodes
+        .iter()
+        .zip(&field.temperatures)
+        .map(|(p, t)| (t - q * p.x * (L - p.x) / (2.0 * K)).abs())
+        .fold(0.0, f64::max);
+    let flux = field
+        .heat_fluxes
+        .iter()
+        .flatten()
+        .map(|f| (f.qx - q * (f.x - L / 2.0)).abs())
+        .fold(0.0, f64::max);
+    (temperature / (q * L * L / (8.0 * K)), flux / (q * L / 2.0))
+}
+
+#[test]
+fn quadratic_elements_are_exact_for_a_uniform_heat_source() {
+    // T quadratique et q linéaire : dans l'espace du Tri6 et du Tet10
+    for mesh in [plane_mesh(2, 1, true), solid_mesh([2, 1, 1], true)] {
+        let (t, q) = slab_errors(&mesh);
+        assert!(t < 1e-10 && q < 1e-10, "écarts T {t}, q {q}");
+    }
+}
+
+#[test]
+fn linear_elements_are_exact_at_the_nodes_and_their_flux_converges() {
+    // problème qui ne dépend que de x avec des charges consistantes : les Elements linéaires sont
+    // exacts aux Nodes (comme en 1D), mais leur flux est constant par Element (erreur en h)
+    let tri3 = [
+        plane_mesh(4, 2, false),
+        plane_mesh(8, 2, false),
+        plane_mesh(16, 2, false),
+    ];
+    let tet4 = [
+        solid_mesh([4, 1, 1], false),
+        solid_mesh([8, 1, 1], false),
+        solid_mesh([16, 1, 1], false),
+    ];
+    for meshes in [tri3, tet4] {
+        let errors: Vec<(f64, f64)> = meshes.iter().map(slab_errors).collect();
+        for &(t, q) in &errors {
+            assert!(t < 1e-10, "{errors:?}");
+            assert!(
+                q > 1e-3,
+                "un flux constant par Element ne peut pas être exact : {errors:?}"
+            );
+        }
+        // ordre 1 : l'erreur de flux est divisée par ~2 à chaque raffinement
+        for w in errors.windows(2) {
+            let ratio = w[0].1 / w[1].1;
+            assert!((1.8..2.2).contains(&ratio), "{errors:?}");
+        }
+    }
+}
+
+#[test]
+fn heat_sources_need_a_thermal_model_and_a_known_element() {
+    let mesh = plane_mesh(1, 1, false);
+    let source = |element| {
+        vec![HeatSource {
+            element,
+            value: 1.0,
+        }]
+    };
+    let steel = Material::with_poisson(210e3, 0.3).unwrap();
+    let (nodes, tris) = rect_grid(1, 1, L, H);
+    let elements = tris
+        .iter()
+        .map(|&n| Element::Tri3(Tri3::new(n, steel, T, PlaneState::Stress).unwrap()))
+        .collect();
+    let static_model =
+        Model::new(Mesh::new(nodes, elements).unwrap(), Vec::new(), Vec::new()).unwrap();
+    assert_eq!(
+        static_model.with_heat_sources(source(0)),
+        Err(MailleError::ThermalOnly)
+    );
+    let thermal = Model::with_analysis(mesh, Analysis::Thermal, Vec::new(), Vec::new()).unwrap();
+    assert_eq!(
+        thermal.with_heat_sources(source(2)),
+        Err(MailleError::UnknownElement { element: 2 })
+    );
 }

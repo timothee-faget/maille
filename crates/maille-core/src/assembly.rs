@@ -239,3 +239,26 @@ pub fn element_heat_fluxes(mesh: &Mesh, i: usize, t: &[f64]) -> Vec<HeatFlux> {
         Element::Bar(_) | Element::Beam(_) => Vec::new(),
     }
 }
+
+/// Puissances nodales équivalentes ∫ N Q dV d'une source uniforme `q` dans l'Element `i`.
+/// Vide pour les Bar et Beam.
+pub fn element_heat_source(mesh: &Mesh, i: usize, q: f64) -> Vec<f64> {
+    match &mesh.elements[i] {
+        Element::Tri3(t) => nodal_source(&PlaneKernel::tri3(t).gauss(mesh), q),
+        Element::Tri6(t) => nodal_source(&PlaneKernel::tri6(t).gauss(mesh), q),
+        Element::Tet4(t) => nodal_source(&SolidKernel::tet4(t).gauss(mesh), q),
+        Element::Tet10(t) => nodal_source(&SolidKernel::tet10(t).gauss(mesh), q),
+        Element::Bar(_) | Element::Beam(_) => Vec::new(),
+    }
+}
+
+/// Σ_g w_g N_i q.
+fn nodal_source<const D: usize>(points: &[GaussData<D>], q: f64) -> Vec<f64> {
+    let mut f = vec![0.0; points.first().map_or(0, |p| p.n.len())];
+    for p in points {
+        for (fi, ni) in f.iter_mut().zip(&p.n) {
+            *fi += p.weight * ni * q;
+        }
+    }
+    f
+}
