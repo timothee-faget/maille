@@ -1,7 +1,14 @@
 //! Cœur de calcul de Maille : maillage, éléments, assemblage, solveur.
 //!
 //! Pur : aucune I/O. Unités : le cœur ne convertit rien, l'utilisateur fournit
-//! un système d'unités cohérent (ex. N, mm, MPa).
+//! un système d'unités cohérent. Exemples :
+//! - mécanique : N, mm, MPa ;
+//! - thermique : W, mm, K (ou °C), d'où k en W/(mm·K), source Q en W/mm³, coefficient
+//!   d'échange h en W/(mm²·K).
+//!
+//! Un même Material sert aux deux analyses (E, ν et k) : N et mm donnent des énergies en mJ, donc
+//! des puissances en mW si le temps est en s. Mélanger MPa et W/(mm·K) reste cohérent tant que
+//! les deux calculs sont lus séparément (il n'y a pas encore de couplage).
 
 pub mod assembly;
 pub mod element;

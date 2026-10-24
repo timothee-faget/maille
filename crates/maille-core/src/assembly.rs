@@ -210,20 +210,13 @@ fn conductivity(material: &Material) -> f64 {
 /// Matrice de conduction de l'Element `i`, un DOF (T) par Node dans l'ordre de ses Nodes.
 /// Vide pour les Bar et Beam (refusés en thermique par `Model`).
 pub fn element_conduction(mesh: &Mesh, i: usize) -> Vec<Vec<f64>> {
-    match &mesh.elements[i] {
-        Element::Tri3(t) => {
-            conduction(&PlaneKernel::tri3(t).gauss(mesh), conductivity(&t.material))
-        }
-        Element::Tri6(t) => {
-            conduction(&PlaneKernel::tri6(t).gauss(mesh), conductivity(&t.material))
-        }
-        Element::Tet4(t) => {
-            conduction(&SolidKernel::tet4(t).gauss(mesh), conductivity(&t.material))
-        }
-        Element::Tet10(t) => conduction(
-            &SolidKernel::tet10(t).gauss(mesh),
-            conductivity(&t.material),
-        ),
+    let e = &mesh.elements[i];
+    let k = conductivity(e.material());
+    match e {
+        Element::Tri3(t) => conduction(&PlaneKernel::tri3(t).gauss(mesh), k),
+        Element::Tri6(t) => conduction(&PlaneKernel::tri6(t).gauss(mesh), k),
+        Element::Tet4(t) => conduction(&SolidKernel::tet4(t).gauss(mesh), k),
+        Element::Tet10(t) => conduction(&SolidKernel::tet10(t).gauss(mesh), k),
         Element::Bar(_) | Element::Beam(_) => Vec::new(),
     }
 }
@@ -273,6 +266,24 @@ pub struct FaceConvection {
     pub positions: Vec<usize>,
     pub matrix: Vec<Vec<f64>>,
     pub load: Vec<f64>,
+}
+
+impl FaceConvection {
+    /// Ajoute h ∫ N Nᵀ à la matrice `ke` de l'Element.
+    pub fn add_matrix(&self, ke: &mut [Vec<f64>]) {
+        for (row, &a) in self.matrix.iter().zip(&self.positions) {
+            for (v, &b) in row.iter().zip(&self.positions) {
+                ke[a][b] += v;
+            }
+        }
+    }
+
+    /// Ajoute h T∞ ∫ N au second membre global `f` ; `dofs` : DOF globaux des Nodes de l'Element.
+    pub fn add_load(&self, dofs: &[usize], f: &mut [f64]) {
+        for (&p, v) in self.positions.iter().zip(&self.load) {
+            f[dofs[p]] += v;
+        }
+    }
 }
 
 /// Convection de coefficient `film` vers la température `sink` sur la face `face` de l'Element `i`

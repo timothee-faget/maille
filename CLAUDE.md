@@ -50,6 +50,9 @@ le mailleur arrivent après un solveur validé, pas avant.
 
 Contraignant, ne pas inventer de synonymes : **Mesh** (maillage), **Node**, **Element**, **DOF** (degré de liberté),
 **Material**, **BC** (condition aux limites : Dirichlet / Neumann), **Load**, **Step**, **Field** (champ de résultats).
+Thermique (M3) : **Analysis** (`Static` / `Thermal`, la physique résolue), **HeatSource** (source volumique),
+**Convection** (échange h (T − T∞) sur une face, champs `film` et `sink` comme Abaqus). **Step** reste réservé à
+l'étape de calcul avec son temps (M5) : une Step portera une Analysis.
 
 ## Workflow
 

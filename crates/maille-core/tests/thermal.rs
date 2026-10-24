@@ -632,3 +632,24 @@ fn hollow_cylinder_converges_to_the_logarithmic_profile() {
         "Tri6 : {q8:.2e}, puissance {pq8:.6}"
     );
 }
+
+#[test]
+fn any_finite_fluid_temperature_is_accepted() {
+    let mesh = plane_mesh(1, 1, false);
+    let thermal =
+        || Model::with_analysis(mesh.clone(), Analysis::Thermal, Vec::new(), Vec::new()).unwrap();
+    let c = |sink| {
+        vec![Convection {
+            element: 0,
+            face: 0,
+            film: 10.0,
+            sink,
+        }]
+    };
+    assert!(thermal().with_convection(c(-40.0)).is_ok());
+    assert!(thermal().with_convection(c(0.0)).is_ok());
+    assert!(matches!(
+        thermal().with_convection(c(f64::NAN)),
+        Err(MailleError::NonFinite { .. })
+    ));
+}

@@ -4,6 +4,7 @@ use crate::assembly::{
 };
 use crate::element::{bar_equivalent_load, beam_equivalent_load};
 use crate::error::MailleError;
+use crate::material::positive;
 use crate::mesh::{Dof, Element, Mesh};
 use crate::results::Field;
 use crate::solve::{reverse_cuthill_mckee, SkylineMatrix};
@@ -32,7 +33,8 @@ pub struct DistributedLoad {
     pub value: f64,
 }
 
-/// Source de chaleur uniforme dans un Element, par unité de volume (thermique).
+/// Source de chaleur uniforme dans un Element (thermique) : puissance par unité de volume
+/// (ex. W/mm³ avec des W et des mm).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HeatSource {
     pub element: usize,
@@ -45,9 +47,10 @@ pub struct HeatSource {
 pub struct Convection {
     pub element: usize,
     pub face: usize,
-    /// Coefficient d'échange h (puissance par unité de surface et par degré).
+    /// Coefficient d'échange h, strictement positif : puissance par unité de surface et par degré
+    /// (ex. W/(mm²·K)). Nom Abaqus : *film*.
     pub film: f64,
-    /// Température du fluide T∞.
+    /// Température du fluide T∞, quelconque mais finie. Nom Abaqus : *sink*.
     pub sink: f64,
 }
 
@@ -132,11 +135,8 @@ impl Model {
         mut self,
         distributed: Vec<DistributedLoad>,
     ) -> Result<Self, MailleError> {
-        if let Some(d) = distributed
-            .iter()
-            .find(|d| d.element >= self.mesh.elements.len())
-        {
-            return Err(MailleError::UnknownElement { element: d.element });
+        for d in &distributed {
+            self.element(d.element)?;
         }
         self.distributed = distributed;
         Ok(self)
@@ -144,14 +144,9 @@ impl Model {
 
     /// Sources de chaleur volumiques, en analyse thermique seulement.
     pub fn with_heat_sources(mut self, sources: Vec<HeatSource>) -> Result<Self, MailleError> {
-        if self.analysis != Analysis::Thermal {
-            return Err(MailleError::ThermalOnly);
-        }
-        if let Some(s) = sources
-            .iter()
-            .find(|s| s.element >= self.mesh.elements.len())
-        {
-            return Err(MailleError::UnknownElement { element: s.element });
+        self.require_thermal()?;
+        for s in &sources {
+            self.element(s.element)?;
         }
         self.heat_sources = sources;
         Ok(self)
@@ -159,29 +154,40 @@ impl Model {
 
     /// Convection sur des faces, en analyse thermique seulement.
     pub fn with_convection(mut self, convection: Vec<Convection>) -> Result<Self, MailleError> {
-        if self.analysis != Analysis::Thermal {
-            return Err(MailleError::ThermalOnly);
-        }
+        self.require_thermal()?;
         for c in &convection {
-            let Some(e) = self.mesh.elements.get(c.element) else {
-                return Err(MailleError::UnknownElement { element: c.element });
-            };
-            if e.face_nodes(c.face).is_none() {
+            if self.element(c.element)?.face_positions(c.face).is_none() {
                 return Err(MailleError::UnknownFace {
                     element: c.element,
                     face: c.face,
                 });
             }
-            crate::material::positive("h (coefficient d'échange)", c.film)?;
+            positive("h (coefficient d'échange)", c.film)?;
             if !c.sink.is_finite() {
-                return Err(MailleError::InvalidProperty {
-                    name: "T∞ (température du fluide), doit être finie",
+                return Err(MailleError::NonFinite {
+                    name: "T∞ (température du fluide)",
                     value: c.sink,
                 });
             }
         }
         self.convection = convection;
         Ok(self)
+    }
+
+    /// L'Element `i`, ou `UnknownElement`.
+    fn element(&self, i: usize) -> Result<&Element, MailleError> {
+        self.mesh
+            .elements
+            .get(i)
+            .ok_or(MailleError::UnknownElement { element: i })
+    }
+
+    fn require_thermal(&self) -> Result<(), MailleError> {
+        if self.analysis == Analysis::Thermal {
+            Ok(())
+        } else {
+            Err(MailleError::ThermalOnly)
+        }
     }
 
     /// Résout K_ff u_f = F_f − K_fc u_c (K : rigidité en statique, conduction en thermique), puis
@@ -210,11 +216,7 @@ impl Model {
             Analysis::Thermal => {
                 let mut k = element_conduction(mesh, i);
                 for face in &faces[i] {
-                    for (row, &a) in face.matrix.iter().zip(&face.positions) {
-                        for (v, &b) in row.iter().zip(&face.positions) {
-                            k[a][b] += v;
-                        }
-                    }
+                    face.add_matrix(&mut k);
                 }
                 k
             }
@@ -243,11 +245,9 @@ impl Model {
                 f[g] += v;
             }
         }
-        for (i, terms) in faces.iter().enumerate() {
+        for (terms, element_dofs) in faces.iter().zip(&dofs) {
             for face in terms {
-                for (&p, v) in face.positions.iter().zip(&face.load) {
-                    f[dofs[i][p]] += v;
-                }
+                face.add_load(element_dofs, &mut f);
             }
         }
         let mut u = vec![0.0; n];

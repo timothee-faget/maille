@@ -93,6 +93,9 @@ impl Scene {
     /// Erreur si le Mesh n'est pas fait de triangles (Bar, Beam, tétraèdres) ou si le Field vient d'un autre Mesh.
     pub fn new(mesh: &Mesh, field: &Field) -> Result<Self, SceneError> {
         let thermal = !field.temperatures.is_empty();
+        if thermal && field.temperatures.len() != mesh.nodes.len() {
+            return Err(MailleError::FieldMeshMismatch.into());
+        }
         let stresses = if thermal {
             Vec::new()
         } else {
@@ -411,6 +414,16 @@ mod tests {
             assert!((v - t).abs() < 1e-12);
         }
         assert!(scene.deformation_scale().abs() < 1e-12);
+
+        // Field thermique d'un autre Mesh (3 températures pour 4 Nodes)
+        let foreign = Field {
+            temperatures: vec![1.0; 3],
+            ..field
+        };
+        assert_eq!(
+            Scene::new(&mesh, &foreign).err(),
+            Some(SceneError::Core(MailleError::FieldMeshMismatch))
+        );
     }
 
     #[test]

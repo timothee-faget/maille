@@ -16,7 +16,7 @@ pub struct Material {
     pub young: Option<f64>,
     /// Coefficient de Poisson ν, requis par les triangles et les tétraèdres (absent pour Bar et Beam).
     pub poisson: Option<f64>,
-    /// Conductivité thermique k.
+    /// Conductivité thermique k : puissance par unité de longueur et par degré (ex. W/(mm·K)).
     pub conductivity: Option<f64>,
 }
 
