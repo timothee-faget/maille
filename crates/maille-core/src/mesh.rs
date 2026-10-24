@@ -81,11 +81,41 @@ impl Tri3 {
     }
 }
 
+/// Triangle quadratique à 6 Nodes : sommets 0, 1, 2 (sens antihoraire), puis milieux d'arêtes
+/// 3 (0-1), 4 (1-2), 5 (2-0). Côtés droits seulement : chaque Node milieu est au milieu de son arête.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Tri6 {
+    pub nodes: [usize; 6],
+    pub material: Material,
+    pub thickness: f64,
+    pub state: PlaneState,
+}
+
+impl Tri6 {
+    pub fn new(
+        nodes: [usize; 6],
+        material: Material,
+        thickness: f64,
+        state: PlaneState,
+    ) -> Result<Self, MailleError> {
+        if material.poisson.is_none() {
+            return Err(MailleError::MissingPoisson);
+        }
+        Ok(Self {
+            nodes,
+            material,
+            thickness: crate::material::positive("t (épaisseur)", thickness)?,
+            state,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Element {
     Bar(Bar),
     Beam(Beam),
     Tri3(Tri3),
+    Tri6(Tri6),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +131,7 @@ impl Element {
             Self::Bar(e) => &e.nodes,
             Self::Beam(e) => &e.nodes,
             Self::Tri3(e) => &e.nodes,
+            Self::Tri6(e) => &e.nodes,
         }
     }
 
@@ -108,7 +139,7 @@ impl Element {
         match self {
             Self::Bar(_) => Family::Bar,
             Self::Beam(_) => Family::Beam,
-            Self::Tri3(_) => Family::Plane,
+            Self::Tri3(_) | Self::Tri6(_) => Family::Plane,
         }
     }
 }
@@ -147,28 +178,49 @@ impl Mesh {
                         return Err(MailleError::ReversedBeam { element: i });
                     }
                 }
-                Element::Tri3(t) => {
-                    if t.material.poisson.is_none() {
-                        return Err(MailleError::MissingPoisson);
-                    }
+                Element::Tri3(t) => mesh.check_triangle(i, &t.nodes, &t.material)?,
+                Element::Tri6(t) => {
+                    mesh.check_triangle(i, &t.nodes, &t.material)?;
                     let c = mesh.coords(&t.nodes);
-                    let area2 = (c[1][0] - c[0][0]) * (c[2][1] - c[0][1])
-                        - (c[2][0] - c[0][0]) * (c[1][1] - c[0][1]);
-                    let longest = [(0, 1), (1, 2), (2, 0)]
-                        .iter()
-                        .map(|&(a, b)| (c[b][0] - c[a][0]).hypot(c[b][1] - c[a][1]))
-                        .fold(0.0_f64, f64::max);
-                    if area2.abs() <= 1e-12 * longest * longest {
-                        return Err(MailleError::DegenerateTriangle { element: i });
-                    }
-                    if area2 < 0.0 {
-                        return Err(MailleError::ClockwiseTriangle { element: i });
+                    for (mid, (a, b)) in [(3, (0, 1)), (4, (1, 2)), (5, (2, 0))] {
+                        let middle = [(c[a][0] + c[b][0]) / 2.0, (c[a][1] + c[b][1]) / 2.0];
+                        let edge = (c[b][0] - c[a][0]).hypot(c[b][1] - c[a][1]);
+                        let off = (c[mid][0] - middle[0]).hypot(c[mid][1] - middle[1]);
+                        if off > 1e-9 * edge {
+                            return Err(MailleError::CurvedTriangle { element: i });
+                        }
                     }
                 }
                 _ => {}
             }
         }
         Ok(mesh)
+    }
+
+    /// Vérifie ν, l'aire et l'orientation d'un triangle ; seuls ses 3 premiers Nodes (sommets) comptent.
+    fn check_triangle(
+        &self,
+        element: usize,
+        nodes: &[usize],
+        material: &Material,
+    ) -> Result<(), MailleError> {
+        if material.poisson.is_none() {
+            return Err(MailleError::MissingPoisson);
+        }
+        let c = self.coords(&nodes[..3]);
+        let area2 =
+            (c[1][0] - c[0][0]) * (c[2][1] - c[0][1]) - (c[2][0] - c[0][0]) * (c[1][1] - c[0][1]);
+        let longest = [(0, 1), (1, 2), (2, 0)]
+            .iter()
+            .map(|&(a, b)| (c[b][0] - c[a][0]).hypot(c[b][1] - c[a][1]))
+            .fold(0.0_f64, f64::max);
+        if area2.abs() <= 1e-12 * longest * longest {
+            return Err(MailleError::DegenerateTriangle { element });
+        }
+        if area2 < 0.0 {
+            return Err(MailleError::ClockwiseTriangle { element });
+        }
+        Ok(())
     }
 
     /// Positions (x, y) des Nodes donnés (indices valides garantis par `new`).

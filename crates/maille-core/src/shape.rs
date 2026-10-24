@@ -11,6 +11,9 @@ pub fn tri3(xi: f64, eta: f64) -> ([f64; 3], [[f64; 2]; 3]) {
     )
 }
 
+/// Fonction de forme d'un triangle : (ξ, η) → (valeurs N_i, dérivées [∂N_i/∂ξ, ∂N_i/∂η]).
+pub type ShapeFn = fn(f64, f64) -> (Vec<f64>, Vec<[f64; 2]>);
+
 /// `tri3` en `Vec`, pour le code générique sur la forme de l'Element (voir `element::plane_stiffness`).
 pub fn tri3_vec(xi: f64, eta: f64) -> (Vec<f64>, Vec<[f64; 2]>) {
     let (n, dn) = tri3(xi, eta);
@@ -38,6 +41,12 @@ pub fn tri6(xi: f64, eta: f64) -> ([f64; 6], [[f64; 2]; 6]) {
             [-4.0 * l3, 4.0 * (l1 - l3)],
         ],
     )
+}
+
+/// `tri6` en `Vec`, voir `tri3_vec`.
+pub fn tri6_vec(xi: f64, eta: f64) -> (Vec<f64>, Vec<[f64; 2]>) {
+    let (n, dn) = tri6(xi, eta);
+    (n.to_vec(), dn.to_vec())
 }
 
 /// Transformation du triangle de référence vers l'Element réel, en un point.

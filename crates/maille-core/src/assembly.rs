@@ -1,8 +1,9 @@
 use crate::element::{bar_stiffness, beam_stiffness, plane_d, plane_stiffness, plane_stresses};
-use crate::mesh::{Element, Mesh};
-use crate::quadrature::TRIANGLE_1;
+use crate::material::Material;
+use crate::mesh::{Element, Mesh, PlaneState, Tri3, Tri6};
+use crate::quadrature::{GaussPoint, TRIANGLE_1, TRIANGLE_3};
 use crate::results::PlaneStress;
-use crate::shape::tri3_vec;
+use crate::shape::{tri3_vec, tri6_vec, ShapeFn};
 
 /// Matrice dense carrée, stockage ligne par ligne.
 #[derive(Debug, Clone, PartialEq)]
@@ -33,7 +34,7 @@ pub fn element_dofs(e: &Element) -> Vec<usize> {
     let nodes = e.nodes();
     match e {
         Element::Bar(_) => nodes.to_vec(),
-        Element::Beam(_) | Element::Tri3(_) => {
+        Element::Beam(_) | Element::Tri3(_) | Element::Tri6(_) => {
             nodes.iter().flat_map(|&n| [2 * n, 2 * n + 1]).collect()
         }
     }
@@ -52,18 +53,8 @@ pub fn assemble(mesh: &Mesh) -> DenseMatrix {
                 .iter()
                 .map(|r| r.to_vec())
                 .collect(),
-            Element::Tri3(t) => {
-                // `Mesh::new` garantit que ν est présent
-                let nu = t.material.poisson.unwrap_or(0.0);
-                let d = plane_d(t.material.young, nu, t.state);
-                plane_stiffness(
-                    &mesh.coords(&t.nodes),
-                    &TRIANGLE_1,
-                    tri3_vec,
-                    &d,
-                    t.thickness,
-                )
-            }
+            Element::Tri3(t) => PlaneKernel::tri3(t).stiffness(mesh),
+            Element::Tri6(t) => PlaneKernel::tri6(t).stiffness(mesh),
         };
         let dofs = element_dofs(e);
         for (a, &ga) in dofs.iter().enumerate() {
@@ -75,28 +66,82 @@ pub fn assemble(mesh: &Mesh) -> DenseMatrix {
     k
 }
 
+/// Ce qui distingue un triangle d'un autre pour le calcul : règle de Gauss et fonctions de forme.
+struct PlaneKernel<'a> {
+    nodes: &'a [usize],
+    material: &'a Material,
+    thickness: f64,
+    state: PlaneState,
+    rule: &'static [GaussPoint],
+    shape: ShapeFn,
+}
+
+impl<'a> PlaneKernel<'a> {
+    fn tri3(t: &'a Tri3) -> Self {
+        Self {
+            nodes: &t.nodes,
+            material: &t.material,
+            thickness: t.thickness,
+            state: t.state,
+            rule: &TRIANGLE_1,
+            shape: tri3_vec,
+        }
+    }
+
+    /// 3 points de Gauss : exact pour la rigidité d'un Tri6 à côtés droits.
+    fn tri6(t: &'a Tri6) -> Self {
+        Self {
+            nodes: &t.nodes,
+            material: &t.material,
+            thickness: t.thickness,
+            state: t.state,
+            rule: &TRIANGLE_3,
+            shape: tri6_vec,
+        }
+    }
+
+    /// `Mesh::new` garantit que ν est présent.
+    fn nu(&self) -> f64 {
+        self.material.poisson.unwrap_or(0.0)
+    }
+
+    fn stiffness(&self, mesh: &Mesh) -> Vec<Vec<f64>> {
+        let d = plane_d(self.material.young, self.nu(), self.state);
+        plane_stiffness(
+            &mesh.coords(self.nodes),
+            self.rule,
+            self.shape,
+            &d,
+            self.thickness,
+        )
+    }
+
+    fn stresses(&self, mesh: &Mesh, u: &[f64]) -> Vec<PlaneStress> {
+        let nu = self.nu();
+        let d = plane_d(self.material.young, nu, self.state);
+        let u_e: Vec<f64> = self
+            .nodes
+            .iter()
+            .flat_map(|&n| [u[2 * n], u[2 * n + 1]])
+            .collect();
+        plane_stresses(
+            &mesh.coords(self.nodes),
+            self.rule,
+            self.shape,
+            &d,
+            &u_e,
+            nu,
+            self.state,
+        )
+    }
+}
+
 /// Contraintes aux points de Gauss de l'Element `i`, à partir des déplacements globaux `u`.
 /// Vide pour les Bar et Beam.
 pub fn element_stresses(mesh: &Mesh, i: usize, u: &[f64]) -> Vec<PlaneStress> {
     match &mesh.elements[i] {
-        Element::Tri3(t) => {
-            // `Mesh::new` garantit que ν est présent
-            let nu = t.material.poisson.unwrap_or(0.0);
-            let d = plane_d(t.material.young, nu, t.state);
-            let u_e: Vec<f64> = element_dofs(&mesh.elements[i])
-                .iter()
-                .map(|&g| u[g])
-                .collect();
-            plane_stresses(
-                &mesh.coords(&t.nodes),
-                &TRIANGLE_1,
-                tri3_vec,
-                &d,
-                &u_e,
-                nu,
-                t.state,
-            )
-        }
+        Element::Tri3(t) => PlaneKernel::tri3(t).stresses(mesh, u),
+        Element::Tri6(t) => PlaneKernel::tri6(t).stresses(mesh, u),
         Element::Bar(_) | Element::Beam(_) => Vec::new(),
     }
 }

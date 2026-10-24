@@ -250,3 +250,85 @@ mod plane_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod tri6_tests {
+    use super::*;
+    use crate::quadrature::TRIANGLE_3;
+    use crate::shape::tri6_vec;
+
+    // mêmes sommets que les tests du Tri3 (aire 3), milieux d'arêtes 0-1, 1-2, 2-0
+    const COORDS: [[f64; 2]; 6] = [
+        [0.0, 0.0],
+        [2.0, 0.0],
+        [0.0, 3.0],
+        [1.0, 0.0],
+        [1.0, 1.5],
+        [0.0, 1.5],
+    ];
+    const THICKNESS: f64 = 0.5;
+
+    fn ke(d: &[[f64; 3]; 3]) -> Vec<Vec<f64>> {
+        plane_stiffness(&COORDS, &TRIANGLE_3, tri6_vec, d, THICKNESS)
+    }
+
+    fn quad_form(k: &[Vec<f64>], u: &[f64]) -> f64 {
+        k.iter()
+            .zip(u)
+            .map(|(row, ui)| ui * row.iter().zip(u).map(|(a, b)| a * b).sum::<f64>())
+            .sum()
+    }
+
+    #[test]
+    fn tri6_stiffness_is_symmetric_and_ignores_rigid_motions() {
+        let k = ke(&plane_d(210e3, 0.3, PlaneState::Stress));
+        for (i, row) in k.iter().enumerate() {
+            for (j, v) in row.iter().enumerate() {
+                assert!((v - k[j][i]).abs() < 1e-9 * k[0][0]);
+            }
+        }
+        let translation_x: Vec<f64> = COORDS.iter().flat_map(|_| [1.0, 0.0]).collect();
+        let translation_y: Vec<f64> = COORDS.iter().flat_map(|_| [0.0, 1.0]).collect();
+        let rotation: Vec<f64> = COORDS.iter().flat_map(|c| [-c[1], c[0]]).collect();
+        for u in [translation_x, translation_y, rotation] {
+            for row in &k {
+                let f: f64 = row.iter().zip(&u).map(|(a, b)| a * b).sum();
+                assert!(f.abs() < 1e-9 * k[0][0], "f = {f}");
+            }
+        }
+    }
+
+    #[test]
+    fn tri6_strain_energy_of_a_uniform_strain_is_t_a_eps_d_eps() {
+        let area = 3.0;
+        for state in [PlaneState::Stress, PlaneState::Strain] {
+            let d = plane_d(210e3, 0.3, state);
+            let k = ke(&d);
+            for eps in [
+                [1e-3, 0.0, 0.0],
+                [0.0, 1e-3, 0.0],
+                [0.0, 0.0, 1e-3],
+                [1e-3, -2e-3, 3e-3],
+            ] {
+                let u: Vec<f64> = COORDS
+                    .iter()
+                    .flat_map(|c| {
+                        [
+                            eps[0] * c[0] + eps[2] / 2.0 * c[1],
+                            eps[1] * c[1] + eps[2] / 2.0 * c[0],
+                        ]
+                    })
+                    .collect();
+                let expected: f64 = THICKNESS
+                    * area
+                    * (0..3)
+                        .map(|r| eps[r] * (0..3).map(|c| d[r][c] * eps[c]).sum::<f64>())
+                        .sum::<f64>();
+                assert!(
+                    (quad_form(&k, &u) - expected).abs() < 1e-9 * expected,
+                    "{state:?} {eps:?}"
+                );
+            }
+        }
+    }
+}

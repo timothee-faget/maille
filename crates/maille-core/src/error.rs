@@ -42,6 +42,10 @@ pub enum MailleError {
     ClockwiseTriangle {
         element: usize,
     },
+    /// Tri6 dont un Node milieu n'est pas au milieu de son arête (côtés courbes non supportés).
+    CurvedTriangle {
+        element: usize,
+    },
     /// Un Element 2D a besoin de ν : construire le Material avec `Material::with_poisson`.
     MissingPoisson,
     UnsupportedDistributedLoad {
@@ -91,6 +95,10 @@ impl fmt::Display for MailleError {
             Self::ClockwiseTriangle { element } => write!(
                 f,
                 "le triangle {element} est dans le sens horaire : échanger deux de ses Nodes pour l'orienter dans le sens antihoraire"
+            ),
+            Self::CurvedTriangle { element } => write!(
+                f,
+                "le Tri6 {element} a un Node milieu qui n'est pas au milieu de son arête : seuls les côtés droits sont supportés"
             ),
             Self::MissingPoisson => write!(
                 f,
