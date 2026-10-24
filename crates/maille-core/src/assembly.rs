@@ -27,7 +27,8 @@ impl DenseMatrix {
 
 /// Indices globaux des DOF de l'Element `e`, dans l'ordre de sa matrice élémentaire.
 pub fn element_dofs(e: &Element) -> Vec<usize> {
-    let [a, b] = e.nodes();
+    let nodes = e.nodes();
+    let (a, b) = (nodes[0], nodes[1]);
     match e {
         Element::Bar(_) => vec![a, b],
         Element::Beam(_) => vec![2 * a, 2 * a + 1, 2 * b, 2 * b + 1],

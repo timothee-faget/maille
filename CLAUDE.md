@@ -10,7 +10,7 @@ Les lire avant toute décision d'architecture. Ce fichier ne les duplique pas.
 
 ## État du projet
 
-M0 en cours. Workspace Cargo : `crates/maille-core` (lib pure, zéro dépendance) et `crates/maille-cli` (client).
+M0 terminé (FEM 1D barre + poutre, validé contre l'analytique). M1 à venir. Workspace Cargo : `crates/maille-core` (lib pure, zéro dépendance) et `crates/maille-cli` (client).
 
 Commandes :
 - `cargo build`

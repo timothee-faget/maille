@@ -17,6 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let nodes = (0..=ELEMENTS)
         .map(|i| Node {
             x: LENGTH * i as f64 / ELEMENTS as f64,
+            y: 0.0,
         })
         .collect();
     let elements = (0..ELEMENTS)

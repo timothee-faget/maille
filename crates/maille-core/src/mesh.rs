@@ -1,9 +1,11 @@
 use crate::error::MailleError;
 use crate::material::{Material, Section};
 
+/// Position d'un Node. Les Bar et Beam (1D) n'utilisent que `x` et ignorent `y`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Node {
     pub x: f64,
+    pub y: f64,
 }
 
 /// Degré de liberté d'un Node : U déplacement axial (Bar), V flèche et Theta rotation (Beam).
@@ -48,10 +50,10 @@ pub enum Element {
 }
 
 impl Element {
-    pub fn nodes(&self) -> [usize; 2] {
+    pub fn nodes(&self) -> &[usize] {
         match self {
-            Self::Bar(e) => e.nodes,
-            Self::Beam(e) => e.nodes,
+            Self::Bar(e) => &e.nodes,
+            Self::Beam(e) => &e.nodes,
         }
     }
 }
@@ -73,7 +75,7 @@ impl Mesh {
             if matches!(e, Element::Bar(_)) != first_is_bar {
                 return Err(MailleError::MixedElementTypes);
             }
-            for n in e.nodes() {
+            for &n in e.nodes() {
                 if n >= mesh.nodes.len() {
                     return Err(MailleError::UnknownNode { node: n });
                 }
@@ -92,7 +94,8 @@ impl Mesh {
 
     /// Longueur de l'Element `i` (indice valide garanti par `new`).
     pub fn length(&self, i: usize) -> f64 {
-        let [a, b] = self.elements[i].nodes();
+        let nodes = self.elements[i].nodes();
+        let (a, b) = (nodes[0], nodes[1]);
         (self.nodes[b].x - self.nodes[a].x).abs()
     }
 

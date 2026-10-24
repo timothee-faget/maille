@@ -24,6 +24,7 @@ fn uniform_bar(n: usize, l: f64, e: f64, a: f64) -> Mesh {
     let nodes = (0..=n)
         .map(|i| Node {
             x: l * i as f64 / n as f64,
+            y: 0.0,
         })
         .collect();
     let elements = (0..n).map(|i| bar(i, i + 1, e, a)).collect();
@@ -62,7 +63,11 @@ fn two_bars_in_series_add_their_elongations() {
     let (e2, a2, l2) = (70e3, 25.0, 0.5);
     let p = 800.0;
     let mesh = Mesh::new(
-        vec![Node { x: 0.0 }, Node { x: l1 }, Node { x: l1 + l2 }],
+        vec![
+            Node { x: 0.0, y: 0.0 },
+            Node { x: l1, y: 0.0 },
+            Node { x: l1 + l2, y: 0.0 },
+        ],
         vec![bar(0, 1, e1, a1), bar(1, 2, e2, a2)],
     )
     .unwrap();
@@ -94,7 +99,11 @@ fn bar_fixed_at_both_ends_splits_the_reactions() {
     // charge P au nœud intermédiaire : R_gauche = −P·L2/L, R_droite = −P·L1/L
     let (e, a, l1, l2, p) = (100e3, 10.0, 1.0, 3.0, 400.0);
     let mesh = Mesh::new(
-        vec![Node { x: 0.0 }, Node { x: l1 }, Node { x: l1 + l2 }],
+        vec![
+            Node { x: 0.0, y: 0.0 },
+            Node { x: l1, y: 0.0 },
+            Node { x: l1 + l2, y: 0.0 },
+        ],
         vec![bar(0, 1, e, a), bar(1, 2, e, a)],
     )
     .unwrap();
@@ -182,13 +191,13 @@ fn invalid_inputs_are_typed_errors() {
     assert_eq!(Mesh::new(vec![], vec![]), Err(MailleError::EmptyMesh));
     assert_eq!(
         Mesh::new(
-            vec![Node { x: 0.0 }, Node { x: 0.0 }],
+            vec![Node { x: 0.0, y: 0.0 }, Node { x: 0.0, y: 0.0 }],
             vec![bar(0, 1, 1.0, 1.0)]
         ),
         Err(MailleError::ZeroLengthElement { element: 0 })
     );
     assert_eq!(
-        Mesh::new(vec![Node { x: 0.0 }], vec![bar(0, 1, 1.0, 1.0)]),
+        Mesh::new(vec![Node { x: 0.0, y: 0.0 }], vec![bar(0, 1, 1.0, 1.0)]),
         Err(MailleError::UnknownNode { node: 1 })
     );
     let mesh = uniform_bar(1, 1.0, 1.0, 1.0);
