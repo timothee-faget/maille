@@ -1,9 +1,9 @@
-use crate::assembly::{assemble, element_dofs, element_stresses, DenseMatrix};
+use crate::assembly::{element_dofs, element_stiffness, element_stresses};
 use crate::element::{bar_equivalent_load, beam_equivalent_load};
 use crate::error::MailleError;
 use crate::mesh::{Dof, Element, Mesh};
 use crate::results::Field;
-use crate::solve::cholesky_solve;
+use crate::solve::{reverse_cuthill_mckee, SkylineMatrix};
 
 /// Condition aux limites de Dirichlet : valeur imposée à un DOF d'un Node.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -74,10 +74,11 @@ impl Model {
     }
 
     /// Statique linéaire : K_ff u_f = F_f − K_fc u_c, puis réactions R = K u − F sur les DOF contraints.
+    /// K n'est jamais formée en entier : K_ff est assemblée en ligne de ciel, les réactions sont
+    /// recalculées Element par Element.
     pub fn solve(&self) -> Result<Field, MailleError> {
         let mesh = &self.mesh;
         let n = mesh.nodes.len() * mesh.dofs_per_node();
-        let k = assemble(mesh);
 
         let mut f = vec![0.0; n];
         for l in &self.loads {
@@ -104,30 +105,24 @@ impl Model {
             fixed[i] = true;
         }
 
-        let free: Vec<usize> = (0..n).filter(|&i| !fixed[i]).collect();
-        if !free.is_empty() {
-            let mut kff = DenseMatrix::zeros(free.len());
-            let mut rhs = vec![0.0; free.len()];
-            for (a, &i) in free.iter().enumerate() {
-                rhs[a] = f[i];
-                for j in 0..n {
-                    if fixed[j] {
-                        rhs[a] -= k.get(i, j) * u[j];
-                    }
-                }
-                for (b, &j) in free.iter().enumerate() {
-                    kff.add(a, b, k.get(i, j));
-                }
-            }
-            let uf = cholesky_solve(&kff, &rhs)?;
-            for (a, &i) in free.iter().enumerate() {
-                u[i] = uf[a];
-            }
+        let uf = solve_free(mesh, &fixed, &u, &f)?;
+        for (i, v) in (0..n).filter(|&i| !fixed[i]).zip(uf) {
+            u[i] = v;
         }
 
         let mut reactions = vec![0.0; n];
+        for i in 0..mesh.elements.len() {
+            let dofs = element_dofs(&mesh.elements[i]);
+            if !dofs.iter().any(|&g| fixed[g]) {
+                continue;
+            }
+            let ke = element_stiffness(mesh, i);
+            for (row, &g) in ke.iter().zip(&dofs).filter(|(_, &g)| fixed[g]) {
+                reactions[g] += row.iter().zip(&dofs).map(|(k, &h)| k * u[h]).sum::<f64>();
+            }
+        }
         for i in (0..n).filter(|&i| fixed[i]) {
-            reactions[i] = (0..n).map(|j| k.get(i, j) * u[j]).sum::<f64>() - f[i];
+            reactions[i] -= f[i];
         }
         let stresses = (0..mesh.elements.len())
             .map(|i| element_stresses(mesh, i, &u))
@@ -138,4 +133,73 @@ impl Model {
             stresses,
         })
     }
+}
+
+/// Résout K_ff u_f = F_f − K_fc u_c. Les DOF libres sont renumérotés par Cuthill-McKee inverse
+/// (graphe : deux DOF sont voisins s'ils partagent un Element) avant l'assemblage en ligne de ciel.
+/// Renvoie u_f dans l'ordre croissant des DOF libres.
+fn solve_free(mesh: &Mesh, fixed: &[bool], u: &[f64], f: &[f64]) -> Result<Vec<f64>, MailleError> {
+    // free[g] : indice du DOF global g parmi les DOF libres
+    let mut free = vec![None; fixed.len()];
+    let mut count = 0;
+    for (g, _) in fixed.iter().enumerate().filter(|(_, &c)| !c) {
+        free[g] = Some(count);
+        count += 1;
+    }
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    let element_free: Vec<Vec<usize>> = mesh
+        .elements
+        .iter()
+        .map(|e| element_dofs(e).iter().filter_map(|&g| free[g]).collect())
+        .collect();
+
+    let mut adjacency = vec![Vec::new(); count];
+    for dofs in &element_free {
+        for &a in dofs {
+            adjacency[a].extend(dofs.iter().filter(|&&b| b != a));
+        }
+    }
+    for neighbours in &mut adjacency {
+        neighbours.sort_unstable();
+        neighbours.dedup();
+    }
+    // rank[a] : position du DOF libre a dans la numérotation du solveur
+    let mut rank = vec![0; count];
+    for (r, a) in reverse_cuthill_mckee(&adjacency).into_iter().enumerate() {
+        rank[a] = r;
+    }
+    let mut first: Vec<usize> = (0..count).collect();
+    for (a, neighbours) in adjacency.iter().enumerate() {
+        for &b in neighbours {
+            first[rank[a]] = first[rank[a]].min(rank[b]);
+        }
+    }
+
+    let mut kff = SkylineMatrix::zeros(first);
+    let mut rhs = vec![0.0; count];
+    for (g, a) in free.iter().enumerate() {
+        if let Some(a) = a {
+            rhs[rank[*a]] += f[g];
+        }
+    }
+    for i in 0..mesh.elements.len() {
+        let ke = element_stiffness(mesh, i);
+        let dofs = element_dofs(&mesh.elements[i]);
+        for (row, &gi) in ke.iter().zip(&dofs) {
+            let Some(a) = free[gi] else { continue };
+            for (k, &gj) in row.iter().zip(&dofs) {
+                match free[gj] {
+                    // K symétrique : chaque paire (i, j) est ajoutée une fois, en dessous de la diagonale
+                    Some(b) if rank[b] <= rank[a] => kff.add(rank[a], rank[b], *k),
+                    Some(_) => {}
+                    None => rhs[rank[a]] -= k * u[gj],
+                }
+            }
+        }
+    }
+
+    let x = kff.cholesky_solve(&rhs)?;
+    Ok(rank.iter().map(|&r| x[r]).collect())
 }

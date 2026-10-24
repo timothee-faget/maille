@@ -6,12 +6,3 @@ members = ["crates/maille-core", "crates/maille-cli", "crates/maille-viewer"]
 version = "0.1.0"
 edition = "2021"
 
-# Solveur dense en O(n³) : les maillages 2D des tests sont trop lents sans optimisation.
-# À retirer quand le solveur creux arrive (M3).
-[profile.test]
-opt-level = 3
-
-# Même raison pour `cargo run -- kirsch` : le cœur est optimisé, les clients restent débogables.
-# À retirer quand le solveur creux arrive (M3).
-[profile.dev.package.maille-core]
-opt-level = 3

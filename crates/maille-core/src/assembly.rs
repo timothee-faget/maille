@@ -5,30 +5,6 @@ use crate::quadrature::{GaussPoint, TRIANGLE_1, TRIANGLE_3};
 use crate::results::PlaneStress;
 use crate::shape::{tri3_vec, tri6_vec, ShapeFn};
 
-/// Matrice dense carrée, stockage ligne par ligne.
-#[derive(Debug, Clone, PartialEq)]
-pub struct DenseMatrix {
-    pub n: usize,
-    pub data: Vec<f64>,
-}
-
-impl DenseMatrix {
-    pub fn zeros(n: usize) -> Self {
-        Self {
-            n,
-            data: vec![0.0; n * n],
-        }
-    }
-
-    pub fn get(&self, i: usize, j: usize) -> f64 {
-        self.data[i * self.n + j]
-    }
-
-    pub fn add(&mut self, i: usize, j: usize, v: f64) {
-        self.data[i * self.n + j] += v;
-    }
-}
-
 /// Indices globaux des DOF de l'Element `e`, dans l'ordre de sa matrice élémentaire.
 pub fn element_dofs(e: &Element) -> Vec<usize> {
     let nodes = e.nodes();
@@ -40,30 +16,20 @@ pub fn element_dofs(e: &Element) -> Vec<usize> {
     }
 }
 
-/// Assemble K global : DOF globaux = `node * dofs_per_node + local`.
-pub fn assemble(mesh: &Mesh) -> DenseMatrix {
-    let mut k = DenseMatrix::zeros(mesh.nodes.len() * mesh.dofs_per_node());
-    for (i, e) in mesh.elements.iter().enumerate() {
-        let ke: Vec<Vec<f64>> = match e {
-            Element::Bar(b) => bar_stiffness(b.material.young, b.section.area, mesh.length(i))
-                .iter()
-                .map(|r| r.to_vec())
-                .collect(),
-            Element::Beam(b) => beam_stiffness(b.material.young, b.inertia, mesh.length(i))
-                .iter()
-                .map(|r| r.to_vec())
-                .collect(),
-            Element::Tri3(t) => PlaneKernel::tri3(t).stiffness(mesh),
-            Element::Tri6(t) => PlaneKernel::tri6(t).stiffness(mesh),
-        };
-        let dofs = element_dofs(e);
-        for (a, &ga) in dofs.iter().enumerate() {
-            for (b, &gb) in dofs.iter().enumerate() {
-                k.add(ga, gb, ke[a][b]);
-            }
-        }
+/// Matrice de rigidité de l'Element `i`, DOF dans l'ordre de `element_dofs`.
+pub fn element_stiffness(mesh: &Mesh, i: usize) -> Vec<Vec<f64>> {
+    match &mesh.elements[i] {
+        Element::Bar(b) => bar_stiffness(b.material.young, b.section.area, mesh.length(i))
+            .iter()
+            .map(|r| r.to_vec())
+            .collect(),
+        Element::Beam(b) => beam_stiffness(b.material.young, b.inertia, mesh.length(i))
+            .iter()
+            .map(|r| r.to_vec())
+            .collect(),
+        Element::Tri3(t) => PlaneKernel::tri3(t).stiffness(mesh),
+        Element::Tri6(t) => PlaneKernel::tri6(t).stiffness(mesh),
     }
-    k
 }
 
 /// Ce qui distingue un triangle d'un autre pour le calcul : règle de Gauss et fonctions de forme.
