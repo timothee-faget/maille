@@ -1,7 +1,8 @@
-use crate::element::{bar_stiffness, beam_stiffness, plane_d, plane_stiffness};
+use crate::element::{bar_stiffness, beam_stiffness, plane_d, plane_stiffness, plane_stresses};
 use crate::mesh::{Element, Mesh};
 use crate::quadrature::TRIANGLE_1;
-use crate::shape::tri3;
+use crate::results::PlaneStress;
+use crate::shape::tri3_vec;
 
 /// Matrice dense carrée, stockage ligne par ligne.
 #[derive(Debug, Clone, PartialEq)]
@@ -58,7 +59,7 @@ pub fn assemble(mesh: &Mesh) -> DenseMatrix {
                 plane_stiffness(
                     &mesh.coords(&t.nodes),
                     &TRIANGLE_1,
-                    |xi, eta| tri3(xi, eta).1.to_vec(),
+                    tri3_vec,
                     &d,
                     t.thickness,
                 )
@@ -72,4 +73,30 @@ pub fn assemble(mesh: &Mesh) -> DenseMatrix {
         }
     }
     k
+}
+
+/// Contraintes aux points de Gauss de l'Element `i`, à partir des déplacements globaux `u`.
+/// Vide pour les Bar et Beam.
+pub fn element_stresses(mesh: &Mesh, i: usize, u: &[f64]) -> Vec<PlaneStress> {
+    match &mesh.elements[i] {
+        Element::Tri3(t) => {
+            // `Mesh::new` garantit que ν est présent
+            let nu = t.material.poisson.unwrap_or(0.0);
+            let d = plane_d(t.material.young, nu, t.state);
+            let u_e: Vec<f64> = element_dofs(&mesh.elements[i])
+                .iter()
+                .map(|&g| u[g])
+                .collect();
+            plane_stresses(
+                &mesh.coords(&t.nodes),
+                &TRIANGLE_1,
+                tri3_vec,
+                &d,
+                &u_e,
+                nu,
+                t.state,
+            )
+        }
+        Element::Bar(_) | Element::Beam(_) => Vec::new(),
+    }
 }

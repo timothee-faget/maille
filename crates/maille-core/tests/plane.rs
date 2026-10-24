@@ -1,5 +1,6 @@
 //! Validation de l'élément Tri3 : patch test et traction uniaxiale.
 
+use maille_core::element::plane_d;
 use maille_core::material::Material;
 use maille_core::mesh::{Bar, Dof, Element, Mesh, Node, PlaneState, Tri3};
 use maille_core::model::{Bc, DistributedLoad, Load, Model};
@@ -213,6 +214,28 @@ fn patch_test_linear_displacement_field_is_reproduced_exactly() {
             assert!(close(ux(&f, n), u, 1e-3), "{state:?} ux {n}");
             assert!(close(uy(&f, n), v, 1e-3), "{state:?} uy {n}");
         }
+        // patch test fort : contrainte constante σ = D ε dans les 6 triangles irréguliers
+        let eps = [a[1], b[2], a[2] + b[1]];
+        let d = plane_d(210e3, 0.3, state);
+        let sigma: [f64; 3] = std::array::from_fn(|r| (0..3).map(|c| d[r][c] * eps[c]).sum());
+        assert_eq!(f.stresses.len(), 6);
+        for (e, points) in f.stresses.iter().enumerate() {
+            assert_eq!(points.len(), 1);
+            let p = points[0];
+            let scale = sigma.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+            assert!(
+                close(p.sigma_xx, sigma[0], scale),
+                "{state:?} σxx élément {e}"
+            );
+            assert!(
+                close(p.sigma_yy, sigma[1], scale),
+                "{state:?} σyy élément {e}"
+            );
+            assert!(
+                close(p.tau_xy, sigma[2], scale),
+                "{state:?} τxy élément {e}"
+            );
+        }
     }
 }
 
@@ -368,4 +391,36 @@ fn distributed_load_on_a_triangle_is_refused() {
         result,
         Err(MailleError::UnsupportedDistributedLoad { element: 0 })
     );
+}
+
+#[test]
+fn uniaxial_tension_gives_uniform_stress_in_every_triangle() {
+    let (nx, ny, nu) = (3, 2, 0.3);
+    for state in [PlaneState::Stress, PlaneState::Strain] {
+        let (f, sigma) = uniaxial_tension(nx, ny, 6.0, 4.0, nu, state);
+        assert_eq!(f.stresses.len(), 2 * nx * ny);
+        for (e, points) in f.stresses.iter().enumerate() {
+            let p = points[0];
+            assert!(close(p.sigma_xx, sigma, sigma), "{state:?} σxx élément {e}");
+            assert!(close(p.sigma_yy, 0.0, sigma), "{state:?} σyy élément {e}");
+            assert!(close(p.tau_xy, 0.0, sigma), "{state:?} τxy élément {e}");
+            let (szz, vm) = match state {
+                PlaneState::Stress => (0.0, sigma),
+                PlaneState::Strain => (nu * sigma, sigma * (1.0 - nu + nu * nu).sqrt()),
+            };
+            assert!(close(p.sigma_zz, szz, sigma), "{state:?} σzz élément {e}");
+            assert!(
+                close(p.von_mises(), vm, sigma),
+                "{state:?} von Mises élément {e}"
+            );
+        }
+    }
+}
+
+#[test]
+fn tri3_gauss_point_is_the_centroid() {
+    // premier triangle de la grille : (0,0), (2,0), (2,2) pour 3 × 2 cases sur 6 × 4
+    let (f, _) = uniaxial_tension(3, 2, 6.0, 4.0, 0.3, PlaneState::Stress);
+    let p = f.stresses[0][0];
+    assert!(close(p.x, 4.0 / 3.0, 1.0) && close(p.y, 2.0 / 3.0, 1.0));
 }

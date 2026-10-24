@@ -1,5 +1,6 @@
 use crate::mesh::PlaneState;
 use crate::quadrature::GaussPoint;
+use crate::results::PlaneStress;
 use crate::shape::Mapping;
 
 /// Matrice de rigidité d'une barre 1D : (EA/L) [[1, -1], [-1, 1]].
@@ -56,25 +57,32 @@ pub fn plane_d(young: f64, nu: f64, state: PlaneState) -> [[f64; 3]; 3] {
     }
 }
 
+/// Matrice B (3 × 2n) stockée par colonne : `b[i]` est la colonne i, pour (εxx, εyy, γxy).
+/// Les DOF sont ordonnés (ux, uy) par Node.
+fn strain_displacement(dn_dx: &[[f64; 2]]) -> Vec<[f64; 3]> {
+    let mut b = vec![[0.0; 3]; 2 * dn_dx.len()];
+    for (k, grad) in dn_dx.iter().enumerate() {
+        b[2 * k] = [grad[0], 0.0, grad[1]];
+        b[2 * k + 1] = [0.0, grad[1], grad[0]];
+    }
+    b
+}
+
 /// Rigidité d'un triangle : K = Σ_g w_g t |det J| Bᵀ D B, DOF locaux (ux, uy) par Node.
-/// `dn_at(ξ, η)` donne les dérivées [∂N_i/∂ξ, ∂N_i/∂η] de la forme choisie (Tri3, plus tard Tri6).
+/// `shape_at(ξ, η)` donne les valeurs N_i et les dérivées [∂N_i/∂ξ, ∂N_i/∂η] de la forme choisie
+/// (Tri3, plus tard Tri6).
 pub fn plane_stiffness(
     coords: &[[f64; 2]],
     rule: &[GaussPoint],
-    dn_at: impl Fn(f64, f64) -> Vec<[f64; 2]>,
+    shape_at: impl Fn(f64, f64) -> (Vec<f64>, Vec<[f64; 2]>),
     d: &[[f64; 3]; 3],
     thickness: f64,
 ) -> Vec<Vec<f64>> {
     let m = 2 * coords.len();
     let mut ke = vec![vec![0.0; m]; m];
     for g in rule {
-        let map = Mapping::new(coords, &dn_at(g.xi, g.eta));
-        // B : 3 lignes (εxx, εyy, γxy), 2 colonnes par Node
-        let mut b = vec![[0.0; 3]; m];
-        for (k, grad) in map.dn_dx.iter().enumerate() {
-            b[2 * k] = [grad[0], 0.0, grad[1]];
-            b[2 * k + 1] = [0.0, grad[1], grad[0]];
-        }
+        let map = Mapping::new(coords, &shape_at(g.xi, g.eta).1);
+        let b = strain_displacement(&map.dn_dx);
         let factor = g.weight * thickness * map.det.abs();
         for i in 0..m {
             // (D B)_i = D · colonne i de B
@@ -85,6 +93,38 @@ pub fn plane_stiffness(
         }
     }
     ke
+}
+
+/// Contraintes σ = D B u aux points de Gauss d'un triangle ; `u_e` : déplacements locaux (ux, uy) par Node.
+pub fn plane_stresses(
+    coords: &[[f64; 2]],
+    rule: &[GaussPoint],
+    shape_at: impl Fn(f64, f64) -> (Vec<f64>, Vec<[f64; 2]>),
+    d: &[[f64; 3]; 3],
+    u_e: &[f64],
+    nu: f64,
+    state: PlaneState,
+) -> Vec<PlaneStress> {
+    rule.iter()
+        .map(|g| {
+            let (n, dn) = shape_at(g.xi, g.eta);
+            let b = strain_displacement(&Mapping::new(coords, &dn).dn_dx);
+            let eps: [f64; 3] =
+                std::array::from_fn(|r| b.iter().zip(u_e).map(|(col, u)| col[r] * u).sum());
+            let sigma: [f64; 3] = std::array::from_fn(|r| (0..3).map(|c| d[r][c] * eps[c]).sum());
+            PlaneStress {
+                x: n.iter().zip(coords).map(|(n, c)| n * c[0]).sum(),
+                y: n.iter().zip(coords).map(|(n, c)| n * c[1]).sum(),
+                sigma_xx: sigma[0],
+                sigma_yy: sigma[1],
+                tau_xy: sigma[2],
+                sigma_zz: match state {
+                    PlaneState::Stress => 0.0,
+                    PlaneState::Strain => nu * (sigma[0] + sigma[1]),
+                },
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -116,19 +156,13 @@ mod tests {
 mod plane_tests {
     use super::*;
     use crate::quadrature::TRIANGLE_1;
-    use crate::shape::tri3;
+    use crate::shape::tri3_vec;
 
     const COORDS: [[f64; 2]; 3] = [[0.0, 0.0], [2.0, 0.0], [0.0, 3.0]]; // aire 3
     const THICKNESS: f64 = 0.5;
 
     fn tri3_ke(d: &[[f64; 3]; 3]) -> Vec<Vec<f64>> {
-        plane_stiffness(
-            &COORDS,
-            &TRIANGLE_1,
-            |xi, eta| tri3(xi, eta).1.to_vec(),
-            d,
-            THICKNESS,
-        )
+        plane_stiffness(&COORDS, &TRIANGLE_1, tri3_vec, d, THICKNESS)
     }
 
     fn mul(k: &[Vec<f64>], u: &[f64]) -> Vec<f64> {

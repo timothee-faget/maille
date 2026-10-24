@@ -11,6 +11,12 @@ pub fn tri3(xi: f64, eta: f64) -> ([f64; 3], [[f64; 2]; 3]) {
     )
 }
 
+/// `tri3` en `Vec`, pour le code générique sur la forme de l'Element (voir `element::plane_stiffness`).
+pub fn tri3_vec(xi: f64, eta: f64) -> (Vec<f64>, Vec<[f64; 2]>) {
+    let (n, dn) = tri3(xi, eta);
+    (n.to_vec(), dn.to_vec())
+}
+
 /// Valeurs N_i et dérivées [∂N_i/∂ξ, ∂N_i/∂η] du Tri6 (quadratique).
 pub fn tri6(xi: f64, eta: f64) -> ([f64; 6], [[f64; 2]; 6]) {
     let (l1, l2, l3) = (1.0 - xi - eta, xi, eta);

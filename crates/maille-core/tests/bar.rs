@@ -52,6 +52,8 @@ fn fixed_free_bar_end_load_is_pl_over_ea() {
         .unwrap();
         let field = model.solve().unwrap();
         assert!(close(field.displacements[n], p * l / (e * a)), "n = {n}");
+        // pas de contraintes planes pour une Bar
+        assert!(field.stresses.iter().all(|s| s.is_empty()), "n = {n}");
         // équilibre : la réaction s'oppose à la charge
         assert!(close(field.reactions[0], -p), "n = {n}");
     }

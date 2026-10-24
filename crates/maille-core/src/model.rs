@@ -1,4 +1,4 @@
-use crate::assembly::{assemble, element_dofs, DenseMatrix};
+use crate::assembly::{assemble, element_dofs, element_stresses, DenseMatrix};
 use crate::element::{bar_equivalent_load, beam_equivalent_load};
 use crate::error::MailleError;
 use crate::mesh::{Dof, Element, Mesh};
@@ -129,9 +129,13 @@ impl Model {
         for i in (0..n).filter(|&i| fixed[i]) {
             reactions[i] = (0..n).map(|j| k.get(i, j) * u[j]).sum::<f64>() - f[i];
         }
+        let stresses = (0..mesh.elements.len())
+            .map(|i| element_stresses(mesh, i, &u))
+            .collect();
         Ok(Field {
             displacements: u,
             reactions,
+            stresses,
         })
     }
 }
