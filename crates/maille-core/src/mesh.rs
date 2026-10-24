@@ -22,7 +22,8 @@ impl Node {
 }
 
 /// Degré de liberté d'un Node : U déplacement axial (Bar), V flèche et Theta rotation (Beam),
-/// Ux et Uy déplacements dans le plan (triangles), Ux, Uy et Uz (tétraèdres).
+/// Ux et Uy déplacements dans le plan (triangles), Ux, Uy et Uz (tétraèdres), T température
+/// (analyse thermique).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dof {
     U,
@@ -31,6 +32,7 @@ pub enum Dof {
     Ux,
     Uy,
     Uz,
+    T,
 }
 
 /// Élément barre entre deux Nodes (indices dans `Mesh::nodes`).

@@ -1,4 +1,6 @@
-use crate::assembly::{element_dofs, element_stiffness, element_stresses};
+use crate::assembly::{
+    element_conduction, element_dofs, element_heat_fluxes, element_stiffness, element_stresses,
+};
 use crate::element::{bar_equivalent_load, beam_equivalent_load};
 use crate::error::MailleError;
 use crate::mesh::{Dof, Element, Mesh};
@@ -13,7 +15,8 @@ pub struct Bc {
     pub value: f64,
 }
 
-/// Force (ou moment pour `Theta`) nodale, Neumann.
+/// Force (ou moment pour `Theta`) nodale, Neumann. En thermique (`Dof::T`) : puissance apportée au
+/// Node (négative si elle sort).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Load {
     pub node: usize,
@@ -28,31 +31,60 @@ pub struct DistributedLoad {
     pub value: f64,
 }
 
+/// Physique résolue sur le Mesh.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Analysis {
+    /// Statique linéaire : déplacements, contraintes.
+    Static,
+    /// Thermique stationnaire : −∇·(k ∇T) = Q, un DOF `T` par Node.
+    Thermal,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Model {
     mesh: Mesh,
+    analysis: Analysis,
     bcs: Vec<Bc>,
     loads: Vec<Load>,
     distributed: Vec<DistributedLoad>,
 }
 
 impl Model {
-    /// Analyse statique linéaire. Le Material de chaque Element doit avoir E, et ν pour les
-    /// triangles et tétraèdres.
+    /// Analyse statique linéaire, voir `with_analysis`.
     pub fn new(mesh: Mesh, bcs: Vec<Bc>, loads: Vec<Load>) -> Result<Self, MailleError> {
+        Self::with_analysis(mesh, Analysis::Static, bcs, loads)
+    }
+
+    /// Le Material de chaque Element doit avoir les propriétés de l'analyse : en statique E, et ν
+    /// pour les triangles et tétraèdres ; en thermique k (triangles et tétraèdres seulement).
+    pub fn with_analysis(
+        mesh: Mesh,
+        analysis: Analysis,
+        bcs: Vec<Bc>,
+        loads: Vec<Load>,
+    ) -> Result<Self, MailleError> {
         for (i, e) in mesh.elements.iter().enumerate() {
             let m = e.material();
-            if m.young.is_none() {
-                return Err(MailleError::MissingYoung { element: i });
-            }
-            let plane_or_solid = !matches!(e, Element::Bar(_) | Element::Beam(_));
-            if plane_or_solid && m.poisson.is_none() {
-                return Err(MailleError::MissingPoisson { element: i });
+            let one_d = matches!(e, Element::Bar(_) | Element::Beam(_));
+            match analysis {
+                Analysis::Static if m.young.is_none() => {
+                    return Err(MailleError::MissingYoung { element: i })
+                }
+                Analysis::Static if !one_d && m.poisson.is_none() => {
+                    return Err(MailleError::MissingPoisson { element: i })
+                }
+                Analysis::Thermal if one_d => {
+                    return Err(MailleError::UnsupportedThermalElement { element: i })
+                }
+                Analysis::Thermal if m.conductivity.is_none() => {
+                    return Err(MailleError::MissingConductivity { element: i })
+                }
+                _ => {}
             }
         }
-        let mut seen = vec![false; mesh.nodes.len() * mesh.dofs_per_node()];
+        let mut seen = vec![false; mesh.nodes.len() * dofs_per_node(&mesh, analysis)];
         for bc in &bcs {
-            let i = mesh.dof_index(bc.node, bc.dof)?;
+            let i = dof_index(&mesh, analysis, bc.node, bc.dof)?;
             if std::mem::replace(&mut seen[i], true) {
                 return Err(MailleError::DuplicateBc {
                     node: bc.node,
@@ -61,10 +93,11 @@ impl Model {
             }
         }
         for l in &loads {
-            mesh.dof_index(l.node, l.dof)?;
+            dof_index(&mesh, analysis, l.node, l.dof)?;
         }
         Ok(Self {
             mesh,
+            analysis,
             bcs,
             loads,
             distributed: Vec::new(),
@@ -85,16 +118,28 @@ impl Model {
         Ok(self)
     }
 
-    /// Statique linéaire : K_ff u_f = F_f − K_fc u_c, puis réactions R = K u − F sur les DOF contraints.
-    /// K n'est jamais formée en entier : K_ff est assemblée en ligne de ciel, les réactions sont
-    /// recalculées Element par Element.
+    /// Résout K_ff u_f = F_f − K_fc u_c (K : rigidité en statique, conduction en thermique), puis
+    /// réactions R = K u − F sur les DOF contraints. K n'est jamais formée en entier : K_ff est
+    /// assemblée en ligne de ciel, les réactions sont recalculées Element par Element.
     pub fn solve(&self) -> Result<Field, MailleError> {
         let mesh = &self.mesh;
-        let n = mesh.nodes.len() * mesh.dofs_per_node();
+        let n = mesh.nodes.len() * dofs_per_node(mesh, self.analysis);
+        let dofs: Vec<Vec<usize>> = mesh
+            .elements
+            .iter()
+            .map(|e| match self.analysis {
+                Analysis::Static => element_dofs(e),
+                Analysis::Thermal => e.nodes().to_vec(),
+            })
+            .collect();
+        let matrix = |i: usize| match self.analysis {
+            Analysis::Static => element_stiffness(mesh, i),
+            Analysis::Thermal => element_conduction(mesh, i),
+        };
 
         let mut f = vec![0.0; n];
         for l in &self.loads {
-            f[mesh.dof_index(l.node, l.dof)?] += l.value;
+            f[dof_index(mesh, self.analysis, l.node, l.dof)?] += l.value;
         }
         for d in &self.distributed {
             let e = &mesh.elements[d.element];
@@ -105,52 +150,84 @@ impl Model {
                     return Err(MailleError::UnsupportedDistributedLoad { element: d.element })
                 }
             };
-            for (g, v) in element_dofs(e).into_iter().zip(equivalent) {
+            for (&g, v) in dofs[d.element].iter().zip(equivalent) {
                 f[g] += v;
             }
         }
         let mut u = vec![0.0; n];
         let mut fixed = vec![false; n];
         for bc in &self.bcs {
-            let i = mesh.dof_index(bc.node, bc.dof)?;
+            let i = dof_index(mesh, self.analysis, bc.node, bc.dof)?;
             u[i] = bc.value;
             fixed[i] = true;
         }
 
-        let uf = solve_free(mesh, &fixed, &u, &f)?;
+        let uf = solve_free(&dofs, &matrix, &fixed, &u, &f)?;
         for (i, v) in (0..n).filter(|&i| !fixed[i]).zip(uf) {
             u[i] = v;
         }
 
         let mut reactions = vec![0.0; n];
-        for i in 0..mesh.elements.len() {
-            let dofs = element_dofs(&mesh.elements[i]);
+        for (i, dofs) in dofs.iter().enumerate() {
             if !dofs.iter().any(|&g| fixed[g]) {
                 continue;
             }
-            let ke = element_stiffness(mesh, i);
-            for (row, &g) in ke.iter().zip(&dofs).filter(|(_, &g)| fixed[g]) {
-                reactions[g] += row.iter().zip(&dofs).map(|(k, &h)| k * u[h]).sum::<f64>();
+            for (row, &g) in matrix(i).iter().zip(dofs).filter(|(_, &g)| fixed[g]) {
+                reactions[g] += row.iter().zip(dofs).map(|(k, &h)| k * u[h]).sum::<f64>();
             }
         }
         for i in (0..n).filter(|&i| fixed[i]) {
             reactions[i] -= f[i];
         }
-        let stresses = (0..mesh.elements.len())
-            .map(|i| element_stresses(mesh, i, &u))
-            .collect();
-        Ok(Field {
-            displacements: u,
-            reactions,
-            stresses,
+        let elements = 0..mesh.elements.len();
+        Ok(match self.analysis {
+            Analysis::Static => Field {
+                stresses: elements.map(|i| element_stresses(mesh, i, &u)).collect(),
+                displacements: u,
+                reactions,
+                temperatures: Vec::new(),
+                heat_fluxes: Vec::new(),
+            },
+            Analysis::Thermal => Field {
+                heat_fluxes: elements.map(|i| element_heat_fluxes(mesh, i, &u)).collect(),
+                temperatures: u,
+                reactions,
+                displacements: Vec::new(),
+                stresses: Vec::new(),
+            },
         })
     }
 }
 
-/// Résout K_ff u_f = F_f − K_fc u_c. Les DOF libres sont renumérotés par Cuthill-McKee inverse
-/// (graphe : deux DOF sont voisins s'ils partagent un Element) avant l'assemblage en ligne de ciel.
+/// 1 DOF (T) par Node en thermique, sinon selon la famille d'Elements.
+fn dofs_per_node(mesh: &Mesh, analysis: Analysis) -> usize {
+    match analysis {
+        Analysis::Static => mesh.dofs_per_node(),
+        Analysis::Thermal => 1,
+    }
+}
+
+/// Indice global du DOF `dof` du Node `node` pour cette analyse.
+fn dof_index(mesh: &Mesh, analysis: Analysis, node: usize, dof: Dof) -> Result<usize, MailleError> {
+    match analysis {
+        Analysis::Static => mesh.dof_index(node, dof),
+        Analysis::Thermal if node >= mesh.nodes.len() => Err(MailleError::UnknownNode { node }),
+        Analysis::Thermal if dof == Dof::T => Ok(node),
+        Analysis::Thermal => Err(MailleError::InvalidDof { node, dof }),
+    }
+}
+
+/// Résout K_ff u_f = F_f − K_fc u_c, avec `dofs[i]` les DOF globaux de l'Element i et `matrix(i)`
+/// sa matrice. Les DOF libres sont renumérotés par Cuthill-McKee inverse (graphe : deux DOF sont
+/// voisins s'ils partagent un Element) avant l'assemblage en ligne de ciel.
 /// Renvoie u_f dans l'ordre croissant des DOF libres.
-fn solve_free(mesh: &Mesh, fixed: &[bool], u: &[f64], f: &[f64]) -> Result<Vec<f64>, MailleError> {
+fn solve_free(
+    dofs: &[Vec<usize>],
+    matrix: &impl Fn(usize) -> Vec<Vec<f64>>,
+    fixed: &[bool],
+    u: &[f64],
+    f: &[f64],
+) -> Result<Vec<f64>, MailleError> {
     // free[g] : indice du DOF global g parmi les DOF libres
     let mut free = vec![None; fixed.len()];
     let mut count = 0;
@@ -161,16 +238,15 @@ fn solve_free(mesh: &Mesh, fixed: &[bool], u: &[f64], f: &[f64]) -> Result<Vec<f
     if count == 0 {
         return Ok(Vec::new());
     }
-    let element_free: Vec<Vec<usize>> = mesh
-        .elements
+    let element_free: Vec<Vec<usize>> = dofs
         .iter()
-        .map(|e| element_dofs(e).iter().filter_map(|&g| free[g]).collect())
+        .map(|d| d.iter().filter_map(|&g| free[g]).collect())
         .collect();
 
     let mut adjacency = vec![Vec::new(); count];
-    for dofs in &element_free {
-        for &a in dofs {
-            adjacency[a].extend(dofs.iter().filter(|&&b| b != a));
+    for local in &element_free {
+        for &a in local {
+            adjacency[a].extend(local.iter().filter(|&&b| b != a));
         }
     }
     for neighbours in &mut adjacency {
@@ -196,12 +272,10 @@ fn solve_free(mesh: &Mesh, fixed: &[bool], u: &[f64], f: &[f64]) -> Result<Vec<f
             rhs[rank[*a]] += f[g];
         }
     }
-    for i in 0..mesh.elements.len() {
-        let ke = element_stiffness(mesh, i);
-        let dofs = element_dofs(&mesh.elements[i]);
-        for (row, &gi) in ke.iter().zip(&dofs) {
+    for (i, dofs) in dofs.iter().enumerate() {
+        for (row, &gi) in matrix(i).iter().zip(dofs) {
             let Some(a) = free[gi] else { continue };
-            for (k, &gj) in row.iter().zip(&dofs) {
+            for (k, &gj) in row.iter().zip(dofs) {
                 match free[gj] {
                     // K symétrique : chaque paire (i, j) est ajoutée une fois, en dessous de la diagonale
                     Some(b) if rank[b] <= rank[a] => kff.add(rank[a], rank[b], *k),

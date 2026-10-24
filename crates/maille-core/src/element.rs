@@ -1,7 +1,7 @@
 use crate::mesh::PlaneState;
 use crate::quadrature::{GaussPoint, TetGaussPoint};
-use crate::results::Stress;
-use crate::shape::{Mapping, Mapping3d, SolidShapeFn};
+use crate::results::{HeatFlux, Stress};
+use crate::shape::{Mapping, Mapping3d, ShapeFn, SolidShapeFn};
 
 /// Matrice de rigidité d'une barre 1D : (EA/L) [[1, -1], [-1, 1]].
 pub fn bar_stiffness(young: f64, area: f64, length: f64) -> [[f64; 2]; 2] {
@@ -210,6 +210,101 @@ pub fn solid_stresses(
                 tau_yz: sigma[3],
                 tau_xz: sigma[4],
                 tau_xy: sigma[5],
+            }
+        })
+        .collect()
+}
+
+/// Point de Gauss d'un Element réel, en dimension D : poids w |det J| (× t en 2D), valeurs N_i,
+/// dérivées physiques ∂N_i/∂x et position.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GaussData<const D: usize> {
+    pub weight: f64,
+    pub n: Vec<f64>,
+    pub dn_dx: Vec<[f64; D]>,
+    pub position: [f64; D],
+}
+
+/// Points de Gauss d'un triangle d'épaisseur `thickness`.
+pub fn plane_gauss(
+    coords: &[[f64; 2]],
+    rule: &[GaussPoint],
+    shape_at: ShapeFn,
+    thickness: f64,
+) -> Vec<GaussData<2>> {
+    rule.iter()
+        .map(|g| {
+            let (n, dn) = shape_at(g.xi, g.eta);
+            let map = Mapping::new(coords, &dn);
+            let position =
+                std::array::from_fn(|k| n.iter().zip(coords).map(|(n, c)| n * c[k]).sum());
+            GaussData {
+                weight: g.weight * thickness * map.det.abs(),
+                n,
+                dn_dx: map.dn_dx,
+                position,
+            }
+        })
+        .collect()
+}
+
+/// Points de Gauss d'un tétraèdre.
+pub fn solid_gauss(
+    coords: &[[f64; 3]],
+    rule: &[TetGaussPoint],
+    shape_at: SolidShapeFn,
+) -> Vec<GaussData<3>> {
+    rule.iter()
+        .map(|g| {
+            let (n, dn) = shape_at(g.xi, g.eta, g.zeta);
+            let map = Mapping3d::new(coords, &dn);
+            let position =
+                std::array::from_fn(|k| n.iter().zip(coords).map(|(n, c)| n * c[k]).sum());
+            GaussData {
+                weight: g.weight * map.det.abs(),
+                n,
+                dn_dx: map.dn_dx,
+                position,
+            }
+        })
+        .collect()
+}
+
+/// Matrice de conduction K = Σ_g w_g k ∇Nᵀ ∇N, un DOF (T) par Node.
+pub fn conduction<const D: usize>(points: &[GaussData<D>], k: f64) -> Vec<Vec<f64>> {
+    let m = points.first().map_or(0, |p| p.n.len());
+    let mut ke = vec![vec![0.0; m]; m];
+    for p in points {
+        for (row, gi) in ke.iter_mut().zip(&p.dn_dx) {
+            for (v, gj) in row.iter_mut().zip(&p.dn_dx) {
+                *v += p.weight * k * (0..D).map(|c| gi[c] * gj[c]).sum::<f64>();
+            }
+        }
+    }
+    ke
+}
+
+/// Flux de chaleur q = −k ∇T aux points de Gauss ; `t_e` : températures des Nodes de l'Element.
+/// En 2D, z et qz sont nuls.
+pub fn heat_fluxes<const D: usize>(points: &[GaussData<D>], k: f64, t_e: &[f64]) -> Vec<HeatFlux> {
+    points
+        .iter()
+        .map(|p| {
+            let q: [f64; 3] = std::array::from_fn(|c| {
+                if c < D {
+                    -k * p.dn_dx.iter().zip(t_e).map(|(g, t)| g[c] * t).sum::<f64>()
+                } else {
+                    0.0
+                }
+            });
+            let at = |c: usize| if c < D { p.position[c] } else { 0.0 };
+            HeatFlux {
+                x: at(0),
+                y: at(1),
+                z: at(2),
+                qx: q[0],
+                qy: q[1],
+                qz: q[2],
             }
         })
         .collect()
@@ -571,5 +666,66 @@ mod solid_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod conduction_tests {
+    use super::*;
+    use crate::quadrature::{TETRA_1, TETRA_4, TRIANGLE_1, TRIANGLE_3};
+    use crate::shape::{tet10, tet4, tri3_vec, tri6_vec, TET10_EDGES, TRI6_EDGES};
+
+    /// Sommets puis milieux des arêtes `edges`, en dimension D.
+    fn with_mids<const D: usize>(v: &[[f64; D]], edges: &[(usize, usize)]) -> Vec<[f64; D]> {
+        let mut c = v.to_vec();
+        c.extend(
+            edges
+                .iter()
+                .map(|&(a, b)| std::array::from_fn(|k| (v[a][k] + v[b][k]) / 2.0)),
+        );
+        c
+    }
+
+    /// K symétrique, K·1 = 0 (T uniforme : pas de flux) et Tᵀ K T = k |g|² V pour T = g·x.
+    fn check<const D: usize>(points: &[GaussData<D>], coords: &[[f64; D]], volume: f64) {
+        let k = 50.0;
+        let ke = conduction(points, k);
+        let scale = ke[0][0];
+        let g: [f64; D] = std::array::from_fn(|c| [3.0, -2.0, 0.5][c]);
+        let t: Vec<f64> = coords
+            .iter()
+            .map(|x| (0..D).map(|c| g[c] * x[c]).sum())
+            .collect();
+        let mut energy = 0.0;
+        for (i, row) in ke.iter().enumerate() {
+            assert!(row.iter().sum::<f64>().abs() < 1e-12 * scale);
+            for (j, v) in row.iter().enumerate() {
+                assert!((v - ke[j][i]).abs() < 1e-12 * scale);
+                energy += t[i] * v * t[j];
+            }
+        }
+        let expected = k * g.iter().map(|x| x * x).sum::<f64>() * volume;
+        assert!(
+            (energy - expected).abs() < 1e-10 * expected,
+            "{energy} au lieu de {expected}"
+        );
+    }
+
+    #[test]
+    fn conduction_matrices_are_exact_for_a_constant_gradient() {
+        let tri = [[0.0, 0.0], [2.0, 0.0], [0.0, 3.0]]; // aire 3, épaisseur 0,5
+        let tri6 = with_mids(&tri, &TRI6_EDGES);
+        check(&plane_gauss(&tri, &TRIANGLE_1, tri3_vec, 0.5), &tri, 1.5);
+        check(&plane_gauss(&tri6, &TRIANGLE_3, tri6_vec, 0.5), &tri6, 1.5);
+
+        let tet = [
+            [0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [0.0, 3.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ]; // volume 1
+        let quadratic = with_mids(&tet, &TET10_EDGES);
+        check(&solid_gauss(&tet, &TETRA_1, tet4), &tet, 1.0);
+        check(&solid_gauss(&quadratic, &TETRA_4, tet10), &quadratic, 1.0);
     }
 }

@@ -218,6 +218,8 @@ mod tests {
             reactions: vec![0.0; displacements.len()],
             displacements,
             stresses,
+            temperatures: Vec::new(),
+            heat_fluxes: Vec::new(),
         }
     }
 
@@ -346,6 +348,8 @@ mod tests {
             displacements: vec![0.0; 2],
             reactions: vec![0.0; 2],
             stresses: vec![Vec::new()],
+            temperatures: Vec::new(),
+            heat_fluxes: Vec::new(),
         };
         assert_eq!(
             Scene::new(&mesh, &field).err(),

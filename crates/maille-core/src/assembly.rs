@@ -1,11 +1,11 @@
 use crate::element::{
-    bar_stiffness, beam_stiffness, plane_d, plane_stiffness, plane_stresses, solid_d,
-    solid_stiffness, solid_stresses,
+    bar_stiffness, beam_stiffness, conduction, heat_fluxes, plane_d, plane_gauss, plane_stiffness,
+    plane_stresses, solid_d, solid_gauss, solid_stiffness, solid_stresses, GaussData,
 };
 use crate::material::Material;
 use crate::mesh::{Element, Mesh, PlaneState, Tet10, Tet4, Tri3, Tri6};
 use crate::quadrature::{GaussPoint, TetGaussPoint, TETRA_1, TETRA_4, TRIANGLE_1, TRIANGLE_3};
-use crate::results::Stress;
+use crate::results::{HeatFlux, Stress};
 use crate::shape::{tet10, tet4, tri3_vec, tri6_vec, ShapeFn, SolidShapeFn};
 
 /// Indices globaux des DOF de l'Element `e`, dans l'ordre de sa matrice élémentaire.
@@ -96,6 +96,15 @@ impl<'a> PlaneKernel<'a> {
         )
     }
 
+    fn gauss(&self, mesh: &Mesh) -> Vec<GaussData<2>> {
+        plane_gauss(
+            &mesh.coords(self.nodes),
+            self.rule,
+            self.shape,
+            self.thickness,
+        )
+    }
+
     fn stresses(&self, mesh: &Mesh, u: &[f64]) -> Vec<Stress> {
         let nu = self.nu();
         let d = plane_d(young(self.material), nu, self.state);
@@ -158,6 +167,10 @@ impl<'a> SolidKernel<'a> {
         )
     }
 
+    fn gauss(&self, mesh: &Mesh) -> Vec<GaussData<3>> {
+        solid_gauss(&mesh.coords_3d(self.nodes), self.rule, self.shape)
+    }
+
     fn stresses(&self, mesh: &Mesh, u: &[f64]) -> Vec<Stress> {
         let u_e: Vec<f64> = self
             .nodes
@@ -182,6 +195,47 @@ pub fn element_stresses(mesh: &Mesh, i: usize, u: &[f64]) -> Vec<Stress> {
         Element::Tri6(t) => PlaneKernel::tri6(t).stresses(mesh, u),
         Element::Tet4(t) => SolidKernel::tet4(t).stresses(mesh, u),
         Element::Tet10(t) => SolidKernel::tet10(t).stresses(mesh, u),
+        Element::Bar(_) | Element::Beam(_) => Vec::new(),
+    }
+}
+
+/// k du Material, que `Model` garantit présent en thermique.
+fn conductivity(material: &Material) -> f64 {
+    material.conductivity.unwrap_or(0.0)
+}
+
+/// Matrice de conduction de l'Element `i`, un DOF (T) par Node dans l'ordre de ses Nodes.
+/// Vide pour les Bar et Beam (refusés en thermique par `Model`).
+pub fn element_conduction(mesh: &Mesh, i: usize) -> Vec<Vec<f64>> {
+    match &mesh.elements[i] {
+        Element::Tri3(t) => {
+            conduction(&PlaneKernel::tri3(t).gauss(mesh), conductivity(&t.material))
+        }
+        Element::Tri6(t) => {
+            conduction(&PlaneKernel::tri6(t).gauss(mesh), conductivity(&t.material))
+        }
+        Element::Tet4(t) => {
+            conduction(&SolidKernel::tet4(t).gauss(mesh), conductivity(&t.material))
+        }
+        Element::Tet10(t) => conduction(
+            &SolidKernel::tet10(t).gauss(mesh),
+            conductivity(&t.material),
+        ),
+        Element::Bar(_) | Element::Beam(_) => Vec::new(),
+    }
+}
+
+/// Flux de chaleur aux points de Gauss de l'Element `i`, à partir des températures `t` des Nodes.
+/// Vide pour les Bar et Beam.
+pub fn element_heat_fluxes(mesh: &Mesh, i: usize, t: &[f64]) -> Vec<HeatFlux> {
+    let e = &mesh.elements[i];
+    let t_e: Vec<f64> = e.nodes().iter().map(|&n| t[n]).collect();
+    let k = conductivity(e.material());
+    match e {
+        Element::Tri3(tri) => heat_fluxes(&PlaneKernel::tri3(tri).gauss(mesh), k, &t_e),
+        Element::Tri6(tri) => heat_fluxes(&PlaneKernel::tri6(tri).gauss(mesh), k, &t_e),
+        Element::Tet4(tet) => heat_fluxes(&SolidKernel::tet4(tet).gauss(mesh), k, &t_e),
+        Element::Tet10(tet) => heat_fluxes(&SolidKernel::tet10(tet).gauss(mesh), k, &t_e),
         Element::Bar(_) | Element::Beam(_) => Vec::new(),
     }
 }

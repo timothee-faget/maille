@@ -27,8 +27,8 @@ pub enum MailleError {
     ReversedBeam {
         element: usize,
     },
-    /// DOF qui n'existe pas pour ce type d'Element (Bar : U ; Beam : V, Theta ; triangles : Ux, Uy ;
-    /// tétraèdres : Ux, Uy, Uz).
+    /// DOF qui n'existe pas pour ce type d'Element ou cette analyse (Bar : U ; Beam : V, Theta ;
+    /// triangles : Ux, Uy ; tétraèdres : Ux, Uy, Uz ; thermique : T).
     InvalidDof {
         node: usize,
         dof: Dof,
@@ -57,6 +57,14 @@ pub enum MailleError {
     MissingYoung {
         element: usize,
     },
+    /// Une analyse thermique a besoin de k.
+    MissingConductivity {
+        element: usize,
+    },
+    /// Bar et Beam n'ont pas de version thermique.
+    UnsupportedThermalElement {
+        element: usize,
+    },
     UnsupportedDistributedLoad {
         element: usize,
     },
@@ -74,7 +82,7 @@ pub enum MailleError {
     },
     /// Matrice non définie positive : structure non contrainte ou mécanisme.
     Singular,
-    /// Contraintes aux Nodes demandées sur un Mesh de Bar ou de Beam.
+    /// Contraintes aux Nodes demandées sur un Mesh de Bar ou de Beam, ou sur un Field thermique.
     NoStresses,
     /// Le Field ne correspond pas au Mesh (nombre d'Elements ou de points de Gauss).
     FieldMeshMismatch,
@@ -108,7 +116,7 @@ impl fmt::Display for MailleError {
             ),
             Self::InvalidDof { node, dof } => write!(
                 f,
-                "le DOF {dof:?} du Node {node} n'existe pas pour ce Mesh (Bar : U ; Beam : V, Theta ; triangles : Ux, Uy ; tétraèdres : Ux, Uy, Uz)"
+                "le DOF {dof:?} du Node {node} n'existe pas pour ce Mesh (Bar : U ; Beam : V, Theta ; triangles : Ux, Uy ; tétraèdres : Ux, Uy, Uz ; thermique : T)"
             ),
             Self::UnknownElement { element } => {
                 write!(f, "l'Element {element} n'existe pas dans le Mesh")
@@ -128,6 +136,14 @@ impl fmt::Display for MailleError {
             Self::MissingPoisson { element } => write!(
                 f,
                 "le Material de l'Element {element} n'a pas de coefficient de Poisson, requis en statique pour un triangle ou un tétraèdre : le créer avec Material::with_poisson"
+            ),
+            Self::MissingConductivity { element } => write!(
+                f,
+                "le Material de l'Element {element} n'a pas de conductivité thermique, requise en thermique : le créer avec Material::conductive ou ajouter with_conductivity"
+            ),
+            Self::UnsupportedThermalElement { element } => write!(
+                f,
+                "l'Element {element} est une Bar ou une Beam, qui n'existent pas en thermique : mailler la pièce en triangles ou en tétraèdres"
             ),
             Self::MissingYoung { element } => write!(
                 f,
@@ -156,7 +172,7 @@ impl fmt::Display for MailleError {
             ),
             Self::NoStresses => write!(
                 f,
-                "les contraintes aux Nodes n'existent que pour les triangles et les tétraèdres, pas pour les Bar et Beam : lire les efforts dans les réactions ou mailler la pièce en triangles ou en tétraèdres"
+                "les contraintes aux Nodes n'existent qu'en statique, pour les triangles et les tétraèdres : pas pour les Bar et Beam (lire les efforts dans les réactions) ni pour un Field thermique (lire temperatures et heat_fluxes)"
             ),
             Self::FieldMeshMismatch => write!(
                 f,

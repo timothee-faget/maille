@@ -32,15 +32,35 @@ impl Stress {
     }
 }
 
-/// Champs de résultats, une valeur par DOF.
+/// Flux de chaleur q = −k ∇T en un point de Gauss (puissance par unité de surface).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HeatFlux {
+    /// Position (x, y, z) du point.
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub qx: f64,
+    pub qy: f64,
+    /// Nul pour les triangles.
+    pub qz: f64,
+}
+
+/// Champs de résultats. Selon l'`Analysis`, seuls les champs mécaniques (statique) ou thermiques
+/// sont remplis ; les autres restent vides.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Field {
+    /// Statique : un déplacement par DOF.
     pub displacements: Vec<f64>,
-    /// Forces de réaction aux DOF contraints, zéro ailleurs.
+    /// Aux DOF contraints, zéro ailleurs. Statique : forces de réaction ; thermique : puissance
+    /// fournie au Mesh par la température imposée (négative si la chaleur sort).
     pub reactions: Vec<f64>,
-    /// Contraintes aux points de Gauss de chaque Element (indexé comme `Mesh::elements`).
+    /// Statique : contraintes aux points de Gauss de chaque Element (indexé comme `Mesh::elements`).
     /// Vide pour les Bar et Beam.
     pub stresses: Vec<Vec<Stress>>,
+    /// Thermique : une température par Node.
+    pub temperatures: Vec<f64>,
+    /// Thermique : flux de chaleur aux points de Gauss de chaque Element.
+    pub heat_fluxes: Vec<Vec<HeatFlux>>,
 }
 
 /// Extrapolation du Tri3 : son unique point de Gauss donne la valeur de ses 3 Nodes.
@@ -87,6 +107,9 @@ const TET10_EXTRAPOLATION: [&[f64]; 10] = [
 /// extrapolées des points de Gauss vers les Nodes de chaque Element, puis moyennées composante par
 /// composante entre les Elements qui partagent un Node. Un Node isolé reçoit des contraintes nulles.
 pub fn nodal_stresses(mesh: &Mesh, field: &Field) -> Result<Vec<Stress>, MailleError> {
+    if !field.temperatures.is_empty() {
+        return Err(MailleError::NoStresses);
+    }
     if field.stresses.len() != mesh.elements.len() {
         return Err(MailleError::FieldMeshMismatch);
     }
@@ -198,6 +221,8 @@ mod tests {
             displacements: vec![0.0; 2],
             reactions: vec![0.0; 2],
             stresses: vec![Vec::new()],
+            temperatures: Vec::new(),
+            heat_fluxes: Vec::new(),
         };
         assert_eq!(nodal_stresses(&bars, &empty), Err(MailleError::NoStresses));
 
