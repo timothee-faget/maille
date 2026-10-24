@@ -3,17 +3,19 @@
 //! Client du cœur : aucun calcul mécanique ici, seulement de l'affichage.
 
 mod app;
-// branchés au rendu à l'étape 5 de M2 ; d'ici là, seuls leurs tests les utilisent
+// choix du champ, viridis et déformée branchés au clavier à l'étape 6 de M2
 #[allow(dead_code)]
 mod colormap;
 mod render;
 #[allow(dead_code)]
 mod scene;
+mod view;
 
 use maille_core::mesh::Mesh;
 use maille_core::results::Field;
 
 /// Ouvre une fenêtre sur le Mesh et son Field ; rend la main quand la fenêtre est fermée.
+/// Erreur si le Mesh n'est pas fait de triangles ou si aucune carte graphique n'est utilisable.
 pub fn show(mesh: &Mesh, field: &Field) -> Result<(), Box<dyn std::error::Error>> {
     let title = format!(
         "Maille — {} Elements, {} Nodes, {} DOF",
@@ -21,8 +23,9 @@ pub fn show(mesh: &Mesh, field: &Field) -> Result<(), Box<dyn std::error::Error>
         mesh.nodes.len(),
         field.displacements.len()
     );
+    let scene = scene::Scene::new(mesh, field)?;
     let event_loop = winit::event_loop::EventLoop::new()?;
-    let mut app = app::App::new(title);
+    let mut app = app::App::new(title, scene);
     event_loop.run_app(&mut app)?;
     app.into_result()
 }

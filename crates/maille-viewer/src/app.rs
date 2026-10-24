@@ -8,19 +8,24 @@ use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowId};
 
+use crate::colormap::Colormap;
 use crate::render::Renderer;
+use crate::scene::{range, Quantity, Scene};
+use crate::view::View;
 
 pub struct App {
     title: String,
+    scene: Scene,
     renderer: Option<Renderer>,
     /// Erreur survenue dans la boucle (qui ne peut pas la renvoyer), rendue par `into_result`.
     error: Option<Box<dyn Error>>,
 }
 
 impl App {
-    pub fn new(title: String) -> Self {
+    pub fn new(title: String, scene: Scene) -> Self {
         Self {
             title,
+            scene,
             renderer: None,
             error: None,
         }
@@ -29,6 +34,24 @@ impl App {
     pub fn into_result(self) -> Result<(), Box<dyn Error>> {
         self.error.map_or(Ok(()), Err)
     }
+
+    fn create_renderer(&self, event_loop: &ActiveEventLoop) -> Result<Renderer, Box<dyn Error>> {
+        let quantity = Quantity::VonMises;
+        let values = self.scene.values(quantity);
+        let (lo, hi) = range(&values);
+        let title = format!(
+            "{} — {} de {lo:.4e} à {hi:.4e}",
+            self.title,
+            quantity.label()
+        );
+        let window = event_loop.create_window(Window::default_attributes().with_title(title))?;
+        let mut renderer =
+            Renderer::new(event_loop, Arc::new(window), &self.scene, Colormap::Rainbow)?;
+        renderer.set_positions(&self.scene.positions(0.0));
+        renderer.set_values(&values, (lo, hi));
+        renderer.set_view(View::fit(self.scene.bounds(), renderer.size()));
+        Ok(renderer)
+    }
 }
 
 impl ApplicationHandler for App {
@@ -36,12 +59,7 @@ impl ApplicationHandler for App {
         if self.renderer.is_some() {
             return;
         }
-        let attributes = Window::default_attributes().with_title(&self.title);
-        let renderer = event_loop
-            .create_window(attributes)
-            .map_err(Into::into)
-            .and_then(|window| Renderer::new(event_loop, Arc::new(window)));
-        match renderer {
+        match self.create_renderer(event_loop) {
             Ok(r) => self.renderer = Some(r),
             Err(e) => {
                 self.error = Some(e);
@@ -56,7 +74,10 @@ impl ApplicationHandler for App {
         };
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(size) => renderer.resize(size.width, size.height),
+            WindowEvent::Resized(size) => {
+                renderer.resize(size.width, size.height);
+                renderer.set_view(View::fit(self.scene.bounds(), renderer.size()));
+            }
             WindowEvent::RedrawRequested => renderer.render(),
             _ => {}
         }
