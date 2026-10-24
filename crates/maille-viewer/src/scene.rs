@@ -2,6 +2,7 @@
 //! Nodes, positions déformées.
 
 use std::collections::HashSet;
+use std::fmt;
 
 use maille_core::mesh::{Element, Mesh};
 use maille_core::results::{nodal_stresses, Field, Stress};
@@ -53,9 +54,38 @@ pub struct Scene {
     pub edges: Vec<[u32; 2]>,
 }
 
+/// Raison pour laquelle un Mesh ne peut pas être affiché.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SceneError {
+    /// Refus du cœur : Mesh de Bar ou de Beam, ou Field d'un autre Mesh.
+    Core(MailleError),
+    /// Mesh de tétraèdres : le viewer n'affiche que des triangles pour l'instant.
+    Solid,
+}
+
+impl fmt::Display for SceneError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Core(e) => e.fmt(f),
+            Self::Solid => write!(
+                f,
+                "le viewer n'affiche que des Mesh 2D (Tri3, Tri6) pour l'instant : lire les résultats des tétraèdres dans le Field"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SceneError {}
+
+impl From<MailleError> for SceneError {
+    fn from(e: MailleError) -> Self {
+        Self::Core(e)
+    }
+}
+
 impl Scene {
     /// Erreur si le Mesh n'est pas fait de triangles (Bar, Beam, tétraèdres) ou si le Field vient d'un autre Mesh.
-    pub fn new(mesh: &Mesh, field: &Field) -> Result<Self, MailleError> {
+    pub fn new(mesh: &Mesh, field: &Field) -> Result<Self, SceneError> {
         let stresses = nodal_stresses(mesh, field)?;
         let mut triangles = Vec::new();
         let mut edges = HashSet::new();
@@ -69,8 +99,8 @@ impl Scene {
                     &[[0, 3], [3, 1], [1, 4], [4, 2], [2, 5], [5, 0]],
                 ),
                 // déjà refusé par `nodal_stresses`
-                Element::Bar(_) | Element::Beam(_) => return Err(MailleError::NoStresses),
-                Element::Tet4(_) | Element::Tet10(_) => return Err(MailleError::PlaneMeshRequired),
+                Element::Bar(_) | Element::Beam(_) => return Err(MailleError::NoStresses.into()),
+                Element::Tet4(_) | Element::Tet10(_) => return Err(SceneError::Solid),
             };
             triangles.extend(tris.iter().map(|t| t.map(|k| n[k])));
             edges.extend(
@@ -157,7 +187,7 @@ pub fn range(values: &[f64]) -> (f64, f64) {
 mod tests {
     use super::*;
     use maille_core::material::{Material, Section};
-    use maille_core::mesh::{Bar, Node, PlaneState, Tri3, Tri6};
+    use maille_core::mesh::{Bar, Node, PlaneState, Tet4, Tri3, Tri6};
 
     fn material() -> Material {
         Material::with_poisson(1.0, 0.3).unwrap()
@@ -319,7 +349,21 @@ mod tests {
         };
         assert_eq!(
             Scene::new(&mesh, &field).err(),
-            Some(MailleError::NoStresses)
+            Some(SceneError::Core(MailleError::NoStresses))
         );
+    }
+
+    #[test]
+    fn tetrahedra_cannot_be_shown() {
+        let nodes = vec![
+            Node::new(0.0, 0.0, 0.0),
+            Node::new(1.0, 0.0, 0.0),
+            Node::new(0.0, 1.0, 0.0),
+            Node::new(0.0, 0.0, 1.0),
+        ];
+        let tet = Tet4::new([0, 1, 2, 3], material()).unwrap();
+        let mesh = Mesh::new(nodes, vec![Element::Tet4(tet)]).unwrap();
+        let field = field(&mesh, [0.0; 3], vec![0.0; 12]);
+        assert_eq!(Scene::new(&mesh, &field).err(), Some(SceneError::Solid));
     }
 }

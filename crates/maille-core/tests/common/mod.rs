@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 
 use maille_core::mesh::Node;
+use maille_core::shape::TET10_EDGES;
 
 /// Grille w × h de nx × ny cases, chacune coupée en 2 triangles antihoraires.
 /// Le Node (i, j) a pour indice i + j (nx + 1).
@@ -146,10 +147,7 @@ pub fn to_quadratic_tet(nodes: &[Node], tets: &[[usize; 4]]) -> QuadraticTet {
     for t in tets {
         let mut element = [0; 10];
         element[..4].copy_from_slice(t);
-        for (k, (a, b)) in [(0, 1), (1, 2), (2, 0), (0, 3), (1, 3), (2, 3)]
-            .into_iter()
-            .enumerate()
-        {
+        for (k, (a, b)) in TET10_EDGES.into_iter().enumerate() {
             let key = (t[a].min(t[b]), t[a].max(t[b]));
             element[4 + k] = *q.mids.entry(key).or_insert_with(|| {
                 let (pa, pb) = (q.nodes[t[a]], q.nodes[t[b]]);

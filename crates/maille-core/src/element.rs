@@ -70,7 +70,7 @@ fn strain_displacement(dn_dx: &[[f64; 2]]) -> Vec<[f64; 3]> {
 
 /// Rigidité d'un triangle : K = Σ_g w_g t |det J| Bᵀ D B, DOF locaux (ux, uy) par Node.
 /// `shape_at(ξ, η)` donne les valeurs N_i et les dérivées [∂N_i/∂ξ, ∂N_i/∂η] de la forme choisie
-/// (Tri3, plus tard Tri6).
+/// (Tri3, Tri6).
 pub fn plane_stiffness(
     coords: &[[f64; 2]],
     rule: &[GaussPoint],

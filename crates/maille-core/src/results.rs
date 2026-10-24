@@ -25,7 +25,10 @@ impl Stress {
         let (a, b, c) = (self.sigma_xx, self.sigma_yy, self.sigma_zz);
         let shear =
             self.tau_xy * self.tau_xy + self.tau_yz * self.tau_yz + self.tau_xz * self.tau_xz;
-        (a * a + b * b + c * c - a * b - b * c - c * a + 3.0 * shear).sqrt()
+        // ≥ 0 en exact ; max(0) évite un NaN quand l'arrondi rend négatif un état presque hydrostatique
+        (a * a + b * b + c * c - a * b - b * c - c * a + 3.0 * shear)
+            .max(0.0)
+            .sqrt()
     }
 }
 

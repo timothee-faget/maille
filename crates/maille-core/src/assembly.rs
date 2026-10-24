@@ -139,7 +139,7 @@ impl<'a> SolidKernel<'a> {
         }
     }
 
-    /// `Tet4::new` et `Tet10::new` garantissent que ν est présent.
+    /// `Mesh::new` garantit que ν est présent.
     fn d(&self) -> [[f64; 6]; 6] {
         solid_d(self.material.young, self.material.poisson.unwrap_or(0.0))
     }

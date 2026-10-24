@@ -20,13 +20,15 @@ pub enum MailleError {
         node: usize,
         dof: Dof,
     },
-    /// Bar et Beam dans le même Mesh : les DOF ne sont pas compatibles (pas de portique en M0).
+    /// Elements de familles différentes (Bar, Beam, triangles, tétraèdres) dans le même Mesh :
+    /// les DOF ne sont pas compatibles (pas de portique, pas de mélange 2D/3D).
     MixedElementTypes,
     /// Beam dont le Node 2 est à gauche du Node 1 : inverser l'ordre des Nodes.
     ReversedBeam {
         element: usize,
     },
-    /// DOF qui n'existe pas pour ce type d'Element (Bar : U ; Beam : V, Theta).
+    /// DOF qui n'existe pas pour ce type d'Element (Bar : U ; Beam : V, Theta ; triangles : Ux, Uy ;
+    /// tétraèdres : Ux, Uy, Uz).
     InvalidDof {
         node: usize,
         dof: Dof,
@@ -67,8 +69,6 @@ pub enum MailleError {
     Singular,
     /// Contraintes aux Nodes demandées sur un Mesh de Bar ou de Beam.
     NoStresses,
-    /// Traitement réservé aux triangles (le viewer est 2D).
-    PlaneMeshRequired,
     /// Le Field ne correspond pas au Mesh (nombre d'Elements ou de points de Gauss).
     FieldMeshMismatch,
 }
@@ -132,7 +132,7 @@ impl fmt::Display for MailleError {
             ),
             Self::InvertedTetrahedron { element } => write!(
                 f,
-                "le tétraèdre {element} est retourné : vu depuis son Node 3, la face 0-1-2 doit tourner dans le sens antihoraire. Échanger les sommets 1 et 2 (pour un Tet10, échanger aussi les milieux 4 et 6, puis 8 et 9)"
+                "le tétraèdre {element} est retourné : vu depuis son Node 3, la face 0-1-2 doit tourner dans le sens antihoraire. Échanger ses Nodes 1 et 2 (pour un Tet10, échanger aussi les Nodes 4 et 6, puis 8 et 9)"
             ),
             Self::CurvedTetrahedron { element } => write!(
                 f,
@@ -145,11 +145,7 @@ impl fmt::Display for MailleError {
             ),
             Self::NoStresses => write!(
                 f,
-                "les contraintes aux Nodes n'existent que pour les triangles et les tétraèdres, pas pour les Bar et Beam"
-            ),
-            Self::PlaneMeshRequired => write!(
-                f,
-                "seuls les Mesh de triangles (Tri3, Tri6) sont pris en charge ici : le viewer est 2D pour l'instant"
+                "les contraintes aux Nodes n'existent que pour les triangles et les tétraèdres, pas pour les Bar et Beam : lire les efforts dans les réactions ou mailler la pièce en triangles ou en tétraèdres"
             ),
             Self::FieldMeshMismatch => write!(
                 f,

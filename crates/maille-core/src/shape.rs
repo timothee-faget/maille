@@ -110,6 +110,9 @@ pub fn tet4(xi: f64, eta: f64, zeta: f64) -> (Vec<f64>, Vec<[f64; 3]>) {
     (l.to_vec(), dl.to_vec())
 }
 
+/// Arêtes du Tri6 dans l'ordre de ses Nodes milieux 3 à 5.
+pub const TRI6_EDGES: [(usize, usize); 3] = [(0, 1), (1, 2), (2, 0)];
+
 /// Arêtes du Tet10 dans l'ordre de ses Nodes milieux 4 à 9.
 pub const TET10_EDGES: [(usize, usize); 6] = [(0, 1), (1, 2), (2, 0), (0, 3), (1, 3), (2, 3)];
 

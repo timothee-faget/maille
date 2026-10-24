@@ -325,3 +325,22 @@ fn tetrahedra_have_three_dofs_and_no_rotation() {
         })
     );
 }
+
+#[test]
+fn tetrahedron_built_by_hand_without_poisson_is_refused() {
+    // champs publics : sans `Tet4::new`, c'est `Mesh::new` qui doit refuser ν absent
+    let nodes = vec![
+        Node::new(0.0, 0.0, 0.0),
+        Node::new(1.0, 0.0, 0.0),
+        Node::new(0.0, 1.0, 0.0),
+        Node::new(0.0, 0.0, 1.0),
+    ];
+    let tet = Tet4 {
+        nodes: [0, 1, 2, 3],
+        material: Material::new(E).unwrap(),
+    };
+    assert_eq!(
+        Mesh::new(nodes, vec![Element::Tet4(tet)]),
+        Err(MailleError::MissingPoisson)
+    );
+}

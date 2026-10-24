@@ -1,6 +1,6 @@
 use crate::error::MailleError;
 use crate::material::{Material, Section};
-use crate::shape::TET10_EDGES;
+use crate::shape::{TET10_EDGES, TRI6_EDGES};
 
 /// Position d'un Node. Les Bar et Beam (1D) n'utilisent que `x`, les triangles (2D) `x` et `y`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -235,28 +235,15 @@ impl Mesh {
                 Element::Tri3(t) => mesh.check_triangle(i, &t.nodes, &t.material)?,
                 Element::Tri6(t) => {
                     mesh.check_triangle(i, &t.nodes, &t.material)?;
-                    let c = mesh.coords(&t.nodes);
-                    for (mid, (a, b)) in [(3, (0, 1)), (4, (1, 2)), (5, (2, 0))] {
-                        let middle = [(c[a][0] + c[b][0]) / 2.0, (c[a][1] + c[b][1]) / 2.0];
-                        let edge = (c[b][0] - c[a][0]).hypot(c[b][1] - c[a][1]);
-                        let off = (c[mid][0] - middle[0]).hypot(c[mid][1] - middle[1]);
-                        if off > 1e-9 * edge {
-                            return Err(MailleError::CurvedTriangle { element: i });
-                        }
+                    if !straight_edges(&mesh.coords(&t.nodes), &TRI6_EDGES, 3) {
+                        return Err(MailleError::CurvedTriangle { element: i });
                     }
                 }
-                Element::Tet4(t) => mesh.check_tetrahedron(i, &t.nodes)?,
+                Element::Tet4(t) => mesh.check_tetrahedron(i, &t.nodes, &t.material)?,
                 Element::Tet10(t) => {
-                    mesh.check_tetrahedron(i, &t.nodes)?;
-                    let c = mesh.coords_3d(&t.nodes);
-                    for (k, (a, b)) in TET10_EDGES.into_iter().enumerate() {
-                        let d = |p: &[f64; 3], q: &[f64; 3]| {
-                            (0..3).map(|j| (p[j] - q[j]).powi(2)).sum::<f64>().sqrt()
-                        };
-                        let middle = std::array::from_fn(|j| (c[a][j] + c[b][j]) / 2.0);
-                        if d(&c[4 + k], &middle) > 1e-9 * d(&c[a], &c[b]) {
-                            return Err(MailleError::CurvedTetrahedron { element: i });
-                        }
+                    mesh.check_tetrahedron(i, &t.nodes, &t.material)?;
+                    if !straight_edges(&mesh.coords_3d(&t.nodes), &TET10_EDGES, 4) {
+                        return Err(MailleError::CurvedTetrahedron { element: i });
                     }
                 }
                 _ => {}
@@ -278,9 +265,9 @@ impl Mesh {
         let c = self.coords(&nodes[..3]);
         let area2 =
             (c[1][0] - c[0][0]) * (c[2][1] - c[0][1]) - (c[2][0] - c[0][0]) * (c[1][1] - c[0][1]);
-        let longest = [(0, 1), (1, 2), (2, 0)]
+        let longest = TRI6_EDGES
             .iter()
-            .map(|&(a, b)| (c[b][0] - c[a][0]).hypot(c[b][1] - c[a][1]))
+            .map(|&(a, b)| distance(&c[a], &c[b]))
             .fold(0.0_f64, f64::max);
         if area2.abs() <= 1e-12 * longest * longest {
             return Err(MailleError::DegenerateTriangle { element });
@@ -291,9 +278,16 @@ impl Mesh {
         Ok(())
     }
 
-    /// Vérifie le volume et l'orientation d'un tétraèdre ; seuls ses 4 premiers Nodes (sommets) comptent.
-    /// ν est vérifié par `Tet4::new` et `Tet10::new`.
-    fn check_tetrahedron(&self, element: usize, nodes: &[usize]) -> Result<(), MailleError> {
+    /// Vérifie ν, le volume et l'orientation d'un tétraèdre ; seuls ses 4 premiers Nodes (sommets) comptent.
+    fn check_tetrahedron(
+        &self,
+        element: usize,
+        nodes: &[usize],
+        material: &Material,
+    ) -> Result<(), MailleError> {
+        if material.poisson.is_none() {
+            return Err(MailleError::MissingPoisson);
+        }
         let c = self.coords_3d(&nodes[..4]);
         let e: [[f64; 3]; 3] =
             std::array::from_fn(|k| std::array::from_fn(|j| c[k + 1][j] - c[0][j]));
@@ -303,12 +297,7 @@ impl Mesh {
             + e[0][2] * (e[1][0] * e[2][1] - e[1][1] * e[2][0]);
         let longest = TET10_EDGES
             .iter()
-            .map(|&(a, b)| {
-                (0..3)
-                    .map(|j| (c[b][j] - c[a][j]).powi(2))
-                    .sum::<f64>()
-                    .sqrt()
-            })
+            .map(|&(a, b)| distance(&c[a], &c[b]))
             .fold(0.0_f64, f64::max);
         if six_v.abs() <= 1e-12 * longest.powi(3) {
             return Err(MailleError::DegenerateTetrahedron { element });
@@ -367,4 +356,25 @@ impl Mesh {
             _ => Err(MailleError::InvalidDof { node, dof }),
         }
     }
+}
+
+/// Distance entre deux points de même dimension.
+fn distance(p: &[f64], q: &[f64]) -> f64 {
+    p.iter()
+        .zip(q)
+        .map(|(a, b)| (a - b).powi(2))
+        .sum::<f64>()
+        .sqrt()
+}
+
+/// Vrai si chaque Node milieu `first_mid + k` est au milieu de l'arête `edges[k]` (côtés droits).
+fn straight_edges<const D: usize>(
+    coords: &[[f64; D]],
+    edges: &[(usize, usize)],
+    first_mid: usize,
+) -> bool {
+    edges.iter().enumerate().all(|(k, &(a, b))| {
+        let middle: [f64; D] = std::array::from_fn(|j| (coords[a][j] + coords[b][j]) / 2.0);
+        distance(&coords[first_mid + k], &middle) <= 1e-9 * distance(&coords[a], &coords[b])
+    })
 }
