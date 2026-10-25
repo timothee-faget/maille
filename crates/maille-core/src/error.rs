@@ -1,6 +1,7 @@
 use std::fmt;
 
 use crate::mesh::Dof;
+use crate::mesher::CurveId;
 
 /// Erreur de modèle ou de calcul. Les messages disent quoi corriger.
 #[derive(Debug, Clone, PartialEq)]
@@ -101,6 +102,33 @@ pub enum MailleError {
     /// Le mailleur bute sur un cas dégénéré à l'arrondi près (points confondus ou presque
     /// cocirculaires) ou dépasse son plafond de Nodes.
     MeshingFailed,
+    /// Contour sans aucune Curve (`hole` vaut `None` pour le contour extérieur).
+    EmptyBoundary {
+        hole: Option<usize>,
+    },
+    /// Segment dont le point d'arrivée (le début de la Curve suivante) est confondu avec son départ.
+    ZeroLengthCurve {
+        curve: CurveId,
+    },
+    /// Arc dont le départ et l'arrivée ne sont pas à la même distance du centre, ou de rayon nul.
+    ArcRadiusMismatch {
+        curve: CurveId,
+    },
+    /// Deux Curves qui se coupent ou se touchent ailleurs qu'à leur raccord.
+    SelfIntersectingBoundary {
+        first: CurveId,
+        second: CurveId,
+    },
+    /// Trou hors du contour extérieur ou à l'intérieur d'un autre trou.
+    HoleOutsideBoundary {
+        hole: usize,
+    },
+    /// Angle intérieur trop aigu (en degrés) au raccord de deux Curves : Ruppert ne termine pas.
+    SharpCorner {
+        first: CurveId,
+        second: CurveId,
+        angle: f64,
+    },
 }
 
 impl fmt::Display for MailleError {
@@ -205,6 +233,37 @@ impl fmt::Display for MailleError {
             Self::MeshingFailed => write!(
                 f,
                 "le mailleur n'a pas pu trianguler la géométrie (points confondus ou presque cocirculaires à l'arrondi près, ou trop de Nodes) : déplacer légèrement un point de la géométrie ou augmenter les tailles h"
+            ),
+            Self::EmptyBoundary { hole: None } => {
+                write!(f, "le contour extérieur ne contient aucune Curve")
+            }
+            Self::EmptyBoundary { hole: Some(h) } => {
+                write!(f, "le trou {h} ne contient aucune Curve : le retirer ou le décrire")
+            }
+            Self::ZeroLengthCurve { curve } => write!(
+                f,
+                "{curve} a une longueur nulle : elle finit au début de la Curve suivante, qui est confondu avec son propre début. La retirer"
+            ),
+            Self::ArcRadiusMismatch { curve } => write!(
+                f,
+                "{curve} est un arc dont le début et la fin (le début de la Curve suivante) ne sont pas à la même distance du centre, ou de rayon nul : corriger le centre ou les points"
+            ),
+            Self::SelfIntersectingBoundary { first, second } => write!(
+                f,
+                "{first} et {second} se coupent ou se touchent : un contour ne doit pas se recouper, et les trous ne doivent toucher ni le contour extérieur ni les autres trous"
+            ),
+            Self::HoleOutsideBoundary { hole } => write!(
+                f,
+                "le trou {hole} est hors du contour extérieur ou dans un autre trou : le déplacer dans le domaine"
+            ),
+            Self::SharpCorner {
+                first,
+                second,
+                angle,
+            } => write!(
+                f,
+                "angle de {angle:.1}° entre {first} et {second} : le mailleur demande au moins {}° entre deux Curves qui se suivent. Arrondir ou couper l'angle",
+                crate::mesher::MIN_CORNER
             ),
         }
     }
