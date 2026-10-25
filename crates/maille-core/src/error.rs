@@ -129,6 +129,11 @@ pub enum MailleError {
         second: CurveId,
         angle: f64,
     },
+    /// Bord nommé inexistant ; `known` liste les noms portés par les Curves.
+    UnknownBoundary {
+        name: String,
+        known: Vec<String>,
+    },
 }
 
 impl fmt::Display for MailleError {
@@ -264,6 +269,15 @@ impl fmt::Display for MailleError {
                 f,
                 "angle de {angle:.1}° entre {first} et {second} : le mailleur demande au moins {}° entre deux Curves qui se suivent. Arrondir ou couper l'angle",
                 crate::mesher::MIN_CORNER
+            ),
+            Self::UnknownBoundary { name, known } => write!(
+                f,
+                "aucune Curve ne porte le nom « {name} » : les bords nommés sont {}",
+                known
+                    .iter()
+                    .map(|n| format!("« {n} »"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
         }
     }

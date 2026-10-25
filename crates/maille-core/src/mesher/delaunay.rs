@@ -1,6 +1,7 @@
 //! Triangulation de Delaunay incrémentale (Bowyer-Watson). On part d'un super-triangle qui couvre
 //! le domaine, puis chaque point inséré retire la cavité des triangles dont le cercle circonscrit
-//! le contient et la retriangule en étoile autour de lui.
+//! le contient et la retriangule en étoile autour de lui. Les arêtes contraintes (morceaux de bord)
+//! arrêtent la cavité : une fois présentes, elles restent (Delaunay contraint).
 
 use std::collections::{HashMap, HashSet};
 
@@ -29,6 +30,10 @@ pub struct Delaunay {
     tris: Vec<Tri>,
     /// Triangle de départ de la recherche du prochain point : le dernier créé.
     hint: usize,
+    /// Un triangle vivant qui contient chaque point.
+    vertex_tri: Vec<usize>,
+    /// Arêtes contraintes (indices de points bruts, le plus petit d'abord).
+    constrained: HashSet<(usize, usize)>,
 }
 
 impl Delaunay {
@@ -45,6 +50,8 @@ impl Delaunay {
                 alive: true,
             }],
             hint: 0,
+            vertex_tri: vec![0; SUPER],
+            constrained: HashSet::new(),
         }
     }
 
@@ -74,7 +81,7 @@ impl Delaunay {
                 let (a, b) = (t.v[(i + 1) % 3], t.v[(i + 2) % 3]);
                 match t.n[i] {
                     Some(o) if inside.contains(&o) => {}
-                    Some(o) if self.in_circumcircle(o, p) => {
+                    Some(o) if !self.is_constrained(a, b) && self.in_circumcircle(o, p) => {
                         inside.insert(o);
                         cavity.push(o);
                     }
@@ -84,9 +91,13 @@ impl Delaunay {
         }
 
         // cohérence avant toute modification : la cavité doit être un polygone simple sans sommet
-        // intérieur (T = B − 2) et visible depuis p
+        // intérieur (T = B − 2), visible depuis p, et sans triangle atteint par un autre chemin
+        // derrière une arête contrainte (elle serait détruite)
         let starts: HashSet<usize> = boundary.iter().map(|&(a, _, _)| a).collect();
         if boundary.len() != cavity.len() + 2
+            || boundary
+                .iter()
+                .any(|&(_, _, o)| o.is_some_and(|o| inside.contains(&o)))
             || starts.len() != boundary.len()
             || boundary
                 .iter()
@@ -108,6 +119,7 @@ impl Delaunay {
 
         let pi = self.points.len();
         self.points.push(p);
+        self.vertex_tri.push(0);
         for &t in &cavity {
             self.tris[t].alive = false;
         }
@@ -122,6 +134,9 @@ impl Delaunay {
             });
             by_start.insert(a, id);
             by_end.insert(b, id);
+            for v in [a, b, pi] {
+                self.vertex_tri[v] = id;
+            }
             if let Some((o, j)) = link {
                 self.tris[o].n[j] = Some(id);
             }
@@ -136,7 +151,77 @@ impl Delaunay {
         Ok(pi - SUPER)
     }
 
+    /// Nombre de points insérés.
+    pub fn point_count(&self) -> usize {
+        self.points.len() - SUPER
+    }
+
+    pub fn point(&self, i: usize) -> [f64; 2] {
+        self.points[i + SUPER]
+    }
+
+    /// Vrai si les points insérés `a` et `b` sont reliés par une arête.
+    pub fn has_edge(&self, a: usize, b: usize) -> bool {
+        self.directed_edge(a + SUPER, b + SUPER).is_some()
+    }
+
+    /// Marque l'arête (a, b) comme contrainte (`on`) ou la libère.
+    pub fn set_constrained(&mut self, a: usize, b: usize, on: bool) {
+        let key = (a.min(b) + SUPER, a.max(b) + SUPER);
+        if on {
+            self.constrained.insert(key);
+        } else {
+            self.constrained.remove(&key);
+        }
+    }
+
+    /// Triangles du domaine, en indices de points insérés et dans l'ordre de leurs sommets :
+    /// la face k va du sommet k au sommet k + 1. `boundary` donne les arêtes de bord (a, b), le
+    /// domaine à leur gauche. On vide l'extérieur de proche en proche à partir du triangle à droite
+    /// de chacune, sans traverser d'arête contrainte. `MeshingFailed` si une arête de bord manque
+    /// ou si le vidage atteint un triangle du domaine par une fuite (bord non fermé).
+    pub fn domain(
+        &self,
+        boundary: impl Iterator<Item = (usize, usize)>,
+    ) -> Result<Vec<[usize; 3]>, MailleError> {
+        let mut outside = vec![false; self.tris.len()];
+        let mut stack = Vec::new();
+        for (a, b) in boundary {
+            let (t, _) = self
+                .directed_edge(b + SUPER, a + SUPER)
+                .ok_or(MailleError::MeshingFailed)?;
+            if !outside[t] {
+                outside[t] = true;
+                stack.push(t);
+            }
+        }
+        while let Some(t) = stack.pop() {
+            let tri = self.tris[t];
+            for i in 0..3 {
+                let (a, b) = (tri.v[(i + 1) % 3], tri.v[(i + 2) % 3]);
+                if let Some(o) = tri.n[i] {
+                    if !outside[o] && !self.is_constrained(a, b) {
+                        outside[o] = true;
+                        stack.push(o);
+                    }
+                }
+            }
+        }
+        let inside: Vec<&Tri> = self
+            .tris
+            .iter()
+            .zip(&outside)
+            .filter(|(t, &out)| t.alive && !out)
+            .map(|(t, _)| t)
+            .collect();
+        if inside.iter().any(|t| t.v.iter().any(|&v| v < SUPER)) {
+            return Err(MailleError::MeshingFailed);
+        }
+        Ok(inside.iter().map(|t| t.v.map(|v| v - SUPER)).collect())
+    }
+
     /// Triangles qui ne touchent pas le super-triangle, en indices de points insérés.
+    #[cfg(test)]
     pub fn triangles(&self) -> impl Iterator<Item = [usize; 3]> + '_ {
         self.tris
             .iter()
@@ -168,6 +253,29 @@ impl Delaunay {
             }
         }
         Err(MailleError::MeshingFailed)
+    }
+
+    /// Triangle vivant qui parcourt l'arête a → b (indices bruts), et position k de a dans ce
+    /// triangle (v[k] = a, v[k + 1] = b). On tourne autour de a de voisin en voisin.
+    fn directed_edge(&self, a: usize, b: usize) -> Option<(usize, usize)> {
+        let first = self.vertex_tri[a];
+        let mut t = first;
+        loop {
+            let v = self.tris[t].v;
+            let k = v.iter().position(|&x| x == a)?;
+            if v[(k + 1) % 3] == b {
+                return Some((t, k));
+            }
+            // voisin à travers l'arête (a, v[k + 1]), opposée au sommet k + 2 : il contient aussi a
+            t = self.tris[t].n[(k + 2) % 3]?;
+            if t == first {
+                return None;
+            }
+        }
+    }
+
+    fn is_constrained(&self, a: usize, b: usize) -> bool {
+        self.constrained.contains(&(a.min(b), a.max(b)))
     }
 
     fn in_circumcircle(&self, t: usize, p: [f64; 2]) -> bool {

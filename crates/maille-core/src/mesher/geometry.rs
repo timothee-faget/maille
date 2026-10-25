@@ -128,13 +128,15 @@ impl Piece {
                 }
                 let angle = |p: [f64; 2]| (p[1] - center[1]).atan2(p[0] - center[0]);
                 let theta0 = angle(start);
-                let mut sweep = (angle(end) - theta0).rem_euclid(2.0 * PI);
-                if distance(start, end) <= 1e-9 * radius {
-                    sweep = 2.0 * PI; // cercle complet
-                }
-                if clockwise {
-                    sweep -= 2.0 * PI;
-                }
+                let full = distance(start, end) <= 1e-9 * radius;
+                // balayage antihoraire dans ]0, 2π[ hors cercle complet
+                let ccw = (angle(end) - theta0).rem_euclid(2.0 * PI);
+                let sweep = match (full, clockwise) {
+                    (true, false) => 2.0 * PI,
+                    (true, true) => -2.0 * PI,
+                    (false, false) => ccw,
+                    (false, true) => ccw - 2.0 * PI,
+                };
                 Path::Arc {
                     center,
                     radius,
@@ -558,18 +560,32 @@ mod tests {
 
     #[test]
     fn full_circle_hole() {
+        for clockwise in [false, true] {
+            full_circle(clockwise);
+        }
+    }
+
+    fn full_circle(clockwise: bool) {
         let g = Geometry {
             outer: square(0.5, "bord"),
-            holes: vec![vec![Curve::arc([0.7, 0.5], [0.5, 0.5], false, 1.0, "trou")]],
+            holes: vec![vec![Curve::arc(
+                [0.7, 0.5],
+                [0.5, 0.5],
+                clockwise,
+                1.0,
+                "trou",
+            )]],
         };
         let b = g.discretize().unwrap();
         // h plus grand que le cercle : 3 morceaux au moins, tournés dans le sens horaire
         let hole = ring(&b, 8..b.points.len());
         assert_eq!(hole.len(), 3);
         assert!(signed_area(&hole) < 0.0);
-        for p in hole {
-            assert!((distance(p, [0.5, 0.5]) - 0.2).abs() < 1e-12);
+        for p in &hole {
+            assert!((distance(*p, [0.5, 0.5]) - 0.2).abs() < 1e-12);
         }
+        // 3 points distincts : triangle équilatéral inscrit, d'aire 3√3/4 r²
+        assert!((signed_area(&hole) + 3f64.sqrt() * 0.75 * 0.04).abs() < 1e-12);
     }
 
     #[test]
