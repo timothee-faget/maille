@@ -15,6 +15,7 @@ pub mod element;
 pub mod error;
 pub mod material;
 pub mod mesh;
+pub mod mesher;
 pub mod model;
 pub mod quadrature;
 pub mod results;

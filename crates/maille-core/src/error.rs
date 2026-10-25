@@ -98,6 +98,9 @@ pub enum MailleError {
     NoStresses,
     /// Le Field ne correspond pas au Mesh (nombre d'Elements ou de points de Gauss).
     FieldMeshMismatch,
+    /// Le mailleur bute sur un cas dégénéré à l'arrondi près (points confondus ou presque
+    /// cocirculaires) ou dépasse son plafond de Nodes.
+    MeshingFailed,
 }
 
 impl fmt::Display for MailleError {
@@ -198,6 +201,10 @@ impl fmt::Display for MailleError {
             Self::FieldMeshMismatch => write!(
                 f,
                 "le Field ne vient pas de ce Mesh : passer le Field renvoyé par la résolution du Model construit sur ce Mesh"
+            ),
+            Self::MeshingFailed => write!(
+                f,
+                "le mailleur n'a pas pu trianguler la géométrie (points confondus ou presque cocirculaires à l'arrondi près, ou trop de Nodes) : déplacer légèrement un point de la géométrie ou augmenter les tailles h"
             ),
         }
     }
