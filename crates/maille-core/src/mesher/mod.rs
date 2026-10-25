@@ -49,6 +49,41 @@ impl<const N: usize> Triangulation<N> {
     }
 }
 
+impl Triangulation<3> {
+    /// Triangulation quadratique (Tri6) : un Node au milieu de chaque arête, partagé entre voisins,
+    /// dans l'ordre de `Tri6::nodes` (milieux des arêtes 0-1, 1-2, 2-0). Sur un arc, le Node milieu
+    /// est au milieu de la corde, pas sur le cercle : le Tri6 n'accepte que des côtés droits. Les
+    /// faces de bord gardent leurs numéros ; leurs Nodes milieux rejoignent les Nodes du bord.
+    pub fn to_quadratic(self) -> Triangulation<6> {
+        let mut nodes = self.nodes;
+        let mut mids: HashMap<(usize, usize), usize> = HashMap::new();
+        let mut triangles = Vec::with_capacity(self.triangles.len());
+        for t in &self.triangles {
+            let mut mid = |a: usize, b: usize| {
+                *mids.entry((a.min(b), a.max(b))).or_insert_with(|| {
+                    let (p, q) = (nodes[a], nodes[b]);
+                    nodes.push(Node::new_2d((p.x + q.x) / 2.0, (p.y + q.y) / 2.0));
+                    nodes.len() - 1
+                })
+            };
+            let m = [mid(t[0], t[1]), mid(t[1], t[2]), mid(t[2], t[0])];
+            triangles.push([t[0], t[1], t[2], m[0], m[1], m[2]]);
+        }
+        let mut boundaries = self.boundaries;
+        for set in boundaries.values_mut() {
+            set.nodes
+                .extend(set.faces.iter().map(|&(e, f)| triangles[e][3 + f]));
+            set.nodes.sort_unstable();
+            set.nodes.dedup();
+        }
+        Triangulation {
+            nodes,
+            triangles,
+            boundaries,
+        }
+    }
+}
+
 /// Réglages du mailleur.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MeshOptions {
