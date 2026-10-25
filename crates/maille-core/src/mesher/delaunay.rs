@@ -4,6 +4,7 @@
 //! arrêtent la cavité : une fois présentes, elles restent (Delaunay contraint).
 
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 
 use super::predicates::{incircle, orient2d};
 use crate::error::MailleError;
@@ -16,12 +17,14 @@ const SUPER_SCALE: f64 = 100.0;
 
 /// Triangle antihoraire. `n[i]` est le voisin à travers l'arête opposée au sommet i, soit
 /// (v[i + 1], v[i + 2]) ; `None` sur le bord du super-triangle. Un triangle retiré reste dans le
-/// tableau (`alive = false`) pour ne pas renuméroter les autres.
+/// tableau (`alive = false`) pour ne pas renuméroter les autres. `inside` : dans le domaine, posé
+/// par `carve` puis hérité à chaque insertion.
 #[derive(Debug, Clone, Copy)]
 struct Tri {
     v: [usize; 3],
     n: [Option<usize>; 3],
     alive: bool,
+    inside: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -30,6 +33,8 @@ pub struct Delaunay {
     tris: Vec<Tri>,
     /// Triangle de départ de la recherche du prochain point : le dernier créé.
     hint: usize,
+    /// Premier des triangles créés par la dernière insertion.
+    first_new: usize,
     /// Un triangle vivant qui contient chaque point.
     vertex_tri: Vec<usize>,
     /// Arêtes contraintes (indices de points bruts, le plus petit d'abord).
@@ -48,8 +53,10 @@ impl Delaunay {
                 v: [0, 1, 2],
                 n: [None; 3],
                 alive: true,
+                inside: false,
             }],
             hint: 0,
+            first_new: 0,
             vertex_tri: vec![0; SUPER],
             constrained: HashSet::new(),
         }
@@ -72,7 +79,10 @@ impl Delaunay {
         // cavité : triangles connexes au triangle de départ dont le cercle circonscrit contient p
         let mut cavity = vec![start];
         let mut inside = HashSet::from([start]);
-        let mut boundary = Vec::new(); // arêtes (a, b) du bord de la cavité et triangle de l'autre côté
+        // arêtes (a, b) du bord de la cavité, triangle de l'autre côté, et appartenance au domaine du
+        // triangle de la cavité qui la portait (la cavité ne traverse pas d'arête contrainte, donc
+        // pas de bord du domaine une fois celui-ci respecté)
+        let mut boundary = Vec::new();
         let mut k = 0;
         while k < cavity.len() {
             let t = self.tris[cavity[k]];
@@ -85,7 +95,7 @@ impl Delaunay {
                         inside.insert(o);
                         cavity.push(o);
                     }
-                    other => boundary.push((a, b, other)),
+                    other => boundary.push((a, b, other, t.inside)),
                 }
             }
         }
@@ -93,22 +103,22 @@ impl Delaunay {
         // cohérence avant toute modification : la cavité doit être un polygone simple sans sommet
         // intérieur (T = B − 2), visible depuis p, et sans triangle atteint par un autre chemin
         // derrière une arête contrainte (elle serait détruite)
-        let starts: HashSet<usize> = boundary.iter().map(|&(a, _, _)| a).collect();
+        let starts: HashSet<usize> = boundary.iter().map(|&(a, ..)| a).collect();
         if boundary.len() != cavity.len() + 2
             || boundary
                 .iter()
-                .any(|&(_, _, o)| o.is_some_and(|o| inside.contains(&o)))
+                .any(|&(_, _, o, _)| o.is_some_and(|o| inside.contains(&o)))
             || starts.len() != boundary.len()
             || boundary
                 .iter()
-                .any(|&(a, b, _)| orient2d(self.points[a], self.points[b], p) <= 0.0)
+                .any(|&(a, b, ..)| orient2d(self.points[a], self.points[b], p) <= 0.0)
         {
             return Err(MailleError::MeshingFailed);
         }
         // position de chaque arête du bord dans le triangle d'en face, qui la parcourt en sens inverse
         let outside: Vec<Option<(usize, usize)>> = boundary
             .iter()
-            .map(|&(a, b, o)| match o {
+            .map(|&(a, b, o, _)| match o {
                 None => Ok(None),
                 Some(o) => self
                     .edge_of(o, b, a)
@@ -125,12 +135,13 @@ impl Delaunay {
         }
         let first = self.tris.len();
         let (mut by_start, mut by_end) = (HashMap::new(), HashMap::new());
-        for (k, (&(a, b, o), &link)) in boundary.iter().zip(&outside).enumerate() {
+        for (k, (&(a, b, o, inside), &link)) in boundary.iter().zip(&outside).enumerate() {
             let id = first + k;
             self.tris.push(Tri {
                 v: [a, b, pi],
                 n: [None, None, o],
                 alive: true,
+                inside,
             });
             by_start.insert(a, id);
             by_end.insert(b, id);
@@ -148,6 +159,7 @@ impl Delaunay {
             self.tris[first + k].n[1] = Some(by_end[&a]);
         }
         self.hint = first;
+        self.first_new = first;
         Ok(pi - SUPER)
     }
 
@@ -175,15 +187,80 @@ impl Delaunay {
         }
     }
 
-    /// Triangles du domaine, en indices de points insérés et dans l'ordre de leurs sommets :
-    /// la face k va du sommet k au sommet k + 1. `boundary` donne les arêtes de bord (a, b), le
-    /// domaine à leur gauche. On vide l'extérieur de proche en proche à partir du triangle à droite
-    /// de chacune, sans traverser d'arête contrainte. `MeshingFailed` si une arête de bord manque
-    /// ou si le vidage atteint un triangle du domaine par une fuite (bord non fermé).
-    pub fn domain(
-        &self,
+    /// Triangles créés par la dernière insertion (identifiants pour `triangle`).
+    pub fn new_triangles(&self) -> Range<usize> {
+        self.first_new..self.tris.len()
+    }
+
+    /// Nombre d'identifiants de triangles, retirés compris.
+    pub fn triangle_slots(&self) -> usize {
+        self.tris.len()
+    }
+
+    /// Sommets (indices de points insérés) du triangle `t` s'il est vivant et dans le domaine.
+    /// La face k va du sommet k au sommet k + 1.
+    pub fn triangle(&self, t: usize) -> Option<[usize; 3]> {
+        let tri = self.tris[t];
+        (tri.alive && tri.inside).then(|| tri.v.map(|v| v - SUPER))
+    }
+
+    /// Triangles du domaine, voir `triangle`.
+    pub fn inside_triangles(&self) -> Vec<[usize; 3]> {
+        (0..self.tris.len())
+            .filter_map(|t| self.triangle(t))
+            .collect()
+    }
+
+    /// Sommet opposé à l'arête a → b dans le triangle du domaine qui la parcourt, s'il existe.
+    pub fn left_vertex(&self, a: usize, b: usize) -> Option<usize> {
+        let (t, k) = self.directed_edge(a + SUPER, b + SUPER)?;
+        let tri = self.tris[t];
+        tri.inside.then(|| tri.v[(k + 2) % 3] - SUPER)
+    }
+
+    /// Vrai si p tombe dans un triangle du domaine.
+    pub fn inside_at(&self, p: [f64; 2]) -> Result<bool, MailleError> {
+        Ok(self.tris[self.locate(p)?].inside)
+    }
+
+    /// Corrige l'appartenance au domaine de part et d'autre de l'arête contrainte a → b : le
+    /// triangle à sa gauche est dans le domaine, celui à sa droite dehors. Un triangle mal marqué
+    /// l'est par héritage quand le milieu d'un morceau d'arc, posé sur le cercle et non sur la corde,
+    /// fait passer la corde d'un côté à l'autre. On corrige de proche en proche sans traverser
+    /// d'arête contrainte, et on note dans `changed` les triangles corrigés.
+    pub fn mark_sides(&mut self, a: usize, b: usize, changed: &mut Vec<usize>) {
+        for (from, to, inside) in [(a, b, true), (b, a, false)] {
+            let Some((first, _)) = self.directed_edge(from + SUPER, to + SUPER) else {
+                continue;
+            };
+            let mut stack = vec![first];
+            while let Some(t) = stack.pop() {
+                if self.tris[t].inside == inside {
+                    continue;
+                }
+                self.tris[t].inside = inside;
+                changed.push(t);
+                let tri = self.tris[t];
+                for i in 0..3 {
+                    let (p, q) = (tri.v[(i + 1) % 3], tri.v[(i + 2) % 3]);
+                    if let Some(o) = tri.n[i] {
+                        if !self.is_constrained(p, q) {
+                            stack.push(o);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Délimite le domaine. `boundary` donne les arêtes de bord (a, b), le domaine à leur gauche.
+    /// On vide l'extérieur de proche en proche à partir du triangle à droite de chacune, sans
+    /// traverser d'arête contrainte. `MeshingFailed` si une arête de bord manque ou si le domaine
+    /// touche le super-triangle (bord non fermé).
+    pub fn carve(
+        &mut self,
         boundary: impl Iterator<Item = (usize, usize)>,
-    ) -> Result<Vec<[usize; 3]>, MailleError> {
+    ) -> Result<(), MailleError> {
         let mut outside = vec![false; self.tris.len()];
         let mut stack = Vec::new();
         for (a, b) in boundary {
@@ -207,17 +284,13 @@ impl Delaunay {
                 }
             }
         }
-        let inside: Vec<&Tri> = self
-            .tris
-            .iter()
-            .zip(&outside)
-            .filter(|(t, &out)| t.alive && !out)
-            .map(|(t, _)| t)
-            .collect();
-        if inside.iter().any(|t| t.v.iter().any(|&v| v < SUPER)) {
-            return Err(MailleError::MeshingFailed);
+        for (tri, out) in self.tris.iter_mut().zip(outside) {
+            tri.inside = tri.alive && !out;
+            if tri.inside && tri.v.iter().any(|&v| v < SUPER) {
+                return Err(MailleError::MeshingFailed);
+            }
         }
-        Ok(inside.iter().map(|t| t.v.map(|v| v - SUPER)).collect())
+        Ok(())
     }
 
     /// Triangles qui ne touchent pas le super-triangle, en indices de points insérés.

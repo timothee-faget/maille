@@ -7,12 +7,12 @@
 mod delaunay;
 mod geometry;
 mod predicates;
+mod refine;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::error::MailleError;
 use crate::mesh::Node;
-use delaunay::Delaunay;
 pub use geometry::{Curve, CurveId, CurveKind, Geometry, MIN_CORNER};
 
 /// Plafond de Nodes produits par le mailleur : au-delà, `MeshingFailed` plutôt qu'un calcul sans fin.
@@ -49,69 +49,83 @@ impl<const N: usize> Triangulation<N> {
     }
 }
 
+/// Réglages du mailleur.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MeshOptions {
+    /// Angle minimal garanti des triangles, en degrés, de 0 (exclu) à `MAX_MIN_ANGLE`.
+    pub min_angle: f64,
+    /// Gradation g : de combien la taille des triangles peut croître par unité de longueur en
+    /// s'éloignant d'un bord fin, strictement positive.
+    pub grading: f64,
+}
+
+impl Default for MeshOptions {
+    fn default() -> Self {
+        Self {
+            min_angle: 25.0,
+            grading: 0.3,
+        }
+    }
+}
+
+/// Plus grand angle minimal accepté, en degrés : Ruppert est démontré jusqu'à 20,7° et termine en
+/// pratique jusque vers 33°.
+pub const MAX_MIN_ANGLE: f64 = 33.0;
+
 /// Maille la géométrie en triangles. Chaque Curve est découpée en morceaux de longueur au plus sa
-/// taille h, puis tout morceau absent de la triangulation de Delaunay est coupé en son milieu (sur
-/// la Curve) jusqu'à ce que le bord soit respecté.
-pub fn triangulate(geometry: &Geometry) -> Result<Triangulation<3>, MailleError> {
-    let boundary = geometry.discretize()?;
-    let (mut min, mut max) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
-    for p in &boundary.points {
-        for j in 0..2 {
-            min[j] = min[j].min(p[j]);
-            max[j] = max[j].max(p[j]);
-        }
-    }
-    let mut d = Delaunay::new(min, max);
-    for &p in &boundary.points {
-        d.insert(p)?; // indice dans la triangulation = indice dans boundary.points
-    }
-
-    // bord respecté : un morceau présent devient contraint, un morceau absent est coupé en deux
-    let mut segments = boundary.segments.clone();
-    let mut pending: Vec<usize> = (0..segments.len()).collect();
-    while let Some(s) = pending.pop() {
-        let seg = segments[s];
-        if d.has_edge(seg.a, seg.b) {
-            d.set_constrained(seg.a, seg.b, true);
-            continue;
-        }
-        if d.point_count() >= MAX_NODES {
-            return Err(MailleError::MeshingFailed);
-        }
-        let t = (seg.t[0] + seg.t[1]) / 2.0;
-        let m = d.insert(boundary.pieces[seg.piece].point(t))?;
-        segments[s].b = m;
-        segments[s].t[1] = t;
-        segments.push(geometry::Segment {
-            a: m,
-            t: [t, seg.t[1]],
-            ..seg
+/// taille h ; tout morceau absent de la triangulation de Delaunay est coupé en son milieu (sur la
+/// Curve) jusqu'à ce que le bord soit respecté. Puis Ruppert raffine jusqu'à l'angle minimal et
+/// à la taille locale : celle du bord le plus proche, croissant de `grading` par unité de longueur.
+pub fn triangulate(
+    geometry: &Geometry,
+    options: &MeshOptions,
+) -> Result<Triangulation<3>, MailleError> {
+    if !(options.min_angle > 0.0 && options.min_angle <= MAX_MIN_ANGLE) {
+        return Err(MailleError::MinAngleOutOfRange {
+            angle: options.min_angle,
         });
-        pending.extend([s, segments.len() - 1]);
     }
+    let grading = crate::material::positive("gradation", options.grading)?;
+    let boundary = geometry.discretize()?;
+    let mut m = refine::Mesher::new(&boundary)?;
+    m.refine(options, &refine::SizeField::new(&boundary, grading))?;
+    m.carve()?;
 
-    let triangles = d.domain(segments.iter().map(|s| (s.a, s.b)))?;
-    let nodes = (0..d.point_count())
-        .map(|i| {
-            let p = d.point(i);
-            Node::new_2d(p[0], p[1])
-        })
-        .collect();
+    // Nodes renumérotés dans l'ordre de création, sans ceux qu'aucun triangle n'utilise
+    let mut triangles = m.d.inside_triangles();
+    let mut number = vec![usize::MAX; m.d.point_count()];
+    for t in &triangles {
+        for &v in t {
+            number[v] = 0;
+        }
+    }
+    let mut nodes = Vec::new();
+    for (i, n) in number.iter_mut().enumerate() {
+        if *n == 0 {
+            *n = nodes.len();
+            let p = m.d.point(i);
+            nodes.push(Node::new_2d(p[0], p[1]));
+        }
+    }
+    for t in &mut triangles {
+        *t = t.map(|v| number[v]);
+    }
 
     // faces de bord : le triangle du domaine qui parcourt a → b
-    let mut faces = std::collections::HashMap::new();
+    let mut faces = HashMap::new();
     for (e, t) in triangles.iter().enumerate() {
         for k in 0..3 {
             faces.insert((t[k], t[(k + 1) % 3]), (e, k));
         }
     }
     let mut boundaries: BTreeMap<String, BoundarySet> = BTreeMap::new();
-    for s in &segments {
-        let face = *faces.get(&(s.a, s.b)).ok_or(MailleError::MeshingFailed)?;
+    for s in &m.segments {
+        let (a, b) = (number[s.a], number[s.b]);
+        let face = *faces.get(&(a, b)).ok_or(MailleError::MeshingFailed)?;
         let set = boundaries
             .entry(boundary.pieces[s.piece].id.name.clone())
             .or_default();
-        set.nodes.extend([s.a, s.b]);
+        set.nodes.extend([a, b]);
         set.faces.push(face);
     }
     for set in boundaries.values_mut() {

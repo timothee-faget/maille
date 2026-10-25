@@ -129,6 +129,10 @@ pub enum MailleError {
         second: CurveId,
         angle: f64,
     },
+    /// Angle minimal du mailleur hors de ]0, 33°].
+    MinAngleOutOfRange {
+        angle: f64,
+    },
     /// Bord nommé inexistant ; `known` liste les noms portés par les Curves.
     UnknownBoundary {
         name: String,
@@ -269,6 +273,11 @@ impl fmt::Display for MailleError {
                 f,
                 "angle de {angle:.1}° entre {first} et {second} : le mailleur demande au moins {}° entre deux Curves qui se suivent. Arrondir ou couper l'angle",
                 crate::mesher::MIN_CORNER
+            ),
+            Self::MinAngleOutOfRange { angle } => write!(
+                f,
+                "angle minimal du mailleur = {angle}° : doit être strictement positif et au plus {}° (au-delà, le raffinement peut ne pas terminer)",
+                crate::mesher::MAX_MIN_ANGLE
             ),
             Self::UnknownBoundary { name, known } => write!(
                 f,
