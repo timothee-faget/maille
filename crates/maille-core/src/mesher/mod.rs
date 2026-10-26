@@ -44,6 +44,11 @@ pub struct BoundarySet {
 }
 
 impl<const N: usize> Triangulation<N> {
+    /// Noms des bords, triés.
+    pub fn boundary_names(&self) -> impl Iterator<Item = &str> {
+        self.boundaries.keys().map(String::as_str)
+    }
+
     /// Bord nommé `name`. `UnknownBoundary` (avec la liste des noms) si aucune Curve ne le porte.
     pub fn boundary(&self, name: &str) -> Result<&BoundarySet, MailleError> {
         self.boundaries
