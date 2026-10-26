@@ -36,6 +36,11 @@ pub fn incircle(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> f64 {
     filter(det, permanent)
 }
 
+/// Distance entre deux points du plan.
+pub fn distance(p: [f64; 2], q: [f64; 2]) -> f64 {
+    (p[0] - q[0]).hypot(p[1] - q[1])
+}
+
 /// `value`, ou 0 si son module est sous l'erreur d'arrondi possible (`permanent` : somme des
 /// modules des termes du calcul).
 fn filter(value: f64, permanent: f64) -> f64 {

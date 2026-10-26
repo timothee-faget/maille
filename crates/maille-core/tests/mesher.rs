@@ -425,3 +425,47 @@ fn invalid_options() {
         Err(MailleError::InvalidProperty { .. })
     ));
 }
+
+#[test]
+fn too_many_nodes_is_reported() {
+    // 4 côtés de longueur 1 en morceaux de 10⁻⁷ : 4·10⁷ points de bord, au-delà du plafond
+    let g = Geometry {
+        outer: square(1e-7),
+        holes: vec![],
+    };
+    let err = triangulate(&g, &MeshOptions::default()).unwrap_err();
+    assert_eq!(
+        err,
+        MailleError::TooManyNodes {
+            max: maille_core::mesher::MAX_NODES
+        }
+    );
+    assert!(err.to_string().contains("augmenter les tailles h"));
+    // plafond sur le total : 4 côtés de 4·10⁵ morceaux chacun, sous le plafond un par un
+    let g = Geometry {
+        outer: square(2.5e-6),
+        holes: vec![],
+    };
+    assert!(matches!(
+        triangulate(&g, &MeshOptions::default()),
+        Err(MailleError::TooManyNodes { .. })
+    ));
+}
+
+#[test]
+fn curve_errors_name_the_curve() {
+    let mut outer = square(1.0);
+    outer[2].size = -1.0;
+    let err = triangulate(
+        &Geometry {
+            outer,
+            holes: vec![],
+        },
+        &MeshOptions::default(),
+    )
+    .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "la Curve 2 « haut » du contour extérieur a une taille h = -1 : elle doit être finie et strictement positive"
+    );
+}

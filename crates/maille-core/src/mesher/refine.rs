@@ -8,6 +8,7 @@ use std::collections::{HashMap, VecDeque};
 
 use super::delaunay::Delaunay;
 use super::geometry::{Boundary, Piece, Segment};
+use super::predicates::distance;
 use super::{MeshOptions, MAX_NODES};
 use crate::error::MailleError;
 
@@ -117,10 +118,10 @@ impl<'a> Mesher<'a> {
         }
     }
 
-    /// Insère p (`MeshingFailed` au-delà de `MAX_NODES`) et note les triangles créés.
+    /// Insère p (`TooManyNodes` au-delà de `MAX_NODES`) et note les triangles créés.
     fn insert(&mut self, p: [f64; 2], created: &mut Vec<usize>) -> Result<usize, MailleError> {
         if self.d.point_count() >= MAX_NODES {
-            return Err(MailleError::MeshingFailed);
+            return Err(MailleError::TooManyNodes { max: MAX_NODES });
         }
         let i = self.d.insert(p)?;
         created.extend(self.d.new_triangles());
@@ -265,10 +266,6 @@ fn circumcenter(p: [[f64; 2]; 3]) -> [f64; 2] {
         p[0][0] + (cy * b2 - by * c2) / d,
         p[0][1] + (bx * c2 - cx * b2) / d,
     ]
-}
-
-fn distance(p: [f64; 2], q: [f64; 2]) -> f64 {
-    (p[0] - q[0]).hypot(p[1] - q[1])
 }
 
 #[cfg(test)]

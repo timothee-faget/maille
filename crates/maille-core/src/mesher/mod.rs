@@ -1,8 +1,13 @@
 //! Mailleur 2D : triangulation de Delaunay (Bowyer-Watson), bords respectés, raffinement de Ruppert.
 //!
-//! Le mailleur ne produit que la connectivité : l'utilisateur crée ses Elements (Tri3, Tri6) avec
-//! son Material à partir de `Triangulation::triangles`, et pose ses BC et ses Convection sur les
-//! bords nommés (`Triangulation::boundary`).
+//! Démarche : décrire le domaine (`Geometry` : un contour extérieur et des trous, faits de Curves
+//! nommées), appeler `triangulate`, puis `to_quadratic` pour des Tri6. Le mailleur donne les Nodes,
+//! la connectivité et les bords nommés, pas les Elements : l'utilisateur crée ses Tri3 ou Tri6 avec
+//! son Material à partir de `Triangulation::triangles`, construit le Mesh avec `Mesh::new`, et pose
+//! ses BC et ses Convection sur les bords nommés (`Triangulation::boundary`).
+//!
+//! Unités : comme le reste du cœur, le mailleur ne convertit rien. Coordonnées et tailles h sont
+//! dans l'unité de longueur de l'utilisateur ; les angles sont en degrés.
 
 mod delaunay;
 mod geometry;
@@ -15,10 +20,11 @@ use crate::error::MailleError;
 use crate::mesh::Node;
 pub use geometry::{Curve, CurveId, CurveKind, Geometry, MIN_CORNER};
 
-/// Plafond de Nodes produits par le mailleur : au-delà, `MeshingFailed` plutôt qu'un calcul sans fin.
+/// Plafond de Nodes produits par le mailleur : au-delà, `TooManyNodes` plutôt qu'un calcul sans fin.
 pub const MAX_NODES: usize = 1_000_000;
 
-/// Maillage triangulaire produit par le mailleur : Nodes, connectivité et bords nommés.
+/// Résultat du mailleur : Nodes, connectivité des triangles (Tri3 pour N = 3, Tri6 pour N = 6) et
+/// bords nommés. `Mesh::new` en fait un Mesh une fois les Elements créés.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Triangulation<const N: usize> {
     pub nodes: Vec<Node>,
@@ -89,8 +95,8 @@ impl Triangulation<3> {
 pub struct MeshOptions {
     /// Angle minimal garanti des triangles, en degrés, de 0 (exclu) à `MAX_MIN_ANGLE`.
     pub min_angle: f64,
-    /// Gradation g : de combien la taille des triangles peut croître par unité de longueur en
-    /// s'éloignant d'un bord fin, strictement positive.
+    /// Gradation g, sans dimension : de combien la taille des triangles peut croître par unité de
+    /// longueur en s'éloignant d'un bord fin, strictement positive.
     pub grading: f64,
 }
 
@@ -124,6 +130,8 @@ pub fn triangulate(
     let boundary = geometry.discretize()?;
     let mut m = refine::Mesher::new(&boundary)?;
     m.refine(options, &refine::SizeField::new(&boundary, grading))?;
+    // contrôle final, à partir des seuls morceaux de bord : le domaine est fermé et l'appartenance
+    // des triangles, tenue à jour pendant le raffinement, est recalculée sans héritage
     m.carve()?;
 
     // Nodes renumérotés dans l'ordre de création, sans ceux qu'aucun triangle n'utilise

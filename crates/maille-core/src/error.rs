@@ -99,9 +99,23 @@ pub enum MailleError {
     NoStresses,
     /// Le Field ne correspond pas au Mesh (nombre d'Elements ou de points de Gauss).
     FieldMeshMismatch,
-    /// Le mailleur bute sur un cas dégénéré à l'arrondi près (points confondus ou presque
-    /// cocirculaires) ou dépasse son plafond de Nodes.
+    /// Le mailleur bute sur un cas dégénéré à l'arrondi près (points de la géométrie confondus ou
+    /// presque cocirculaires).
     MeshingFailed,
+    /// Le maillage dépasserait `max` Nodes (tailles h trop petites pour la géométrie).
+    TooManyNodes {
+        max: usize,
+    },
+    /// Taille h d'une Curve nulle, négative ou non finie.
+    InvalidCurveSize {
+        curve: CurveId,
+        value: f64,
+    },
+    /// Coordonnée non finie (NaN ou infinie) du point `what` (« départ », « centre ») d'une Curve.
+    NonFiniteCurve {
+        curve: CurveId,
+        what: &'static str,
+    },
     /// Contour sans aucune Curve (`hole` vaut `None` pour le contour extérieur).
     EmptyBoundary {
         hole: Option<usize>,
@@ -241,7 +255,19 @@ impl fmt::Display for MailleError {
             ),
             Self::MeshingFailed => write!(
                 f,
-                "le mailleur n'a pas pu trianguler la géométrie (points confondus ou presque cocirculaires à l'arrondi près, ou trop de Nodes) : déplacer légèrement un point de la géométrie ou augmenter les tailles h"
+                "le mailleur n'a pas pu trianguler la géométrie (points de la géométrie confondus ou presque cocirculaires à l'arrondi près) : déplacer légèrement un point de la géométrie ou changer les tailles h"
+            ),
+            Self::TooManyNodes { max } => write!(
+                f,
+                "le maillage dépasserait {max} Nodes : augmenter les tailles h des Curves"
+            ),
+            Self::InvalidCurveSize { curve, value } => write!(
+                f,
+                "{curve} a une taille h = {value} : elle doit être finie et strictement positive"
+            ),
+            Self::NonFiniteCurve { curve, what } => write!(
+                f,
+                "{curve} a un point de {what} dont une coordonnée n'est pas finie (NaN ou infinie)"
             ),
             Self::EmptyBoundary { hole: None } => {
                 write!(f, "le contour extérieur ne contient aucune Curve")
@@ -278,6 +304,10 @@ impl fmt::Display for MailleError {
                 f,
                 "angle minimal du mailleur = {angle}° : doit être strictement positif et au plus {}° (au-delà, le raffinement peut ne pas terminer)",
                 crate::mesher::MAX_MIN_ANGLE
+            ),
+            Self::UnknownBoundary { name, known } if known.is_empty() => write!(
+                f,
+                "aucune Curve ne porte le nom « {name} » : la géométrie n'a aucun bord nommé"
             ),
             Self::UnknownBoundary { name, known } => write!(
                 f,

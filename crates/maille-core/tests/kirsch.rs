@@ -8,7 +8,7 @@ use common::{rect_grid, to_quadratic};
 use maille_core::element::plane_d;
 use maille_core::material::Material;
 use maille_core::mesh::{Dof, Element, Mesh, Node, PlaneState, Tri3, Tri6};
-use maille_core::mesher::{triangulate, Curve, Geometry, MeshOptions};
+use maille_core::mesher::{triangulate, Curve, Geometry, MeshOptions, Triangulation};
 use maille_core::model::{Bc, Model};
 use maille_core::results::{nodal_stresses, Field};
 
@@ -296,8 +296,38 @@ fn nodal_smoothing_brings_the_hole_peak_closer_to_three_sigma() {
     );
 }
 
-/// Quart de plaque maillé par le mailleur : taille `hole` au trou, `outer` ailleurs. Déplacements
-/// de Kirsch imposés sur le bord extérieur, symétries sur les axes.
+/// Déplacements de Kirsch imposés sur le bord extérieur, symétries sur les axes (sauf aux deux
+/// coins, déjà imposés par le bord extérieur).
+fn kirsch_bcs<const N: usize>(t: &Triangulation<N>) -> Vec<Bc> {
+    let outer = &t.boundary("exterieur").unwrap().nodes;
+    let mut bcs = Vec::new();
+    for &n in outer {
+        let (u, v) = kirsch_displacement(t.nodes[n].x, t.nodes[n].y);
+        bcs.push(Bc {
+            node: n,
+            dof: Dof::Ux,
+            value: u,
+        });
+        bcs.push(Bc {
+            node: n,
+            dof: Dof::Uy,
+            value: v,
+        });
+    }
+    for (name, dof) in [("sym_x", Dof::Ux), ("sym_y", Dof::Uy)] {
+        let set = &t.boundary(name).unwrap().nodes;
+        for &n in set.iter().filter(|n| !outer.contains(n)) {
+            bcs.push(Bc {
+                node: n,
+                dof,
+                value: 0.0,
+            });
+        }
+    }
+    bcs
+}
+
+/// Quart de plaque maillé par le mailleur : taille `hole` au trou, `outer` ailleurs.
 fn solve_kirsch_meshed(hole: f64, outer: f64, quadratic: bool) -> Solved {
     let g = Geometry {
         outer: vec![
@@ -310,52 +340,22 @@ fn solve_kirsch_meshed(hole: f64, outer: f64, quadratic: bool) -> Solved {
     };
     let t3 = triangulate(&g, &MeshOptions::default()).unwrap();
     let material = Material::with_poisson(E, NU).unwrap();
-    let (nodes, elements, sets): (Vec<Node>, Vec<Element>, [Vec<usize>; 3]) = {
-        let names = ["exterieur", "sym_x", "sym_y"];
-        if quadratic {
-            let t = t3.to_quadratic();
-            let sets = names.map(|n| t.boundary(n).unwrap().nodes.clone());
-            let elements = t
-                .triangles
-                .iter()
-                .map(|&n| Element::Tri6(Tri6::new(n, material, 1.0, PlaneState::Stress).unwrap()))
-                .collect();
-            (t.nodes, elements, sets)
-        } else {
-            let sets = names.map(|n| t3.boundary(n).unwrap().nodes.clone());
-            let elements = t3
-                .triangles
-                .iter()
-                .map(|&n| Element::Tri3(Tri3::new(n, material, 1.0, PlaneState::Stress).unwrap()))
-                .collect();
-            (t3.nodes, elements, sets)
-        }
+    let (nodes, elements, bcs): (Vec<Node>, Vec<Element>, Vec<Bc>) = if quadratic {
+        let t = t3.to_quadratic();
+        let elements = t
+            .triangles
+            .iter()
+            .map(|&n| Element::Tri6(Tri6::new(n, material, 1.0, PlaneState::Stress).unwrap()))
+            .collect();
+        (t.nodes.clone(), elements, kirsch_bcs(&t))
+    } else {
+        let elements = t3
+            .triangles
+            .iter()
+            .map(|&n| Element::Tri3(Tri3::new(n, material, 1.0, PlaneState::Stress).unwrap()))
+            .collect();
+        (t3.nodes.clone(), elements, kirsch_bcs(&t3))
     };
-    let [outer_nodes, sym_x, sym_y] = sets;
-    let mut bcs = Vec::new();
-    for &n in &outer_nodes {
-        let (u, v) = kirsch_displacement(nodes[n].x, nodes[n].y);
-        bcs.push(Bc {
-            node: n,
-            dof: Dof::Ux,
-            value: u,
-        });
-        bcs.push(Bc {
-            node: n,
-            dof: Dof::Uy,
-            value: v,
-        });
-    }
-    // symétries, sauf aux deux coins déjà imposés par le bord extérieur
-    for (set, dof) in [(&sym_x, Dof::Ux), (&sym_y, Dof::Uy)] {
-        for &n in set.iter().filter(|n| !outer_nodes.contains(n)) {
-            bcs.push(Bc {
-                node: n,
-                dof,
-                value: 0.0,
-            });
-        }
-    }
     let mesh = Mesh::new(nodes, elements).unwrap();
     let field = Model::new(mesh.clone(), bcs, vec![])
         .unwrap()

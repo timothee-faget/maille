@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
-use super::predicates::{incircle, orient2d};
+use super::predicates::{distance, incircle, orient2d};
 use crate::error::MailleError;
 
 /// Les 3 premiers points sont les sommets du super-triangle.
@@ -369,10 +369,6 @@ impl Delaunay {
             .map(|i| distance(self.points[v[i]], self.points[v[(i + 1) % 3]]))
             .fold(0.0, f64::max)
     }
-}
-
-fn distance(p: [f64; 2], q: [f64; 2]) -> f64 {
-    (p[0] - q[0]).hypot(p[1] - q[1])
 }
 
 #[cfg(test)]

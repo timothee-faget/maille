@@ -5,10 +5,9 @@
 use std::f64::consts::PI;
 use std::fmt;
 
-use super::predicates::orient2d;
+use super::predicates::{distance, orient2d};
 use super::MAX_NODES;
 use crate::error::MailleError;
-use crate::material::positive;
 
 /// Angle intérieur minimal entre deux Curves qui se suivent, en degrés : en dessous, Ruppert peut ne
 /// pas terminer.
@@ -109,8 +108,13 @@ pub(crate) struct Piece {
 
 impl Piece {
     fn new(id: CurveId, curve: &Curve, end: [f64; 2]) -> Result<Self, MailleError> {
-        let size = positive("h (taille d'une Curve)", curve.size)?;
-        let start = curve.start;
+        if !(curve.size.is_finite() && curve.size > 0.0) {
+            return Err(MailleError::InvalidCurveSize {
+                curve: id,
+                value: curve.size,
+            });
+        }
+        let (start, size) = (curve.start, curve.size);
         let scale = start[0].hypot(start[1]).max(end[0].hypot(end[1]));
         let path = match curve.kind {
             CurveKind::Line => {
@@ -120,7 +124,7 @@ impl Piece {
                 Path::Line
             }
             CurveKind::Arc { center, clockwise } => {
-                finite(center)?;
+                finite(center, &id, "centre")?;
                 let radius = distance(start, center);
                 if radius <= 1e-12 * scale || (distance(end, center) - radius).abs() > 1e-9 * radius
                 {
@@ -201,7 +205,7 @@ impl Piece {
     fn divisions(&self) -> Result<usize, MailleError> {
         let n = (self.length() / self.size).ceil();
         if n > MAX_NODES as f64 {
-            return Err(MailleError::MeshingFailed);
+            return Err(MailleError::TooManyNodes { max: MAX_NODES });
         }
         let min = match self.path {
             Path::Line => 1,
@@ -264,24 +268,28 @@ impl Geometry {
         let mut ranges = Vec::new(); // points de chaque contour : b.points[range]
         for (hole, curves) in loops {
             let mut pieces = loop_pieces(hole, curves)?;
-            let ring: Vec<[f64; 2]> = sample(&pieces)?.into_iter().map(|(_, p)| p).collect();
+            let ring: Vec<[f64; 2]> = sample(&pieces)?.into_iter().map(|s| s.p).collect();
             if (signed_area(&ring) > 0.0) != hole.is_none() {
                 pieces = pieces.iter().rev().map(Piece::reversed).collect();
             }
             let first = b.points.len();
+            // les paramètres t changent avec le sens : on redécoupe après une éventuelle inversion
             let samples = sample(&pieces)?;
-            for (k, &((piece, t0), p)) in samples.iter().enumerate() {
+            if first + samples.len() > MAX_NODES {
+                return Err(MailleError::TooManyNodes { max: MAX_NODES });
+            }
+            for (k, s) in samples.iter().enumerate() {
                 // le dernier morceau d'une Piece s'arrête au début de la suivante, en t = 1
                 let t1 = match samples.get(k + 1) {
-                    Some(&((next, t), _)) if next == piece => t,
+                    Some(next) if next.piece == s.piece => next.t,
                     _ => 1.0,
                 };
-                b.points.push(p);
+                b.points.push(s.p);
                 b.segments.push(Segment {
                     a: first + k,
                     b: first + (k + 1) % samples.len(),
-                    piece: b.pieces.len() + piece,
-                    t: [t0, t1],
+                    piece: b.pieces.len() + s.piece,
+                    t: [s.t, t1],
                 });
             }
             b.pieces.extend(pieces.iter().cloned());
@@ -317,27 +325,38 @@ fn loop_pieces(hole: Option<usize>, curves: &[Curve]) -> Result<Vec<Piece>, Mail
         .iter()
         .enumerate()
         .map(|(index, c)| {
-            finite(c.start)?;
             let id = CurveId {
                 hole,
                 index,
                 name: c.name.clone(),
             };
+            // l'arrivée est le départ de la Curve suivante : vérifiée avec elle (et la dernière
+            // revient à la première, vérifiée d'abord)
+            finite(c.start, &id, "départ")?;
             Piece::new(id, c, curves[(index + 1) % curves.len()].start)
         })
         .collect()
 }
 
-/// Points de découpage d'un contour, avec la Piece et le paramètre de chacun (t = 1 exclu : c'est
-/// le premier point de la Piece suivante).
-#[allow(clippy::type_complexity)]
-fn sample(pieces: &[Piece]) -> Result<Vec<((usize, f64), [f64; 2])>, MailleError> {
+/// Point de découpage : position `p`, de paramètre `t` sur la Piece `piece` de son contour.
+struct Sample {
+    piece: usize,
+    t: f64,
+    p: [f64; 2],
+}
+
+/// Points de découpage d'un contour (t = 1 exclu : c'est le premier point de la Piece suivante).
+fn sample(pieces: &[Piece]) -> Result<Vec<Sample>, MailleError> {
     let mut out = Vec::new();
-    for (i, p) in pieces.iter().enumerate() {
+    for (piece, p) in pieces.iter().enumerate() {
         let n = p.divisions()?;
         for k in 0..n {
             let t = k as f64 / n as f64;
-            out.push(((i, t), p.point(t)));
+            out.push(Sample {
+                piece,
+                t,
+                p: p.point(t),
+            });
         }
     }
     Ok(out)
@@ -369,7 +388,10 @@ fn check_corners(pieces: &[Piece]) -> Result<(), MailleError> {
         let after = &pieces[(i + 1) % pieces.len()];
         let (u, v) = (before.tangent(1.0), after.tangent(0.0));
         let turn = (u[0] * v[1] - u[1] * v[0]).atan2(u[0] * v[0] + u[1] * v[1]);
+        // un demi-tour (turn = ±π) est un retour en arrière, d'angle 0 : le signe du zéro du
+        // produit vectoriel le ferait sinon passer pour un angle de 360°
         let angle = (PI - turn).to_degrees();
+        let angle = if angle > 360.0 - 1e-6 { 0.0 } else { angle };
         if angle < MIN_CORNER {
             return Err(MailleError::SharpCorner {
                 first: before.id.clone(),
@@ -381,20 +403,16 @@ fn check_corners(pieces: &[Piece]) -> Result<(), MailleError> {
     Ok(())
 }
 
-fn finite(p: [f64; 2]) -> Result<(), MailleError> {
-    for v in p {
-        if !v.is_finite() {
-            return Err(MailleError::NonFinite {
-                name: "coordonnée d'une Curve",
-                value: v,
-            });
-        }
+/// `NonFiniteCurve` si une coordonnée du point `what` de la Curve `id` n'est pas finie.
+fn finite(p: [f64; 2], id: &CurveId, what: &'static str) -> Result<(), MailleError> {
+    if p.iter().all(|v| v.is_finite()) {
+        Ok(())
+    } else {
+        Err(MailleError::NonFiniteCurve {
+            curve: id.clone(),
+            what,
+        })
     }
-    Ok(())
-}
-
-fn distance(p: [f64; 2], q: [f64; 2]) -> f64 {
-    (p[0] - q[0]).hypot(p[1] - q[1])
 }
 
 /// Aire signée d'un polygone (positive dans le sens antihoraire).
@@ -431,7 +449,8 @@ fn segments_touch(p: [f64; 2], q: [f64; 2], r: [f64; 2], s: [f64; 2]) -> bool {
     if o1 * o2 < 0.0 && o3 * o4 < 0.0 {
         return true;
     }
-    // point aligné avec un segment et dans sa boîte englobante : posé dessus
+    // point aligné avec un segment et dans sa boîte englobante : posé dessus. Le test == 0.0 est
+    // exact : `orient2d` renvoie 0 tout rond sous l'erreur d'arrondi possible
     let on = |a: [f64; 2], b: [f64; 2], c: [f64; 2]| {
         (0..2).all(|j| a[j].min(b[j]) <= c[j] && c[j] <= a[j].max(b[j]))
     };
@@ -613,13 +632,34 @@ mod tests {
             err(outer(vec![])),
             MailleError::EmptyBoundary { hole: None }
         );
-        assert!(matches!(
+        assert_eq!(
             err(outer(square(0.0, "bord"))),
-            MailleError::InvalidProperty { .. }
-        ));
+            MailleError::InvalidCurveSize {
+                curve: id(None, 0, "bord"),
+                value: 0.0
+            }
+        );
         let mut nan = square(1.0, "bord");
         nan[2].start[0] = f64::NAN;
-        assert!(matches!(err(outer(nan)), MailleError::NonFinite { .. }));
+        assert_eq!(
+            err(outer(nan)),
+            MailleError::NonFiniteCurve {
+                curve: id(None, 2, "bord"),
+                what: "départ"
+            }
+        );
+        let bad_center = vec![
+            Curve::line([0.0, 0.0], 1.0, "a"),
+            Curve::arc([1.0, 0.0], [f64::INFINITY, 0.0], false, 1.0, "arc"),
+            Curve::line([1.0, 1.0], 1.0, "b"),
+        ];
+        assert_eq!(
+            err(outer(bad_center)),
+            MailleError::NonFiniteCurve {
+                curve: id(None, 1, "arc"),
+                what: "centre"
+            }
+        );
 
         let mut doubled = square(1.0, "bord");
         doubled.insert(2, Curve::line([1.0, 0.0], 1.0, "double"));
@@ -682,6 +722,25 @@ mod tests {
             ])),
             MailleError::HoleOutsideBoundary { hole: 1 }
         );
+    }
+
+    /// Demi-tour au raccord de deux Curves (fissure de largeur nulle). Le produit vectoriel des
+    /// tangentes vaut −0 pour (0, 1) puis (0, −1) et +0 pour (1, 0) puis (−1, 0) : les deux
+    /// raccords doivent donner un angle de 0°. (Sur un contour complet, la vérification des
+    /// croisements refuse déjà ce cas : on teste ici `check_corners` seul.)
+    #[test]
+    fn folding_back_is_a_zero_angle() {
+        for (a, b, c) in [
+            ([1.0, 0.0], [1.0, 1.0], [1.0, 0.5]),
+            ([0.0, 0.0], [1.0, 0.0], [0.5, 0.0]),
+        ] {
+            let curves = [a, b, c].map(|p| Curve::line(p, 1.0, "bord"));
+            let pieces = loop_pieces(None, &curves).unwrap();
+            match check_corners(&pieces[..2]) {
+                Err(MailleError::SharpCorner { angle, .. }) => assert!(angle.abs() < 1e-9),
+                other => panic!("{other:?}"),
+            }
+        }
     }
 
     #[test]
