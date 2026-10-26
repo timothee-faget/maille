@@ -97,7 +97,7 @@ impl SkylineMatrix {
 /// Produit scalaire de deux tranches de même longueur. Quatre sommes partielles indépendantes
 /// : le Cholesky passe l'essentiel de son temps ici, et une seule somme force chaque addition à
 /// attendre la précédente.
-fn dot(a: &[f64], b: &[f64]) -> f64 {
+pub(crate) fn dot(a: &[f64], b: &[f64]) -> f64 {
     let ((a4, a_tail), (b4, b_tail)) = (a.as_chunks::<8>(), b.as_chunks::<8>());
     let tail: f64 = a_tail.iter().zip(b_tail).map(|(x, y)| x * y).sum();
     let mut s = [0.0; 8];
@@ -138,12 +138,68 @@ impl Cholesky {
     }
 }
 
+/// Graphe donné par les voisins de chaque sommet : `Vec<Vec<usize>>` pour les petits cas, `Graph`
+/// (une seule allocation) pour les gros.
+pub trait Adjacency {
+    fn len(&self) -> usize;
+    fn neighbours(&self, v: usize) -> &[usize];
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl Adjacency for [Vec<usize>] {
+    fn len(&self) -> usize {
+        <[Vec<usize>]>::len(self)
+    }
+    fn neighbours(&self, v: usize) -> &[usize] {
+        &self[v]
+    }
+}
+
+impl Adjacency for Vec<Vec<usize>> {
+    fn len(&self) -> usize {
+        Vec::len(self)
+    }
+    fn neighbours(&self, v: usize) -> &[usize] {
+        &self[v]
+    }
+}
+
+/// Choix du solveur de K_ff u_f = b.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SolverKind {
+    /// Direct (Cholesky en ligne de ciel) jusqu'à `ITERATIVE_FROM` DOF libres, itératif au-delà.
+    #[default]
+    Auto,
+    /// Cholesky en ligne de ciel : exact, mais la mémoire et le temps croissent vite en 3D.
+    Direct,
+    /// Gradients conjugués préconditionnés par un Cholesky incomplet : mémoire en O(n), à
+    /// préférer pour les gros modèles 3D.
+    Iterative,
+}
+
+/// Nombre de DOF libres à partir duquel `SolverKind::Auto` choisit le solveur itératif. Mesuré sur
+/// une console Tet10 : le direct reste plus rapide jusqu'à ~100 000 DOF (3,4 s contre 5,5 s à
+/// 70 000), mais sa mémoire croît plus vite que celle de l'itératif.
+pub const ITERATIVE_FROM: usize = 100_000;
+
+impl SolverKind {
+    pub(crate) fn is_iterative(self, free_dofs: usize) -> bool {
+        match self {
+            Self::Auto => free_dofs >= ITERATIVE_FROM,
+            Self::Direct => false,
+            Self::Iterative => true,
+        }
+    }
+}
+
 /// Renumérotation de Cuthill-McKee inverse du graphe `adjacency` (voisins de chaque sommet) :
 /// `order[nouveau] = ancien`. Parcours en largeur depuis un sommet pseudo-périphérique, voisins
 /// par degré croissant, puis ordre inversé. Chaque composante connexe est traitée à part.
-pub fn reverse_cuthill_mckee(adjacency: &[Vec<usize>]) -> Vec<usize> {
+pub fn reverse_cuthill_mckee<G: Adjacency + ?Sized>(adjacency: &G) -> Vec<usize> {
     let n = adjacency.len();
-    let degree = |v: usize| adjacency[v].len();
+    let degree = |v: usize| adjacency.neighbours(v).len();
     let mut visited = vec![false; n];
     let mut order = Vec::with_capacity(n);
     while let Some(seed) = (0..n).filter(|&v| !visited[v]).min_by_key(|&v| degree(v)) {
@@ -170,7 +226,8 @@ pub fn reverse_cuthill_mckee(adjacency: &[Vec<usize>]) -> Vec<usize> {
         while head < order.len() {
             let v = order[head];
             head += 1;
-            let mut next: Vec<usize> = adjacency[v]
+            let mut next: Vec<usize> = adjacency
+                .neighbours(v)
                 .iter()
                 .copied()
                 .filter(|&w| !visited[w])
@@ -188,14 +245,18 @@ pub fn reverse_cuthill_mckee(adjacency: &[Vec<usize>]) -> Vec<usize> {
 }
 
 /// Niveaux du parcours en largeur depuis `start`, sans entrer dans les sommets `excluded`.
-fn bfs_levels(adjacency: &[Vec<usize>], start: usize, excluded: &[bool]) -> Vec<Vec<usize>> {
+fn bfs_levels<G: Adjacency + ?Sized>(
+    adjacency: &G,
+    start: usize,
+    excluded: &[bool],
+) -> Vec<Vec<usize>> {
     let mut seen = excluded.to_vec();
     seen[start] = true;
     let mut levels = vec![vec![start]];
     loop {
         let mut next = Vec::new();
         for &v in levels.last().map_or(&[][..], |l| l.as_slice()) {
-            for &w in &adjacency[v] {
+            for &w in adjacency.neighbours(v) {
                 if !std::mem::replace(&mut seen[w], true) {
                     next.push(w);
                 }

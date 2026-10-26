@@ -166,6 +166,11 @@ pub enum MailleError {
     },
     /// Matrice non définie positive : structure non contrainte ou mécanisme.
     Singular,
+    /// Les gradients conjugués n'ont pas atteint la tolérance (résidu relatif) en `iterations`.
+    IterativeNotConverged {
+        iterations: usize,
+        residual: f64,
+    },
     /// Contraintes aux Nodes demandées sur un Mesh de Bar ou de Beam, ou sur un Field thermique.
     NoStresses,
     /// Le Field ne correspond pas au Mesh (nombre d'Elements ou de points de Gauss).
@@ -388,6 +393,15 @@ impl fmt::Display for MailleError {
                 f,
                 "système singulier : la structure n'est pas assez contrainte (mouvement de corps rigide) \
                  ou contient un mécanisme. Ajouter une BC ou vérifier la connectivité des Elements"
+            ),
+            Self::IterativeNotConverged {
+                iterations,
+                residual,
+            } => write!(
+                f,
+                "le solveur itératif n'a pas convergé en {iterations} itérations (résidu relatif {residual:.1e}) : \
+                 modèle mal conditionné ou presque singulier (Elements très aplatis, structure peu contrainte). \
+                 Vérifier les BC, ou utiliser SolverKind::Direct"
             ),
             Self::NoStresses => write!(
                 f,
