@@ -4,6 +4,12 @@
 //! Notation de Voigt de `solid_d` : (xx, yy, zz, yz, xz, xy), glissements γ = 2 ε en déformation
 //! d'ingénieur, contraintes de cisaillement τ telles quelles.
 
+/// Dépassement relatif de σy(p) en dessous duquel le point reste élastique. Un point laissé sur la
+/// surface par l'incrément précédent la recalcule à l'arrondi près (excès ~10⁻¹³ σy) : sans cette
+/// marge, la moitié des points d'une zone plastique se croiraient en écoulement au début d'une
+/// décharge, et Newton prédirait la décharge avec la tangente plastique, très molle.
+const YIELD_TOLERANCE: f64 = 1e-10;
+
 /// État interne d'un point de Gauss, nul au départ.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct PlasticState {
@@ -54,12 +60,13 @@ impl VonMises {
         let root_3_2 = 1.5_f64.sqrt();
         let norm = contract(&trial, &trial).sqrt();
         let q = root_3_2 * norm;
-        let excess = q - (self.yield_stress + self.hardening * previous.p);
+        let yield_stress = self.yield_stress + self.hardening * previous.p;
+        let excess = q - yield_stress;
 
         // dp : incrément de p qui ramène q sur σy(p + dp) ; θ : facteur de réduction du déviateur
         // (s = θ s_essai) ; θ̄ : raidissement perdu dans la direction n quand dp varie avec ε, nul en
         // élastique, égal à θ si H = 0
-        let (theta, theta_bar, dp) = if excess > 0.0 {
+        let (theta, theta_bar, dp) = if excess > YIELD_TOLERANCE * yield_stress {
             let dp = excess / (3.0 * g + self.hardening);
             let theta = 1.0 - 3.0 * g * dp / q;
             (

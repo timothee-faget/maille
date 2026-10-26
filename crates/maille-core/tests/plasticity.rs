@@ -808,3 +808,35 @@ fn thick_tube_reaches_the_limit_pressure() {
     );
     assert_eq!(t.mesh.elements.len(), t.history[12].field.stresses.len());
 }
+
+#[test]
+fn unloading_from_a_fully_plastic_state_is_elastic_in_one_iteration() {
+    // plaque en déformations planes tirée par un déplacement imposé, toute plastique en fin de charge :
+    // au début de la décharge, chaque point est sur la surface de charge à l'arrondi près et doit
+    // repartir en élastique (sinon Newton prédit la décharge avec la tangente plastique, très molle)
+    for (name, mesh) in plane_meshes(plastic(H)) {
+        let mut bcs = Vec::new();
+        for (i, n) in mesh.nodes.iter().enumerate() {
+            if near(n.x, 0.0) {
+                bcs.push(bc(i, Dof::Ux, 0.0));
+            } else if near(n.x, L) {
+                bcs.push(bc(i, Dof::Ux, 0.02 * L));
+            }
+            if near(n.x, 0.0) && near(n.y, 0.0) {
+                bcs.push(bc(i, Dof::Uy, 0.0));
+            }
+        }
+        let model = Model::new(mesh, bcs, Vec::new()).unwrap();
+        let step = Step::quasi_static(2.0, 20).unwrap();
+        let amplitude = Amplitude::new(vec![(0.0, 0.0), (1.0, 1.0), (2.0, 0.0)]).unwrap();
+        let history = model.solve_quasi_static(&step, &amplitude).unwrap();
+        let p_max = history[10].field.equivalent_plastic_strains.concat();
+        assert!(
+            p_max.iter().all(|&p| p > 0.0),
+            "{name} : la charge doit tout plastifier"
+        );
+        // premier pas de décharge : Δσxx ≈ 460 MPa < 2 σy, élastique, donc une seule itération
+        let first = &history[11];
+        assert_eq!(first.residuals.len(), 2, "{name} : {:?}", first.residuals);
+    }
+}
