@@ -2,8 +2,8 @@ use std::ops::Deref;
 
 use crate::assembly::{
     element_capacity, element_conduction, element_dofs, element_heat_flux_operator,
-    element_heat_source, element_stiffness, element_stresses, face_convection, FaceConvection,
-    FluxOperator,
+    element_heat_source, element_stiffness, element_stresses, element_thermal_load,
+    element_thermal_strains, face_convection, FaceConvection, FluxOperator,
 };
 use crate::element::{bar_equivalent_load, beam_equivalent_load};
 use crate::error::MailleError;
@@ -133,6 +133,8 @@ pub struct Model {
     distributed: Vec<DistributedLoad>,
     heat_sources: Vec<HeatSource>,
     convection: Vec<Convection>,
+    /// Températures imposées aux Nodes et T_ref (statique), voir `with_temperatures`.
+    temperatures: Option<(Vec<f64>, f64)>,
 }
 
 impl Model {
@@ -189,6 +191,7 @@ impl Model {
             distributed: Vec::new(),
             heat_sources: Vec::new(),
             convection: Vec::new(),
+            temperatures: None,
         })
     }
 
@@ -235,6 +238,38 @@ impl Model {
         Ok(self)
     }
 
+    /// Températures imposées aux Nodes, en statique seulement (couplage thermo-mécanique séquentiel) :
+    /// une par Node, par exemple les `temperatures` d'un Field thermique calculé sur le même Mesh.
+    /// Chaque Element se dilate de α (T − `reference`), `reference` étant la température sans
+    /// contrainte ; les contraintes du Field sont alors σ = D (ε − ε_th). Bar, triangles et
+    /// tétraèdres, dont le Material doit avoir α.
+    pub fn with_temperatures(
+        mut self,
+        temperatures: Vec<f64>,
+        reference: f64,
+    ) -> Result<Self, MailleError> {
+        if self.analysis != Analysis::Static {
+            return Err(MailleError::StaticOnly);
+        }
+        check_temperatures(&self.mesh, &temperatures)?;
+        if !reference.is_finite() {
+            return Err(MailleError::NonFinite {
+                name: "T_ref (température sans contrainte)",
+                value: reference,
+            });
+        }
+        for (i, e) in self.mesh.elements.iter().enumerate() {
+            if matches!(e, Element::Beam(_)) {
+                return Err(MailleError::UnsupportedThermalStrain { element: i });
+            }
+            if e.material().expansion.is_none() {
+                return Err(MailleError::MissingExpansion { element: i });
+            }
+        }
+        self.temperatures = Some((temperatures, reference));
+        Ok(self)
+    }
+
     /// L'Element `i`, ou `UnknownElement`.
     fn element(&self, i: usize) -> Result<&Element, MailleError> {
         self.mesh
@@ -256,7 +291,22 @@ impl Model {
     /// assemblée en ligne de ciel, les réactions sont recalculées Element par Element.
     pub fn solve(&self) -> Result<Field, MailleError> {
         let mesh = &self.mesh;
-        let a = self.assemble()?;
+        let mut a = self.assemble()?;
+        // dilatation : α (T − T_ref) aux Nodes de chaque Element, et ses forces nodales dans F
+        let strains: Vec<Vec<f64>> = (0..mesh.elements.len())
+            .map(|i| match &self.temperatures {
+                Some((t, reference)) => element_thermal_strains(mesh, i, t, *reference),
+                None => Vec::new(),
+            })
+            .collect();
+        for (i, strain_e) in strains.iter().enumerate().filter(|(_, s)| !s.is_empty()) {
+            for (&g, v) in a.dofs[i]
+                .iter()
+                .zip(element_thermal_load(mesh, i, strain_e))
+            {
+                a.f[g] += v;
+            }
+        }
         let matrix = |i: usize| match self.analysis {
             Analysis::Static => element_stiffness(mesh, i),
             Analysis::Thermal => thermal_matrix(mesh, &a.faces, i),
@@ -275,7 +325,7 @@ impl Model {
         Ok(match self.analysis {
             Analysis::Static => Field {
                 stresses: (0..mesh.elements.len())
-                    .map(|i| element_stresses(mesh, i, &u))
+                    .map(|i| element_stresses(mesh, i, &u, &strains[i]))
                     .collect(),
                 displacements: u,
                 reactions,
@@ -299,15 +349,7 @@ impl Model {
         self.require_thermal()?;
         let mesh = &self.mesh;
         let n = mesh.nodes.len();
-        if initial.len() != n {
-            return Err(MailleError::InitialTemperatureCount {
-                expected: n,
-                got: initial.len(),
-            });
-        }
-        if let Some(node) = initial.iter().position(|t| !t.is_finite()) {
-            return Err(MailleError::NonFiniteInitialTemperature { node });
-        }
+        check_temperatures(mesh, initial)?;
         for (i, e) in mesh.elements.iter().enumerate() {
             if e.material().density.is_none() {
                 return Err(MailleError::MissingDensity { element: i });
@@ -430,6 +472,20 @@ impl Model {
             imposed,
             fixed,
         })
+    }
+}
+
+/// Une température finie par Node.
+fn check_temperatures(mesh: &Mesh, t: &[f64]) -> Result<(), MailleError> {
+    if t.len() != mesh.nodes.len() {
+        return Err(MailleError::TemperatureCount {
+            expected: mesh.nodes.len(),
+            got: t.len(),
+        });
+    }
+    match t.iter().position(|t| !t.is_finite()) {
+        Some(node) => Err(MailleError::NonFiniteTemperature { node }),
+        None => Ok(()),
     }
 }
 

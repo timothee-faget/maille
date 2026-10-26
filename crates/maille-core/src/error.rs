@@ -81,14 +81,25 @@ pub enum MailleError {
     ThetaOutOfRange {
         theta: f64,
     },
-    /// Condition initiale qui n'a pas une température par Node.
-    InitialTemperatureCount {
+    /// Champ de températures (condition initiale d'une Step, températures d'un calcul statique) qui
+    /// n'a pas une valeur par Node.
+    TemperatureCount {
         expected: usize,
         got: usize,
     },
-    /// Température initiale non finie (NaN ou infinie) au Node `node`.
-    NonFiniteInitialTemperature {
+    /// Température non finie (NaN ou infinie) au Node `node`.
+    NonFiniteTemperature {
         node: usize,
+    },
+    /// Températures imposées (dilatation) sur un Model qui n'est pas statique.
+    StaticOnly,
+    /// Des températures imposées en statique demandent α.
+    MissingExpansion {
+        element: usize,
+    },
+    /// La Beam n'a pas de dilatation thermique.
+    UnsupportedThermalStrain {
+        element: usize,
     },
     /// Face inexistante (triangle : 0 à 2, tétraèdre : 0 à 3 ; aucune pour Bar et Beam).
     UnknownFace {
@@ -247,13 +258,25 @@ impl fmt::Display for MailleError {
                 f,
                 "θ = {theta} : doit être entre 0,5 (Crank-Nicolson) et 1 (Euler implicite) ; en dessous de 0,5, le calcul diverge si Δt est trop grand"
             ),
-            Self::InitialTemperatureCount { expected, got } => write!(
+            Self::TemperatureCount { expected, got } => write!(
                 f,
-                "la condition initiale a {got} températures pour {expected} Nodes : en donner une par Node, par exemple vec![T0; nombre de Nodes] ou les temperatures d'un Field stationnaire"
+                "le champ de températures a {got} valeurs pour {expected} Nodes : en donner une par Node, par exemple vec![T0; nombre de Nodes] ou les temperatures d'un Field thermique"
             ),
-            Self::NonFiniteInitialTemperature { node } => write!(
+            Self::NonFiniteTemperature { node } => write!(
                 f,
-                "la température initiale du Node {node} n'est pas finie (NaN ou infinie)"
+                "la température du Node {node} n'est pas finie (NaN ou infinie)"
+            ),
+            Self::StaticOnly => write!(
+                f,
+                "les températures imposées (dilatation thermique) ne servent qu'en statique : les donner au Model créé avec Model::new, le champ venant d'un calcul thermique sur le même Mesh"
+            ),
+            Self::MissingExpansion { element } => write!(
+                f,
+                "le Material de l'Element {element} n'a pas de coefficient de dilatation, requis quand on impose des températures : ajouter with_expansion"
+            ),
+            Self::UnsupportedThermalStrain { element } => write!(
+                f,
+                "l'Element {element} est une Beam, qui n'a pas de dilatation thermique (il faudrait un gradient dans l'épaisseur) : utiliser des Bar, des triangles ou des tétraèdres"
             ),
             Self::UnknownFace { element, face } => write!(
                 f,

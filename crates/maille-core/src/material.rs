@@ -9,8 +9,8 @@ pub(crate) fn positive(name: &'static str, value: f64) -> Result<f64, MailleErro
 }
 
 /// Matériau isotrope. Chaque propriété n'est exigée que par l'analyse qui s'en sert (vérifié par
-/// `Model`) : E (et ν pour les triangles et tétraèdres) en statique, k en thermique, et en plus ρ et c
-/// en thermique transitoire.
+/// `Model`) : E (et ν pour les triangles et tétraèdres) en statique, et α si on impose des
+/// températures ; k en thermique, et en plus ρ et c en thermique transitoire.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Material {
     /// Module d'Young E.
@@ -24,6 +24,8 @@ pub struct Material {
     /// Chaleur massique c : énergie par unité de masse et par degré (ex. J/(kg·K) avec des W, des
     /// mm et des s ; acier : 460). Seul le produit ρc compte en thermique.
     pub specific_heat: Option<f64>,
+    /// Coefficient de dilatation thermique α : déformation par degré (ex. 1/K ; acier : 1,2·10⁻⁵).
+    pub expansion: Option<f64>,
 }
 
 impl Material {
@@ -35,6 +37,7 @@ impl Material {
             conductivity: None,
             density: None,
             specific_heat: None,
+            expansion: None,
         })
     }
 
@@ -46,6 +49,7 @@ impl Material {
             conductivity: Some(positive("k (conductivité thermique)", conductivity)?),
             density: None,
             specific_heat: None,
+            expansion: None,
         })
     }
 
@@ -69,6 +73,14 @@ impl Material {
     pub fn with_specific_heat(self, specific_heat: f64) -> Result<Self, MailleError> {
         Ok(Self {
             specific_heat: Some(positive("c (chaleur massique)", specific_heat)?),
+            ..self
+        })
+    }
+
+    /// Ajoute le coefficient de dilatation α.
+    pub fn with_expansion(self, expansion: f64) -> Result<Self, MailleError> {
+        Ok(Self {
+            expansion: Some(positive("α (coefficient de dilatation)", expansion)?),
             ..self
         })
     }

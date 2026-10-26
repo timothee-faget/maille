@@ -1,7 +1,7 @@
 use crate::element::{
-    bar_stiffness, beam_stiffness, capacity, conduction, heat_fluxes, plane_d, plane_gauss,
-    plane_stiffness, plane_stresses, solid_d, solid_gauss, solid_stiffness, solid_stresses,
-    GaussData,
+    bar_stiffness, bar_thermal_load, beam_stiffness, capacity, conduction, heat_fluxes,
+    in_plane_expansion, plane_d, plane_gauss, plane_stiffness, plane_stresses, plane_thermal_load,
+    solid_d, solid_gauss, solid_stiffness, solid_stresses, solid_thermal_load, GaussData,
 };
 use crate::material::Material;
 use crate::mesh::{Element, Mesh, PlaneState, Tet10, Tet4, Tri3, Tri6};
@@ -114,7 +114,7 @@ impl<'a> PlaneKernel<'a> {
         )
     }
 
-    fn stresses(&self, mesh: &Mesh, u: &[f64]) -> Vec<Stress> {
+    fn stresses(&self, mesh: &Mesh, u: &[f64], strain_e: &[f64]) -> Vec<Stress> {
         let nu = self.nu();
         let d = plane_d(young(self.material), nu, self.state);
         let u_e: Vec<f64> = self
@@ -128,8 +128,23 @@ impl<'a> PlaneKernel<'a> {
             self.shape,
             &d,
             &u_e,
+            young(self.material),
             nu,
             self.state,
+            strain_e,
+        )
+    }
+
+    fn thermal_load(&self, mesh: &Mesh, strain_e: &[f64]) -> Vec<f64> {
+        let nu = self.nu();
+        plane_thermal_load(
+            &mesh.coords(self.nodes),
+            self.rule,
+            self.shape,
+            &plane_d(young(self.material), nu, self.state),
+            self.thickness,
+            in_plane_expansion(nu, self.state),
+            strain_e,
         )
     }
 }
@@ -185,7 +200,7 @@ impl<'a> SolidKernel<'a> {
         solid_gauss(&mesh.coords_3d(self.nodes), self.rule, self.shape)
     }
 
-    fn stresses(&self, mesh: &Mesh, u: &[f64]) -> Vec<Stress> {
+    fn stresses(&self, mesh: &Mesh, u: &[f64], strain_e: &[f64]) -> Vec<Stress> {
         let u_e: Vec<f64> = self
             .nodes
             .iter()
@@ -197,19 +212,60 @@ impl<'a> SolidKernel<'a> {
             self.shape,
             &self.d(),
             &u_e,
+            strain_e,
+        )
+    }
+
+    fn thermal_load(&self, mesh: &Mesh, strain_e: &[f64]) -> Vec<f64> {
+        solid_thermal_load(
+            &mesh.coords_3d(self.nodes),
+            self.rule,
+            self.shape,
+            &self.d(),
+            strain_e,
         )
     }
 }
 
-/// Contraintes aux points de Gauss de l'Element `i`, à partir des déplacements globaux `u`.
-/// Vide pour les Bar et Beam.
-pub fn element_stresses(mesh: &Mesh, i: usize, u: &[f64]) -> Vec<Stress> {
+/// Contraintes aux points de Gauss de l'Element `i`, à partir des déplacements globaux `u` ;
+/// `strain_e` : α (T − T_ref) aux Nodes de l'Element (vide sans dilatation, voir
+/// `element_thermal_strains`). Vide pour les Bar et Beam.
+pub fn element_stresses(mesh: &Mesh, i: usize, u: &[f64], strain_e: &[f64]) -> Vec<Stress> {
     match &mesh.elements[i] {
-        Element::Tri3(t) => PlaneKernel::tri3(t).stresses(mesh, u),
-        Element::Tri6(t) => PlaneKernel::tri6(t).stresses(mesh, u),
-        Element::Tet4(t) => SolidKernel::tet4(t).stresses(mesh, u),
-        Element::Tet10(t) => SolidKernel::tet10(t).stresses(mesh, u),
+        Element::Tri3(t) => PlaneKernel::tri3(t).stresses(mesh, u, strain_e),
+        Element::Tri6(t) => PlaneKernel::tri6(t).stresses(mesh, u, strain_e),
+        Element::Tet4(t) => SolidKernel::tet4(t).stresses(mesh, u, strain_e),
+        Element::Tet10(t) => SolidKernel::tet10(t).stresses(mesh, u, strain_e),
         Element::Bar(_) | Element::Beam(_) => Vec::new(),
+    }
+}
+
+/// α (T − T_ref) aux Nodes de l'Element `i`, `t` : températures de tous les Nodes. α du Material,
+/// que `Model::with_temperatures` garantit présent.
+pub fn element_thermal_strains(mesh: &Mesh, i: usize, t: &[f64], reference: f64) -> Vec<f64> {
+    let e = &mesh.elements[i];
+    let alpha = e.material().expansion.unwrap_or(0.0);
+    e.nodes()
+        .iter()
+        .map(|&n| alpha * (t[n] - reference))
+        .collect()
+}
+
+/// Forces nodales de la dilatation de l'Element `i`, DOF dans l'ordre de `element_dofs` ;
+/// `strain_e` : voir `element_thermal_strains`. Vide pour les Beam (refusées par `Model`).
+pub fn element_thermal_load(mesh: &Mesh, i: usize, strain_e: &[f64]) -> Vec<f64> {
+    match &mesh.elements[i] {
+        Element::Bar(b) => {
+            let [a, c] = b.nodes;
+            let direction = (mesh.nodes[c].x - mesh.nodes[a].x).signum();
+            let mean = strain_e.iter().sum::<f64>() / 2.0;
+            bar_thermal_load(young(&b.material), b.section.area, mean, direction).to_vec()
+        }
+        Element::Tri3(t) => PlaneKernel::tri3(t).thermal_load(mesh, strain_e),
+        Element::Tri6(t) => PlaneKernel::tri6(t).thermal_load(mesh, strain_e),
+        Element::Tet4(t) => SolidKernel::tet4(t).thermal_load(mesh, strain_e),
+        Element::Tet10(t) => SolidKernel::tet10(t).thermal_load(mesh, strain_e),
+        Element::Beam(_) => Vec::new(),
     }
 }
 

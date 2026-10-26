@@ -20,6 +20,13 @@ pub fn beam_stiffness(young: f64, inertia: f64, l: f64) -> [[f64; 4]; 4] {
     ]
 }
 
+/// Forces nodales de la dilatation d'une barre : E A ε̄ (−s, s), ε̄ = α ΔT moyenne sur la barre, s = ±1
+/// le sens de son Node 1 vers son Node 2 sur l'axe x.
+pub fn bar_thermal_load(young: f64, area: f64, strain: f64, direction: f64) -> [f64; 2] {
+    let f = young * area * strain * direction;
+    [-f, f]
+}
+
 /// Forces nodales équivalentes d'une charge répartie uniforme q sur une barre.
 pub fn bar_equivalent_load(q: f64, l: f64) -> [f64; 2] {
     [q * l / 2.0, q * l / 2.0]
@@ -55,6 +62,21 @@ pub fn plane_d(young: f64, nu: f64, state: PlaneState) -> [[f64; 3]; 3] {
             ]
         }
     }
+}
+
+/// Déformation thermique libre dans le plan, (εxx, εyy) = s α ΔT : s = 1 en contraintes planes ;
+/// s = 1 + ν en déformations planes, où εzz bloquée empêche la dilatation hors du plan.
+pub fn in_plane_expansion(nu: f64, state: PlaneState) -> f64 {
+    match state {
+        PlaneState::Stress => 1.0,
+        PlaneState::Strain => 1.0 + nu,
+    }
+}
+
+/// α ΔT au point de valeurs de forme `n`, `strain_e` donnant α (T − T_ref) aux Nodes de l'Element
+/// (vide : aucune dilatation).
+fn thermal_strain(n: &[f64], strain_e: &[f64]) -> f64 {
+    n.iter().zip(strain_e).map(|(n, s)| n * s).sum()
 }
 
 /// Matrice B (3 × 2n) stockée par colonne : `b[i]` est la colonne i, pour (εxx, εyy, γxy).
@@ -95,22 +117,57 @@ pub fn plane_stiffness(
     ke
 }
 
-/// Contraintes σ = D B u aux points de Gauss d'un triangle ; `u_e` : déplacements locaux (ux, uy) par Node.
+/// Forces nodales de la dilatation d'un triangle : Σ_g w_g t |det J| Bᵀ D ε_th, ε_th = s α ΔT (1, 1, 0)
+/// (s : `in_plane_expansion`), même règle de Gauss que la rigidité : si le déplacement de la
+/// dilatation libre est représentable, K u = F est exact. `strain_e` : α (T − T_ref) aux Nodes.
+pub fn plane_thermal_load(
+    coords: &[[f64; 2]],
+    rule: &[GaussPoint],
+    shape_at: impl Fn(f64, f64) -> (Vec<f64>, Vec<[f64; 2]>),
+    d: &[[f64; 3]; 3],
+    thickness: f64,
+    scale: f64,
+    strain_e: &[f64],
+) -> Vec<f64> {
+    let mut f = vec![0.0; 2 * coords.len()];
+    for g in rule {
+        let (n, dn) = shape_at(g.xi, g.eta);
+        let map = Mapping::new(coords, &dn);
+        let e = scale * thermal_strain(&n, strain_e);
+        let sigma: [f64; 3] = std::array::from_fn(|r| d[r][0] * e + d[r][1] * e);
+        let factor = g.weight * thickness * map.det.abs();
+        for (fi, col) in f.iter_mut().zip(strain_displacement(&map.dn_dx)) {
+            *fi += factor * (0..3).map(|r| col[r] * sigma[r]).sum::<f64>();
+        }
+    }
+    f
+}
+
+/// Contraintes σ = D (B u − ε_th) aux points de Gauss d'un triangle ; `u_e` : déplacements locaux
+/// (ux, uy) par Node, `strain_e` : α (T − T_ref) aux Nodes (vide sans dilatation). En déformations
+/// planes, σzz = ν (σxx + σyy) − E α ΔT.
+#[allow(clippy::too_many_arguments)]
 pub fn plane_stresses(
     coords: &[[f64; 2]],
     rule: &[GaussPoint],
     shape_at: impl Fn(f64, f64) -> (Vec<f64>, Vec<[f64; 2]>),
     d: &[[f64; 3]; 3],
     u_e: &[f64],
+    young: f64,
     nu: f64,
     state: PlaneState,
+    strain_e: &[f64],
 ) -> Vec<Stress> {
     rule.iter()
         .map(|g| {
             let (n, dn) = shape_at(g.xi, g.eta);
             let b = strain_displacement(&Mapping::new(coords, &dn).dn_dx);
-            let eps: [f64; 3] =
-                std::array::from_fn(|r| b.iter().zip(u_e).map(|(col, u)| col[r] * u).sum());
+            let theta = thermal_strain(&n, strain_e);
+            let e = in_plane_expansion(nu, state) * theta;
+            let eps: [f64; 3] = std::array::from_fn(|r| {
+                b.iter().zip(u_e).map(|(col, u)| col[r] * u).sum::<f64>()
+                    - if r < 2 { e } else { 0.0 }
+            });
             let sigma: [f64; 3] = std::array::from_fn(|r| (0..3).map(|c| d[r][c] * eps[c]).sum());
             Stress {
                 x: n.iter().zip(coords).map(|(n, c)| n * c[0]).sum(),
@@ -120,7 +177,7 @@ pub fn plane_stresses(
                 sigma_yy: sigma[1],
                 sigma_zz: match state {
                     PlaneState::Stress => 0.0,
-                    PlaneState::Strain => nu * (sigma[0] + sigma[1]),
+                    PlaneState::Strain => nu * (sigma[0] + sigma[1]) - young * theta,
                 },
                 tau_xy: sigma[2],
                 tau_yz: 0.0,
@@ -184,20 +241,48 @@ pub fn solid_stiffness(
     ke
 }
 
-/// Contraintes σ = D B u aux points de Gauss d'un tétraèdre ; `u_e` : déplacements locaux (ux, uy, uz) par Node.
+/// Forces nodales de la dilatation d'un tétraèdre : Σ_g w_g |det J| Bᵀ D ε_th, ε_th = α ΔT (1, 1, 1,
+/// 0, 0, 0), même règle de Gauss que la rigidité (voir `plane_thermal_load`).
+pub fn solid_thermal_load(
+    coords: &[[f64; 3]],
+    rule: &[TetGaussPoint],
+    shape_at: SolidShapeFn,
+    d: &[[f64; 6]; 6],
+    strain_e: &[f64],
+) -> Vec<f64> {
+    let mut f = vec![0.0; 3 * coords.len()];
+    for g in rule {
+        let (n, dn) = shape_at(g.xi, g.eta, g.zeta);
+        let map = Mapping3d::new(coords, &dn);
+        let e = thermal_strain(&n, strain_e);
+        let sigma: [f64; 6] = std::array::from_fn(|r| (0..3).map(|c| d[r][c] * e).sum());
+        let factor = g.weight * map.det.abs();
+        for (fi, col) in f.iter_mut().zip(solid_strain_displacement(&map.dn_dx)) {
+            *fi += factor * (0..6).map(|r| col[r] * sigma[r]).sum::<f64>();
+        }
+    }
+    f
+}
+
+/// Contraintes σ = D (B u − ε_th) aux points de Gauss d'un tétraèdre ; `u_e` : déplacements locaux
+/// (ux, uy, uz) par Node, `strain_e` : α (T − T_ref) aux Nodes (vide sans dilatation).
 pub fn solid_stresses(
     coords: &[[f64; 3]],
     rule: &[TetGaussPoint],
     shape_at: SolidShapeFn,
     d: &[[f64; 6]; 6],
     u_e: &[f64],
+    strain_e: &[f64],
 ) -> Vec<Stress> {
     rule.iter()
         .map(|g| {
             let (n, dn) = shape_at(g.xi, g.eta, g.zeta);
             let b = solid_strain_displacement(&Mapping3d::new(coords, &dn).dn_dx);
-            let eps: [f64; 6] =
-                std::array::from_fn(|r| b.iter().zip(u_e).map(|(col, u)| col[r] * u).sum());
+            let e = thermal_strain(&n, strain_e);
+            let eps: [f64; 6] = std::array::from_fn(|r| {
+                b.iter().zip(u_e).map(|(col, u)| col[r] * u).sum::<f64>()
+                    - if r < 3 { e } else { 0.0 }
+            });
             let sigma: [f64; 6] = std::array::from_fn(|r| (0..6).map(|c| d[r][c] * eps[c]).sum());
             let at = |k: usize| n.iter().zip(coords).map(|(n, c)| n * c[k]).sum();
             Stress {
@@ -672,7 +757,7 @@ mod solid_tests {
                 (&TETRA_4, tet10)
             };
             let sigma: [f64; 6] = std::array::from_fn(|r| (0..6).map(|s| d[r][s] * eps[s]).sum());
-            for p in solid_stresses(&c, rule, shape, &d, &uniform_strain(&c, eps)) {
+            for p in solid_stresses(&c, rule, shape, &d, &uniform_strain(&c, eps), &[]) {
                 let got = [
                     p.sigma_xx, p.sigma_yy, p.sigma_zz, p.tau_yz, p.tau_xz, p.tau_xy,
                 ];

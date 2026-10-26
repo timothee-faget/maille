@@ -493,7 +493,7 @@ fn step_inputs_are_typed_errors() {
     let model = thermal(&m, Vec::new());
     assert_eq!(
         model.solve_step(&step, &[0.0]),
-        Err(MailleError::InitialTemperatureCount {
+        Err(MailleError::TemperatureCount {
             expected: n,
             got: 1
         })
@@ -502,7 +502,7 @@ fn step_inputs_are_typed_errors() {
     nan[2] = f64::NAN;
     assert_eq!(
         model.solve_step(&step, &nan),
-        Err(MailleError::NonFiniteInitialTemperature { node: 2 })
+        Err(MailleError::NonFiniteTemperature { node: 2 })
     );
 
     // Model statique, Material sans ρ ou sans c
