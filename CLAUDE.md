@@ -69,8 +69,23 @@ Le calcul **quasi-statique** (`Step::quasi_static`, `Model::solve_quasi_static`)
 
 ## Workflow
 
+Rôles : Claude écrit tout le code. Tim dirige, relit et valide ; il ne code pas. Les règles de dépôt (branches,
+commits, PR) sont dans `CONTRIBUTING.md` et s'appliquent à Claude sans exception.
+
+- Dépôt : `github.com/timothee-faget/maille` (public, MIT OR Apache-2.0). `main` est protégée : jamais de commit
+  ni de push direct dessus, tout passe par une PR avec la CI verte (fmt, clippy, test, cargo-deny).
+- Une branche par sujet, depuis `main` à jour : `<type>/<sujet>` (`feat/`, `fix/`, `refactor/`, `docs/`, `ci/`,
+  `chore/`). Un jalon peut se découper en plusieurs PR, une par étape relisible.
+- Commits en Conventional Commits, en français (`feat(core): …`, portées `core`, `mesher`, `viewer`, `cli`).
+  Petits et cohérents ; chaque commit compile et passe les tests.
+- Avant de pousser : `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, `cargo test`,
+  `cargo deny check licenses sources`. Montrer la sortie plutôt que d'affirmer que ça passe.
+- PR : description selon `.github/pull_request_template.md` (quoi, pourquoi, validation analytique avec les écarts).
+  Ensuite, s'arrêter et attendre l'OK explicite de Tim dans le chat. Après l'OK : `gh pr merge --squash
+  --delete-branch`, puis revenir sur `main` à jour. Ne jamais fusionner sans cet OK, même si la CI est verte.
+- Fin de jalon : tag annoté `vX.Y.0` sur `main`, proposé à Tim avant d'être poussé.
+- Décider avant de coder : cadrage d'un jalon, choix d'architecture, nouvelle dépendance, changement d'API publique
+  → proposer à Tim et attendre sa décision. Les détails d'implémentation restent à Claude.
 - Surgical changes : ne toucher que ce que la demande exige, ne pas refactorer au passage.
-- Avant de proposer un commit : `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.
-  Montrer la sortie plutôt que d'affirmer que ça passe.
 - Quand un jalon avance ou qu'une décision est prise, la noter dans le vault (28.51 Journal ou 28.31 Stack)
   en respectant les règles du vault du CLAUDE.md global.
