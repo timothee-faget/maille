@@ -10,7 +10,7 @@ Les lire avant toute décision d'architecture. Ce fichier ne les duplique pas.
 
 ## État du projet
 
-M0 à M4 terminés : FEM 1D barre + poutre ; élasticité plane Tri3/Tri6 (dont Kirsch) ; viewer wgpu avec contraintes lissées aux Nodes ; 3D Tet4/Tet10 ; thermique stationnaire (conduction, source, convection) sur triangles et tétraèdres ; solveur creux maison (ligne de ciel + Cuthill-McKee inverse) ; mailleur 2D maison (`maille_core::mesher` : Delaunay contraint, raffinement de Ruppert, segments et arcs, tailles h par bord avec gradation, bords nommés pour les BC). Tout est validé contre l'analytique. Prochain jalon : M5, thermique transitoire. Workspace Cargo : `crates/maille-core` (lib pure, zéro dépendance), `crates/maille-viewer` (client 2D : wgpu, winit, glyphon) et `crates/maille-cli` (client : `maille-cli kirsch` et `maille-cli cylindre` maillent leur géométrie puis ouvrent le viewer).
+M0 à M4 terminés : FEM 1D barre + poutre ; élasticité plane Tri3/Tri6 (dont Kirsch) ; viewer wgpu avec contraintes lissées aux Nodes ; 3D Tet4/Tet10 ; thermique stationnaire (conduction, source, convection) sur triangles et tétraèdres ; solveur creux maison (ligne de ciel + Cuthill-McKee inverse) ; mailleur 2D maison (`maille_core::mesher` : Delaunay contraint, raffinement de Ruppert, segments et arcs, tailles h par bord avec gradation, bords nommés pour les BC). M5 en cours : thermique transitoire faite (`Step` à pas fixe, θ-méthode de Euler implicite à Crank-Nicolson, capacité cohérente avec ρ et c du Material, un `Increment` par pas) ; reste le couplage thermo-mécanique. Tout est validé contre l'analytique. Workspace Cargo : `crates/maille-core` (lib pure, zéro dépendance), `crates/maille-viewer` (client 2D : wgpu, winit, glyphon) et `crates/maille-cli` (client : `maille-cli kirsch`, `maille-cli cylindre` et `maille-cli trempe` maillent leur géométrie puis ouvrent le viewer).
 
 Commandes :
 - `cargo build`
@@ -52,7 +52,9 @@ Contraignant, ne pas inventer de synonymes : **Mesh** (maillage), **Node**, **El
 **Material**, **BC** (condition aux limites : Dirichlet / Neumann), **Load**, **Step**, **Field** (champ de résultats).
 Thermique (M3) : **Analysis** (`Static` / `Thermal`, la physique résolue), **HeatSource** (source volumique),
 **Convection** (échange h (T − T∞) sur une face, champs `film` et `sink` comme Abaqus). **Step** reste réservé à
-l'étape de calcul avec son temps (M5) : une Step portera une Analysis.
+l'étape de calcul avec son temps (M5).
+Transitoire (M5) : **Step** porte le temps (durée, nombre d'incréments, θ) et s'applique à un Model dont l'Analysis est
+`Thermal` ; l'Analysis passera dans la Step avec le couplage. **Increment** : résultat d'un pas (temps + Field).
 Mailleur (M4) : **Geometry** (domaine : contour extérieur + trous), **Curve** (morceau de bord, segment ou arc, avec sa
 taille h et son nom), **Triangulation** (sortie du mailleur : Nodes, triangles, bords nommés ; ce n'est pas un Mesh),
 **BoundarySet** (Nodes et faces d'un bord nommé).
