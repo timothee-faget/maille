@@ -8,7 +8,9 @@
 //! - thermique transitoire : en plus, le temps en s, donc ρ en kg/mm³ et c en J/(kg·K) (acier :
 //!   ρ = 7,85·10⁻⁶ kg/mm³, c = 460 J/(kg·K)).
 //!
-//! - couplage thermo-mécanique : α en 1/K, et T dans la même unité que T_ref (K ou °C).
+//! - couplage thermo-mécanique : α en 1/K, et T dans la même unité que T_ref (K ou °C) ;
+//! - plasticité : σy0 et H dans l'unité de E (MPa) ; p sans dimension. Le temps d'une Step
+//!   quasi-statique ne sert qu'à lire l'Amplitude (sans dimension) : son unité est libre.
 //!
 //! Un même Material sert aux deux analyses (E, ν, α et k) : N et mm donnent des énergies en mJ,
 //! donc des puissances en mW si le temps est en s. Mélanger MPa et W/(mm·K) reste cohérent : en

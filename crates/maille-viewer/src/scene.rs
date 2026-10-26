@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::fmt;
 
 use maille_core::mesh::{Element, Mesh};
-use maille_core::results::{nodal_plastic_strains, nodal_stresses, Field, Stress};
+use maille_core::results::{nodal_equivalent_plastic_strains, nodal_stresses, Field, Stress};
 use maille_core::MailleError;
 
 /// Part de la taille du Mesh occupée par le plus grand déplacement, dans la déformée amplifiée.
@@ -26,16 +26,8 @@ pub enum Quantity {
 }
 
 impl Quantity {
-    /// Champs d'un Field statique, dans l'ordre des touches 1 à 5.
-    pub const MECHANICAL: [Self; 5] = [
-        Self::VonMises,
-        Self::SigmaXx,
-        Self::SigmaYy,
-        Self::TauXy,
-        Self::Displacement,
-    ];
-
-    /// Champs d'un Field élasto-plastique : les champs mécaniques, puis p (touche 6).
+    /// Champs d'un Field élasto-plastique, dans l'ordre des touches 1 à 6 : les champs mécaniques,
+    /// puis p.
     pub const PLASTIC: [Self; 6] = [
         Self::VonMises,
         Self::SigmaXx,
@@ -45,6 +37,9 @@ impl Quantity {
         Self::PlasticStrain,
     ];
 
+    /// Champs d'un Field statique (touches 1 à 5) : ceux d'un Field élasto-plastique sans p.
+    pub const MECHANICAL: &'static [Self] = Self::PLASTIC.split_at(5).0;
+
     pub fn label(self) -> &'static str {
         match self {
             Self::VonMises => "von Mises",
@@ -53,7 +48,7 @@ impl Quantity {
             Self::TauXy => "τxy",
             Self::Displacement => "|u|",
             Self::Temperature => "T",
-            Self::PlasticStrain => "εp (déformation plastique cumulée)",
+            Self::PlasticStrain => "p (déformation plastique cumulée)",
         }
     }
 }
@@ -152,7 +147,7 @@ impl Scene {
             plastic_strains: if field.equivalent_plastic_strains.is_empty() {
                 Vec::new()
             } else {
-                nodal_plastic_strains(mesh, field)?
+                nodal_equivalent_plastic_strains(mesh, field)?
             },
             triangles,
             edges,
@@ -167,7 +162,7 @@ impl Scene {
         } else if !self.plastic_strains.is_empty() {
             &Quantity::PLASTIC
         } else {
-            &Quantity::MECHANICAL
+            Quantity::MECHANICAL
         }
     }
 
@@ -370,7 +365,7 @@ mod tests {
     fn a_plastic_field_adds_the_plastic_strain() {
         let mesh = two_tri3();
         let elastic = Scene::new(&mesh, &field(&mesh, [100.0, 0.0, 0.0], vec![0.0; 8])).unwrap();
-        assert_eq!(elastic.quantities(), &Quantity::MECHANICAL);
+        assert_eq!(elastic.quantities(), Quantity::MECHANICAL);
         // p = 0,01 dans le premier Tri3, 0 dans le second : moyenne 0,005 sur l'arête partagée 0-2
         let plastic = Field {
             equivalent_plastic_strains: vec![vec![0.01], vec![0.0]],

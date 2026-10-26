@@ -17,7 +17,7 @@ use crate::view::View;
 
 /// Touches et souris, rappelées dans le terminal à l'ouverture.
 pub const HELP: &str =
-    "Touches : 1 von Mises, 2 σxx, 3 σyy, 4 τxy, 5 |u|, 6 εp si plastique (thermique : 1 T), \
+    "Touches : 1 von Mises, 2 σxx, 3 σyy, 4 τxy, 5 |u|, 6 p si plastique (thermique : 1 T), \
 D déformée, C colormap, R recadrer, Échap quitter. Souris : molette pour zoomer, glisser pour déplacer.";
 
 /// Facteur de zoom par cran de molette.

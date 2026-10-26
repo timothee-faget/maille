@@ -6,3 +6,6 @@ members = ["crates/maille-core", "crates/maille-cli", "crates/maille-viewer"]
 version = "0.1.0"
 edition = "2021"
 
+
+[profile.test]
+opt-level = 1

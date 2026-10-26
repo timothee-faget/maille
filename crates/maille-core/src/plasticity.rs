@@ -51,10 +51,14 @@ impl VonMises {
                 g * elastic[k]
             }
         });
+        let root_3_2 = 1.5_f64.sqrt();
         let norm = contract(&trial, &trial).sqrt();
-        let q = (1.5_f64).sqrt() * norm;
+        let q = root_3_2 * norm;
         let excess = q - (self.yield_stress + self.hardening * previous.p);
 
+        // dp : incrément de p qui ramène q sur σy(p + dp) ; θ : facteur de réduction du déviateur
+        // (s = θ s_essai) ; θ̄ : raidissement perdu dans la direction n quand dp varie avec ε, nul en
+        // élastique, égal à θ si H = 0
         let (theta, theta_bar, dp) = if excess > 0.0 {
             let dp = excess / (3.0 * g + self.hardening);
             let theta = 1.0 - 3.0 * g * dp / q;
@@ -70,7 +74,7 @@ impl VonMises {
         let n: [f64; 6] = std::array::from_fn(|k| if dp > 0.0 { trial[k] / norm } else { 0.0 });
         let mut state = *previous;
         for (k, e) in state.plastic_strain.iter_mut().enumerate() {
-            let tensor = (1.5_f64).sqrt() * dp * n[k];
+            let tensor = root_3_2 * dp * n[k];
             *e += if k < 3 { tensor } else { 2.0 * tensor };
         }
         state.p += dp;
@@ -81,8 +85,9 @@ impl VonMises {
         // δ − 1/3 sur les composantes normales et 1/2 sur les glissements ; n:dε = Σ nₖ dεₖ.
         let tangent = std::array::from_fn(|i| {
             std::array::from_fn(|j| {
+                let delta = if i == j { 1.0 } else { 0.0 };
                 let deviatoric = match (i < 3, j < 3) {
-                    (true, true) => f64::from(u8::from(i == j)) - 1.0 / 3.0,
+                    (true, true) => delta - 1.0 / 3.0,
                     (false, false) if i == j => 0.5,
                     _ => 0.0,
                 };

@@ -62,7 +62,8 @@ pub struct Convection {
 /// Physique résolue sur le Mesh.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Analysis {
-    /// Statique linéaire : déplacements, contraintes.
+    /// Statique : déplacements, contraintes ; linéaire avec `Model::solve`, élasto-plastique (et p)
+    /// avec `Model::solve_quasi_static`.
     Static,
     /// Thermique, un DOF `T` par Node : stationnaire −∇·(k ∇T) = Q avec `Model::solve`, transitoire
     /// ρc ∂T/∂t − ∇·(k ∇T) = Q avec `Model::solve_step`.
@@ -102,7 +103,8 @@ impl Step {
 
     /// Durée `time_period` (finie, strictement positive) en `increments` pas égaux, pour un calcul
     /// élasto-plastique : chaque incrément est un équilibre résolu par Newton-Raphson. Plus
-    /// d'incréments aident Newton à converger quand la plasticité se développe vite. θ ne sert pas.
+    /// d'incréments aident Newton à converger quand la plasticité se développe vite. C'est la même
+    /// Step que `transient`, nommée pour son usage : θ (`with_theta`) n'y a aucun effet.
     pub fn quasi_static(time_period: f64, increments: usize) -> Result<Self, MailleError> {
         Self::transient(time_period, increments)
     }
@@ -155,7 +157,8 @@ impl Amplitude {
             let valid = t.is_finite()
                 && value.is_finite()
                 && match k {
-                    0 => t == 0.0 && value == 0.0,
+                    // (0, 0) à l'arrondi près
+                    0 => t.abs() <= f64::EPSILON && value.abs() <= f64::EPSILON,
                     _ => t > points[k - 1].0,
                 };
             if !valid {
@@ -201,7 +204,7 @@ pub struct Model {
 }
 
 impl Model {
-    /// Analyse statique linéaire, voir `with_analysis`.
+    /// Analyse statique, voir `with_analysis`.
     pub fn new(mesh: Mesh, bcs: Vec<Bc>, loads: Vec<Load>) -> Result<Self, MailleError> {
         Self::with_analysis(mesh, Analysis::Static, bcs, loads)
     }
@@ -519,90 +522,28 @@ impl Model {
             .map(|i| vec![PlasticState::default(); element_gauss_count(mesh, i)])
             .collect();
         let mut u = vec![0.0; a.f.len()];
-        let rest = self.responses(&u, &committed);
+        let at_rest = self.responses(&u, &committed);
         let mut history = vec![Increment {
             time: 0.0,
-            field: quasi_static_field(u.clone(), vec![0.0; a.f.len()], rest),
+            field: quasi_static_field(u.clone(), vec![0.0; a.f.len()], at_rest),
             residuals: Vec::new(),
         }];
         // échelle des forces : la plus grande norme de F_int ou de λ F vue depuis le début de la Step
         // (F_int contient les réactions, la référence reste non nulle sous déplacement imposé et
         // quand la décharge ramène les forces à zéro)
-        let mut scale: f64 = 0.0;
+        let mut scale = 0.0;
         for increment in 1..=step.increments() {
             let time = increment as f64 * step.time_step();
             let lambda = amplitude.at(time);
-            let external: Vec<f64> = a.f.iter().map(|f| lambda * f).collect();
-            let fail = |collapse: bool| {
-                if collapse {
-                    MailleError::PlasticCollapse { increment, time }
-                } else {
-                    MailleError::NotConverged { increment, time }
-                }
-            };
-            let mut residuals = Vec::new();
-            let (responses, residual) = loop {
-                let responses = self.responses(&u, &committed);
-                let mut internal = vec![0.0; u.len()];
-                for (r, dofs) in responses.iter().zip(&a.dofs) {
-                    for (&g, f) in dofs.iter().zip(&r.internal_force) {
-                        internal[g] += f;
-                    }
-                }
-                let residual: Vec<f64> =
-                    internal.iter().zip(&external).map(|(i, e)| i - e).collect();
-                scale = scale.max(norm(&internal)).max(norm(&external));
-                let free: Vec<f64> = residual
-                    .iter()
-                    .zip(&a.fixed)
-                    .filter(|(_, &c)| !c)
-                    .map(|(r, _)| *r)
-                    .collect();
-                let free = norm(&free);
-                let relative = if scale > 0.0 { free / scale } else { free };
-                if !relative.is_finite() {
-                    return Err(fail(false));
-                }
-                residuals.push(relative);
-                // au moins une itération : la première applique l'incrément des valeurs imposées
-                if residuals.len() > 1 && relative <= NEWTON_TOLERANCE {
-                    break (responses, residual);
-                }
-                if residuals.len() > NEWTON_ITERATIONS {
-                    return Err(fail(false));
-                }
-                // δu impose aux DOF contraints ce qui manque pour atteindre λ × valeur de la BC (non
-                // nul à la première itération seulement) : K_ff δu_f = −r_f − K_fc δu_c. Partir de
-                // l'état convergé plutôt que de déplacer d'un coup les Nodes imposés évite une
-                // plastification artificielle des Elements du bord.
-                let mut du: Vec<f64> = (0..u.len())
-                    .map(|g| {
-                        if a.fixed[g] {
-                            lambda * a.imposed[g] - u[g]
-                        } else {
-                            0.0
-                        }
-                    })
-                    .collect();
-                let tangent = |i: usize| responses[i].tangent.as_slice();
-                let system = FreeSystem::new(&a.dofs, &tangent, &a.fixed, &du).map_err(|e| {
-                    if e == MailleError::Singular && responses.iter().any(|r| r.yielding) {
-                        fail(true)
-                    } else {
-                        e
-                    }
-                })?;
-                system.solve(&residual.iter().map(|r| -r).collect::<Vec<_>>(), &mut du);
-                for (u, du) in u.iter_mut().zip(du) {
-                    *u += du;
-                }
-            };
+            let (responses, reactions, residuals) = self.equilibrium(
+                &a,
+                &committed,
+                &mut u,
+                lambda,
+                &mut scale,
+                (increment, time),
+            )?;
             committed = responses.iter().map(|r| r.states.clone()).collect();
-            let reactions = residual
-                .iter()
-                .zip(&a.fixed)
-                .map(|(r, &c)| if c { *r } else { 0.0 })
-                .collect();
             history.push(Increment {
                 time,
                 field: quasi_static_field(u.clone(), reactions, responses),
@@ -610,6 +551,77 @@ impl Model {
             });
         }
         Ok(history)
+    }
+
+    /// Newton-Raphson d'un incrément : part de `u` (équilibre de l'incrément précédent, états
+    /// `committed`) et le mène à F_int(u) = λ F, valeurs imposées λ × valeur de la BC. Renvoie les
+    /// réponses des Elements, les réactions et les résidus relatifs (voir `Increment::residuals`).
+    /// `at` : (incrément, temps), pour les erreurs.
+    fn equilibrium(
+        &self,
+        a: &Assembly,
+        committed: &[Vec<PlasticState>],
+        u: &mut [f64],
+        lambda: f64,
+        scale: &mut f64,
+        (increment, time): (usize, f64),
+    ) -> Result<Equilibrium, MailleError> {
+        let external: Vec<f64> = a.f.iter().map(|f| lambda * f).collect();
+        let mut residuals = Vec::new();
+        loop {
+            let responses = self.responses(u, committed);
+            let internal = internal_force(&responses, &a.dofs, u.len());
+            let residual: Vec<f64> = internal.iter().zip(&external).map(|(i, e)| i - e).collect();
+            *scale = scale
+                .max(norm(internal.iter().copied()))
+                .max(norm(external.iter().copied()));
+            let free = norm(
+                residual
+                    .iter()
+                    .zip(&a.fixed)
+                    .filter(|(_, &c)| !c)
+                    .map(|(r, _)| *r),
+            );
+            let relative = if *scale > 0.0 { free / *scale } else { free };
+            if !relative.is_finite() {
+                return Err(MailleError::NotConverged { increment, time });
+            }
+            residuals.push(relative);
+            // au moins une itération : la première applique l'incrément des valeurs imposées
+            if residuals.len() > 1 && relative <= NEWTON_TOLERANCE {
+                let reactions = residual
+                    .iter()
+                    .zip(&a.fixed)
+                    .map(|(r, &c)| if c { *r } else { 0.0 })
+                    .collect();
+                return Ok((responses, reactions, residuals));
+            }
+            if residuals.len() > NEWTON_ITERATIONS {
+                return Err(MailleError::NotConverged { increment, time });
+            }
+            // δu impose aux DOF contraints ce qui manque pour atteindre λ × valeur de la BC (non
+            // nul à la première itération seulement) : K_ff δu_f = −r_f − K_fc δu_c. Partir de
+            // l'état convergé plutôt que de déplacer d'un coup les Nodes imposés évite une
+            // plastification artificielle des Elements du bord.
+            let mut du: Vec<f64> = a
+                .fixed
+                .iter()
+                .zip(&a.imposed)
+                .zip(&*u)
+                .map(|((&c, imposed), u)| if c { lambda * imposed - u } else { 0.0 })
+                .collect();
+            let tangent = |i: usize| responses[i].tangent.as_slice();
+            let system = match FreeSystem::new(&a.dofs, &tangent, &a.fixed, &du) {
+                Err(MailleError::Singular) if responses.iter().any(|r| r.yielding) => {
+                    return Err(MailleError::PlasticCollapse { increment, time })
+                }
+                other => other?,
+            };
+            system.solve(&residual.iter().map(|r| -r).collect::<Vec<_>>(), &mut du);
+            for (u, du) in u.iter_mut().zip(du) {
+                *u += du;
+            }
+        }
     }
 
     /// Réponse élasto-plastique de chaque Element aux déplacements `u`, depuis les états `committed`.
@@ -686,6 +698,9 @@ impl Model {
     }
 }
 
+/// Équilibre d'un incrément : réponses des Elements, réactions, résidus relatifs.
+type Equilibrium = (Vec<ElementResponse>, Vec<f64>, Vec<f64>);
+
 /// Tolérance de Newton-Raphson sur le résidu relatif (voir `Increment::residuals`).
 const NEWTON_TOLERANCE: f64 = 1e-8;
 /// Nombre maximal d'itérations de Newton-Raphson par incrément.
@@ -701,8 +716,19 @@ fn elastoplastic(e: &Element) -> bool {
     }
 }
 
-fn norm(v: &[f64]) -> f64 {
-    v.iter().map(|x| x * x).sum::<f64>().sqrt()
+fn norm(v: impl Iterator<Item = f64>) -> f64 {
+    v.map(|x| x * x).sum::<f64>().sqrt()
+}
+
+/// Forces internes globales Σ_e F_int,e, sur `n` DOF.
+fn internal_force(responses: &[ElementResponse], dofs: &[Vec<usize>], n: usize) -> Vec<f64> {
+    let mut f = vec![0.0; n];
+    for (r, dofs) in responses.iter().zip(dofs) {
+        for (&g, v) in dofs.iter().zip(&r.internal_force) {
+            f[g] += v;
+        }
+    }
+    f
 }
 
 /// Field d'un incrément quasi-statique : contraintes et p aux points de Gauss des `responses`.
@@ -739,7 +765,7 @@ fn check_temperatures(mesh: &Mesh, t: &[f64]) -> Result<(), MailleError> {
     }
 }
 
-/// Données communes à `Model::solve` et `Model::solve_step`.
+/// Données communes aux résolutions (`solve`, `solve_step`, `solve_quasi_static`).
 struct Assembly {
     /// DOF globaux de chaque Element, dans l'ordre de sa matrice
     dofs: Vec<Vec<usize>>,

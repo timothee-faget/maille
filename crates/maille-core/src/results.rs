@@ -68,7 +68,8 @@ pub struct Field {
 
 /// Résultat d'un incrément d'une Step : le Field au temps `time`, compté depuis le début de la Step.
 /// En transitoire, les `reactions` y sont la puissance moyenne fournie par les températures
-/// imposées pendant le pas qui finit à `time` (nulles à t = 0).
+/// imposées pendant le pas qui finit à `time` (nulles à t = 0) ; en quasi-statique, F_int − λ F aux
+/// DOF imposés.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Increment {
     pub time: f64,
@@ -163,9 +164,12 @@ pub fn nodal_stresses(mesh: &Mesh, field: &Field) -> Result<Vec<Stress>, MailleE
 
 /// Déformation plastique cumulée p lissée aux Nodes, comme `nodal_stresses`. L'extrapolation
 /// peut passer sous zéro au bord d'une zone plastique : la valeur est ramenée à 0.
-pub fn nodal_plastic_strains(mesh: &Mesh, field: &Field) -> Result<Vec<f64>, MailleError> {
+pub fn nodal_equivalent_plastic_strains(
+    mesh: &Mesh,
+    field: &Field,
+) -> Result<Vec<f64>, MailleError> {
     if field.equivalent_plastic_strains.is_empty() {
-        return Err(MailleError::NoPlasticStrains);
+        return Err(MailleError::NoEquivalentPlasticStrains);
     }
     let values: Vec<Vec<[f64; 1]>> = field
         .equivalent_plastic_strains
