@@ -84,6 +84,11 @@ impl<'a> PlaneKernel<'a> {
         }
     }
 
+    /// Le même triangle intégré avec une autre règle de Gauss.
+    fn with_rule(self, rule: &'static [GaussPoint]) -> Self {
+        Self { rule, ..self }
+    }
+
     /// `Model::new` garantit que ν est présent.
     fn nu(&self) -> f64 {
         self.material.poisson.unwrap_or(0.0)
@@ -157,6 +162,11 @@ impl<'a> SolidKernel<'a> {
         }
     }
 
+    /// Le même tétraèdre intégré avec une autre règle de Gauss.
+    fn with_rule(self, rule: &'static [TetGaussPoint]) -> Self {
+        Self { rule, ..self }
+    }
+
     /// `Model::new` garantit que ν est présent.
     fn d(&self) -> [[f64; 6]; 6] {
         solid_d(young(self.material), self.material.poisson.unwrap_or(0.0))
@@ -228,56 +238,35 @@ fn heat_capacity(material: &Material) -> f64 {
 }
 
 /// Matrice de capacité cohérente de l'Element `i`, un DOF (T) par Node dans l'ordre de ses Nodes.
-/// Règle de Gauss d'un degré au-dessus de celle de la conduction : N Nᵀ y est intégré exactement.
+/// Règles de Gauss qui intègrent N Nᵀ exactement : degré 2 pour Tri3 et Tet4, 4 pour Tri6 et Tet10.
 /// Vide pour les Bar et Beam.
 pub fn element_capacity(mesh: &Mesh, i: usize) -> Vec<Vec<f64>> {
     let e = &mesh.elements[i];
     let rho_c = heat_capacity(e.material());
     match e {
-        Element::Tri3(t) => {
-            let kernel = PlaneKernel {
-                rule: &TRIANGLE_3,
-                ..PlaneKernel::tri3(t)
-            };
-            capacity(&kernel.gauss(mesh), rho_c)
-        }
-        Element::Tri6(t) => {
-            let kernel = PlaneKernel {
-                rule: &TRIANGLE_6,
-                ..PlaneKernel::tri6(t)
-            };
-            capacity(&kernel.gauss(mesh), rho_c)
-        }
-        Element::Tet4(t) => {
-            let kernel = SolidKernel {
-                rule: &TETRA_4,
-                ..SolidKernel::tet4(t)
-            };
-            capacity(&kernel.gauss(mesh), rho_c)
-        }
-        Element::Tet10(t) => {
-            let kernel = SolidKernel {
-                rule: &TETRA_14,
-                ..SolidKernel::tet10(t)
-            };
-            capacity(&kernel.gauss(mesh), rho_c)
-        }
+        Element::Tri3(t) => capacity(
+            &PlaneKernel::tri3(t).with_rule(&TRIANGLE_3).gauss(mesh),
+            rho_c,
+        ),
+        Element::Tri6(t) => capacity(
+            &PlaneKernel::tri6(t).with_rule(&TRIANGLE_6).gauss(mesh),
+            rho_c,
+        ),
+        Element::Tet4(t) => capacity(&SolidKernel::tet4(t).with_rule(&TETRA_4).gauss(mesh), rho_c),
+        Element::Tet10(t) => capacity(
+            &SolidKernel::tet10(t).with_rule(&TETRA_14).gauss(mesh),
+            rho_c,
+        ),
         Element::Bar(_) | Element::Beam(_) => Vec::new(),
     }
-}
-
-/// Flux de chaleur aux points de Gauss de l'Element `i`, à partir des températures `t` des Nodes.
-/// Vide pour les Bar et Beam.
-pub fn element_heat_fluxes(mesh: &Mesh, i: usize, t: &[f64]) -> Vec<HeatFlux> {
-    element_heat_flux_operator(mesh, i)(t)
 }
 
 /// Flux de chaleur aux points de Gauss d'un Element en fonction des températures globales des Nodes.
 pub type FluxOperator = Box<dyn Fn(&[f64]) -> Vec<HeatFlux>>;
 
-/// Comme `element_heat_fluxes`, mais les points de Gauss sont calculés une seule fois : l'opérateur
-/// renvoyé s'applique à autant de champs de températures `t` qu'on veut (un par incrément en
-/// transitoire).
+/// Flux de chaleur aux points de Gauss de l'Element `i` (vide pour les Bar et Beam). Les points de
+/// Gauss sont calculés une seule fois : l'opérateur renvoyé s'applique à autant de champs de
+/// températures qu'on veut (un par incrément en transitoire).
 pub fn element_heat_flux_operator(mesh: &Mesh, i: usize) -> FluxOperator {
     let e = &mesh.elements[i];
     let (nodes, k) = (e.nodes().to_vec(), conductivity(e.material()));

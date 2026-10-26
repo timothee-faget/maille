@@ -64,7 +64,8 @@ pub struct Field {
 }
 
 /// Résultat d'un incrément d'une Step transitoire : le Field (thermique) au temps `time`, compté
-/// depuis le début de la Step.
+/// depuis le début de la Step. Les `reactions` y sont la puissance moyenne fournie par les
+/// températures imposées pendant le pas qui finit à `time` (nulles à t = 0).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Increment {
     pub time: f64,

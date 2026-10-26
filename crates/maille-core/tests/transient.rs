@@ -15,7 +15,7 @@ const RHO: f64 = 2.0;
 const C: f64 = 0.5;
 const L: f64 = 1.0;
 const H: f64 = 0.25;
-const T: f64 = 0.25;
+const THICKNESS: f64 = 0.25;
 
 fn material(k: f64) -> Material {
     Material::conductive(k)
@@ -24,7 +24,7 @@ fn material(k: f64) -> Material {
         .unwrap()
 }
 
-/// Mesh L × H × T (nx Elements en x, 1 en y et z), avec la conductivité `k`.
+/// Mesh L × H × THICKNESS (nx Elements en x, 1 en y et z), avec la conductivité `k`.
 fn mesh(name: &str, nx: usize, k: f64) -> Mesh {
     let m = material(k);
     match name {
@@ -35,19 +35,23 @@ fn mesh(name: &str, nx: usize, k: f64) -> Mesh {
                 let elements = q
                     .elements
                     .iter()
-                    .map(|&n| Element::Tri6(Tri6::new(n, m, T, PlaneState::Stress).unwrap()))
+                    .map(|&n| {
+                        Element::Tri6(Tri6::new(n, m, THICKNESS, PlaneState::Stress).unwrap())
+                    })
                     .collect();
                 Mesh::new(q.nodes, elements).unwrap()
             } else {
                 let elements = tris
                     .iter()
-                    .map(|&n| Element::Tri3(Tri3::new(n, m, T, PlaneState::Stress).unwrap()))
+                    .map(|&n| {
+                        Element::Tri3(Tri3::new(n, m, THICKNESS, PlaneState::Stress).unwrap())
+                    })
                     .collect();
                 Mesh::new(nodes, elements).unwrap()
             }
         }
-        _ => {
-            let (nodes, tets) = box_grid([nx, 1, 1], [L, H, T]);
+        "Tet4" | "Tet10" => {
+            let (nodes, tets) = box_grid([nx, 1, 1], [L, H, THICKNESS]);
             if name == "Tet10" {
                 let q = to_quadratic_tet(&nodes, &tets);
                 let elements = q
@@ -64,13 +68,14 @@ fn mesh(name: &str, nx: usize, k: f64) -> Mesh {
                 Mesh::new(nodes, elements).unwrap()
             }
         }
+        _ => panic!("Element inconnu : {name}"),
     }
 }
 
 const ELEMENTS: [&str; 4] = ["Tri3", "Tri6", "Tet4", "Tet10"];
 
-/// Volume du Mesh : L H T dans tous les cas (épaisseur T en 2D).
-const VOLUME: f64 = L * H * T;
+/// Volume du Mesh : L H × épaisseur dans tous les cas.
+const VOLUME: f64 = L * H * THICKNESS;
 
 fn fix_plane(mesh: &Mesh, x: f64, value: f64) -> Vec<Bc> {
     mesh.nodes
@@ -151,7 +156,7 @@ fn increments_start_from_the_initial_field_at_regular_times() {
     let m = mesh("Tri3", 4, K);
     let initial: Vec<f64> = m.nodes.iter().map(|p| 10.0 * p.x).collect();
     let step = Step::transient(0.5, 4).unwrap();
-    assert!((step.increment() - 0.125).abs() < 1e-15 && (step.theta() - 1.0).abs() < 1e-15);
+    assert!((step.time_step() - 0.125).abs() < 1e-15 && (step.theta() - 1.0).abs() < 1e-15);
     let history = thermal(&m, fix_plane(&m, 0.0, 30.0))
         .solve_step(&step, &initial)
         .unwrap();
@@ -283,11 +288,12 @@ fn quenched_slab_converges_in_time_and_space() {
         let ratio = quench_errors(name, 20, 100)[2] / quench_errors(name, 20, 400)[2];
         assert!((3.4..4.4).contains(&ratio), "{name} : rapport {ratio:.2}");
     }
-    // Tri3 et Tet4 : l'erreur en espace domine ; h divisé par 2 la divise par 3 à 3,5 (ordre
-    // proche de 2 : l'erreur en temps n'est pas nulle)
+    // Tri3 et Tet4 : l'erreur en espace domine ; h divisé par 2 la divise par 3,9 (Tri3) et 3,3
+    // (Tet4). En dessous de 4 : l'erreur en temps n'est pas nulle, et `mesh` ne raffine qu'en x
+    // (voir `convective_cooling_at_finite_biot_follows_heisler`)
     for name in ["Tri3", "Tet4"] {
         let ratio = quench_errors(name, 10, 400)[2] / quench_errors(name, 20, 400)[2];
-        assert!((2.8..4.4).contains(&ratio), "{name} : rapport {ratio:.2}");
+        assert!((2.9..4.2).contains(&ratio), "{name} : rapport {ratio:.2}");
     }
 }
 
@@ -297,7 +303,7 @@ fn small_biot_cooling_follows_the_discrete_amplification_factor() {
     // x = L d'aire A = H T, d'où τ = ρcV/(hA) ; un pas θ multiplie T − T∞ par
     // g = (1 − (1 − θ) r) / (1 + θ r), r = Δt/τ
     let (film, sink, t0) = (0.4, 20.0, 100.0);
-    let tau = RHO * C * VOLUME / (film * H * T);
+    let tau = RHO * C * VOLUME / (film * H * THICKNESS);
     for name in ELEMENTS {
         let m = mesh(name, 2, 1e7 * film * L);
         let w = weights(&m);
@@ -306,7 +312,7 @@ fn small_biot_cooling_follows_the_discrete_amplification_factor() {
             .unwrap();
         for theta in [1.0, 0.75, 0.5] {
             let step = Step::transient(tau, 8).unwrap().with_theta(theta).unwrap();
-            let r = step.increment() / tau;
+            let r = step.time_step() / tau;
             let g = (1.0 - (1.0 - theta) * r) / (1.0 + theta * r);
             let history = model.solve_step(&step, &vec![t0; m.nodes.len()]).unwrap();
             for (s, inc) in history.iter().enumerate() {
@@ -328,11 +334,94 @@ fn small_biot_cooling_follows_the_discrete_amplification_factor() {
     }
 }
 
+/// Racines ζₙ de ζ tan ζ = Bi, une par intervalle [(n − 1)π, (n − 1)π + π/2], par dichotomie sur
+/// ζ sin ζ − Bi cos ζ (sans pôle), qui change de signe aux deux bornes.
+fn heisler_roots(biot: f64, count: usize) -> Vec<f64> {
+    let pi = std::f64::consts::PI;
+    (0..count)
+        .map(|n| {
+            let f = |z: f64| z * z.sin() - biot * z.cos();
+            let (mut a, mut b) = (n as f64 * pi, n as f64 * pi + pi / 2.0);
+            for _ in 0..100 {
+                let m = (a + b) / 2.0;
+                if f(a) * f(m) <= 0.0 {
+                    b = m;
+                } else {
+                    a = m;
+                }
+            }
+            (a + b) / 2.0
+        })
+        .collect()
+}
+
+/// Demi-plaque de Heisler : T = T₀ au départ, adiabatique en x = 0, convection h vers T∞ en x = L :
+/// (T − T∞)/(T₀ − T∞) = Σ Cₙ exp(−ζₙ² Fo) cos(ζₙ x/L), Cₙ = 4 sin ζₙ / (2ζₙ + sin 2ζₙ), Fo = αt/L².
+fn heisler(x: f64, t: f64, roots: &[f64]) -> f64 {
+    let fo = K / (RHO * C) * t / (L * L);
+    roots
+        .iter()
+        .map(|&z| {
+            4.0 * z.sin() / (2.0 * z + (2.0 * z).sin()) * (-z * z * fo).exp() * (z * x / L).cos()
+        })
+        .sum()
+}
+
+/// Plus grand écart aux Nodes, rapporté à T₀ − T∞, entre la demi-plaque refroidie (Bi = 1,
+/// Crank-Nicolson, 200 pas jusqu'à Fo = 0,5) et la série de Heisler, en Fo = 0,05, 0,2 et 0,5.
+fn heisler_errors(m: &Mesh) -> [f64; 3] {
+    let (biot, t0, sink) = (1.0, 100.0, 20.0);
+    let roots = heisler_roots(biot, 200);
+    let model = thermal(m, Vec::new())
+        .with_convection(convection_at(m, L, biot * K / L, sink))
+        .unwrap();
+    let step = Step::transient(0.5, 200).unwrap().with_theta(0.5).unwrap();
+    let history = model.solve_step(&step, &vec![t0; m.nodes.len()]).unwrap();
+    [20, 80, 200].map(|s| {
+        let inc = &history[s];
+        m.nodes
+            .iter()
+            .zip(&inc.field.temperatures)
+            .map(|(p, t)| ((t - sink) / (t0 - sink) - heisler(p.x, inc.time, &roots)).abs())
+            .fold(0.0, f64::max)
+    })
+}
+
+#[test]
+fn convective_cooling_at_finite_biot_follows_heisler() {
+    // convection et conduction couplées (Bi = 1) : ζ₁ = 0,8603, valeur tabulée
+    assert!((heisler_roots(1.0, 1)[0] - 0.860_333_589).abs() < 1e-9);
+    for (name, nx, tolerance) in [
+        ("Tri3", 40, 4e-3),
+        ("Tri6", 5, 5e-4),
+        ("Tet4", 40, 4e-3),
+        ("Tet10", 5, 5e-4),
+    ] {
+        let errors = heisler_errors(&mesh(name, nx, K));
+        assert!(errors.iter().all(|&e| e < tolerance), "{name} : {errors:?}");
+    }
+    // Tri3 raffiné dans les deux directions (triangles de même forme) : l'écart maximal aux Nodes
+    // suit h² |ln h|, rapport 4 ln 16 / ln 32 ≈ 3,2 quand h passe de L/16 à L/32. (`mesh` ne raffine
+    // qu'en x : ses triangles s'allongent et l'ordre y tombe à 1 près des coins.)
+    let isotropic = |nx: usize| {
+        let (nodes, tris) = rect_grid(nx, nx / 4, L, H);
+        let elements = tris
+            .iter()
+            .map(|&n| {
+                Element::Tri3(Tri3::new(n, material(K), THICKNESS, PlaneState::Stress).unwrap())
+            })
+            .collect();
+        heisler_errors(&Mesh::new(nodes, elements).unwrap())[2]
+    };
+    let ratio = isotropic(16) / isotropic(32);
+    assert!((2.9..3.6).contains(&ratio), "Tri3 : rapport {ratio:.2}");
+}
+
 #[test]
 fn time_order_is_one_for_euler_and_two_for_crank_nicolson() {
     // même refroidissement, comparé à exp(−t/τ) en t = τ avec Δt = τ/10 puis τ/20
     let (film, sink, t0) = (0.4, 20.0, 100.0);
-    let tau = RHO * C * VOLUME / (film * H * T);
+    let tau = RHO * C * VOLUME / (film * H * THICKNESS);
     let m = mesh("Tri3", 2, 1e7 * film * L);
     let w = weights(&m);
     let model = thermal(&m, Vec::new())
@@ -373,7 +462,7 @@ fn energy_balance_is_exact() {
         let stored = RHO * C * VOLUME * (mean(&history[12], &w) - mean(&history[0], &w));
         let supplied: f64 = history[1..]
             .iter()
-            .map(|inc| step.increment() * (inc.field.reactions.iter().sum::<f64>() + q * VOLUME))
+            .map(|inc| step.time_step() * (inc.field.reactions.iter().sum::<f64>() + q * VOLUME))
             .sum();
         assert!(
             (stored - supplied).abs() < 1e-10 * stored.abs(),
@@ -418,8 +507,9 @@ fn step_inputs_are_typed_errors() {
 
     // Model statique, Material sans ρ ou sans c
     let elastic = Material::with_poisson(210e3, 0.3).unwrap();
-    let tri =
-        |material| Element::Tri3(Tri3::new([0, 1, 2], material, T, PlaneState::Stress).unwrap());
+    let tri = |material| {
+        Element::Tri3(Tri3::new([0, 1, 2], material, THICKNESS, PlaneState::Stress).unwrap())
+    };
     let nodes = vec![
         Node::new_2d(0.0, 0.0),
         Node::new_2d(1.0, 0.0),

@@ -70,6 +70,10 @@ pub enum Analysis {
 /// Step transitoire : durée découpée en incréments égaux Δt, intégrée par la θ-méthode
 /// C (Tₙ₊₁ − Tₙ)/Δt + K (θ Tₙ₊₁ + (1 − θ) Tₙ) = F. Les BC, sources et convections du Model restent
 /// constantes pendant la Step. Voir `Model::solve_step`.
+///
+/// La Step ne porte que le temps : elle s'applique à un Model dont l'Analysis est `Thermal`, et
+/// l'Analysis reste sur le Model. Elle passera dans la Step quand une même Step devra enchaîner
+/// deux physiques (couplage thermo-mécanique).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Step {
     time_period: f64,
@@ -115,7 +119,7 @@ impl Step {
     }
 
     /// Pas de temps Δt.
-    pub fn increment(&self) -> f64 {
+    pub fn time_step(&self) -> f64 {
         self.time_period / self.increments as f64
     }
 }
@@ -314,7 +318,7 @@ impl Model {
         }
 
         let a = self.assemble()?;
-        let (dt, theta) = (step.increment(), step.theta());
+        let (dt, theta) = (step.time_step(), step.theta());
         // matrices de chaque Element : à gauche C/Δt + θK, à droite C/Δt − (1 − θ)K
         let (left, right): (Vec<_>, Vec<_>) = (0..mesh.elements.len())
             .map(|i| {

@@ -4,8 +4,8 @@
 //! - `cylindre` : conduction dans un cylindre creux, voir `cylinder.rs` ;
 //! - `trempe` : trempe d'une plaque, thermique transitoire, voir `quench.rs`.
 //!
-//! Unités cohérentes (N, mm, MPa en mécanique ; W, mm, K, et s en transitoire, en thermique) : le
-//! cœur ne convertit rien.
+//! Unités cohérentes (N, mm, MPa en mécanique ; W, mm, K en thermique, plus s et kg en transitoire) :
+//! le cœur ne convertit rien.
 
 mod cylinder;
 mod kirsch;
