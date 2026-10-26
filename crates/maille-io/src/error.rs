@@ -97,6 +97,10 @@ pub enum IoError {
     Vtk {
         problem: String,
     },
+    /// Fichier DXF illisible ou dessin inutilisable (le message dit où et quoi corriger).
+    Dxf {
+        message: String,
+    },
     /// `MshFile` incohérent à l'écriture (indice hors limites, Set mélangé…).
     Invalid {
         problem: String,
@@ -187,6 +191,7 @@ impl fmt::Display for IoError {
                 "l'Element {element} est dans sections[{first}] et sections[{second}] : une seule section par Element"
             ),
             Self::InvalidModel { problem } => write!(f, "{problem}"),
+            Self::Dxf { message } => write!(f, "DXF : {message}"),
             Self::Vtk { problem } => write!(f, "résultats VTK : {problem}"),
             Self::Invalid { problem } => write!(f, "MshFile invalide : {problem}"),
         }
