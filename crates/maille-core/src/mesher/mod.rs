@@ -10,6 +10,8 @@
 //! dans l'unité de longueur de l'utilisateur ; les angles sont en degrés.
 
 mod delaunay;
+#[cfg_attr(not(test), allow(dead_code))] // servira au mailleur 3D
+mod delaunay3;
 mod geometry;
 mod predicates;
 mod refine;
