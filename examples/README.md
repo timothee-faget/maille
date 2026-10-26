@@ -1,8 +1,10 @@
 # Exemples et guide des fichiers
 
-Maille résout un modèle en trois fichiers : **maillage → modèle → résultats**.
+Maille résout un modèle en trois fichiers : **maillage → modèle → résultats**. En 2D, le maillage
+peut venir d'un dessin DXF (`maille mesh`).
 
 ```
+dessin (.dxf) ── maille mesh ──▶
 maillage (.msh) ──┐
                   ├─ maille solve ──▶ résultats (.pvd + .vtu) ──▶ maille view / ParaView
 modèle (.toml) ───┘                                  │
@@ -33,6 +35,22 @@ Les tests lancent chaque exemple et le comparent à sa solution exacte : ils res
 Maille ne convertit rien : choisissez un système d'unités cohérent et écrivez-le dans `units`
 (texte libre, recopié dans les résultats). Par exemple N, mm, MPa en mécanique ; W, mm, K en
 thermique, plus s et kg en transitoire.
+
+## Le dessin : DXF 2D ASCII
+
+```sh
+maille mesh plaque.dxf --size 0.5 --quadratic   # écrit plaque.msh (Tri6 ; sans --quadratic, Tri3)
+```
+
+`--size` est la taille h des Elements, dans les unités du dessin (Maille ne convertit rien).
+`-o` choisit le fichier de sortie. Entités lues : `LINE`, `ARC`, `CIRCLE` et `LWPOLYLINE` (arrondis
+compris), dans l'ordre et le sens qu'on veut. Les contours doivent être **fermés** : les extrémités
+se touchent (à un millionième de la diagonale du dessin) et deux entités seulement se rejoignent en
+un point. Le contour de plus grande aire est le contour extérieur, les autres sont des trous, et un
+angle de moins de 60° entre deux entités est refusé. Le **calque** de chaque entité est le nom du
+bord, donc le Set où poser les BC (`0` donne `bord`). Le Set `domaine` contient tous les triangles.
+Splines, ellipses, blocs et DXF binaire ne sont pas lus. `plaque.dxf`, `trempe.dxf` et `tube.dxf`
+sont les dessins des exemples.
 
 ## Le maillage : Gmsh `.msh` 4.1 ASCII
 
@@ -84,7 +102,7 @@ seul `.vtu` et un `.pvd`). Format ASCII, lisible par ParaView. Grandeurs aux Nod
 
 ## Régénérer les maillages
 
-Les `.msh` d'ici viennent du mailleur de Maille (il n'a pas encore de commande avant M9) :
+Les `.msh` 2D d'ici viennent des `.dxf` voisins, par `maille mesh` (le cube, 3D, est écrit à la main) :
 
 ```sh
 cargo test -p maille-cli --test examples -- --ignored

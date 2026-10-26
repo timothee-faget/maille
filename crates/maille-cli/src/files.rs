@@ -13,14 +13,14 @@ use maille_io::msh::{self, CellKind};
 use maille_io::vtk::{self, Entry, VtuResults};
 use maille_viewer::NodalResults;
 
-type Failure = Box<dyn Error>;
+pub(crate) type Failure = Box<dyn Error>;
 
-fn read(path: &Path) -> Result<String, Failure> {
+pub(crate) fn read(path: &Path) -> Result<String, Failure> {
     fs::read_to_string(path)
         .map_err(|e| format!("impossible de lire {} : {e}", path.display()).into())
 }
 
-fn write(path: &Path, text: &str) -> Result<(), Failure> {
+pub(crate) fn write(path: &Path, text: &str) -> Result<(), Failure> {
     fs::write(path, text)
         .map_err(|e| format!("impossible d'écrire {} : {e}", path.display()).into())
 }

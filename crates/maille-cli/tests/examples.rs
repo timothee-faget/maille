@@ -1,6 +1,6 @@
 //! Les exemples de `examples/` : chacun est résolu par le binaire `maille` et comparé à sa solution
-//! analytique, pour qu'ils restent justes. Un test `#[ignore]` régénère les `.msh` (le mailleur
-//! n'a pas de commande avant M9) : `cargo test -p maille-cli --test examples -- --ignored`.
+//! analytique, pour qu'ils restent justes. Un test `#[ignore]` régénère les `.msh` 2D depuis les
+//! `.dxf` avec `maille mesh` : `cargo test -p maille-cli --test examples -- --ignored`.
 
 use std::collections::BTreeMap;
 use std::f64::consts::PI;
@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use maille_core::mesh::Node;
-use maille_core::mesher::{triangulate, Curve, Geometry, MeshOptions};
 use maille_io::msh::{write, CellKind, MshFile, Set, DOMAIN_SET};
 use maille_io::vtk::{read_pvd, read_results, VtuResults};
 
@@ -18,26 +17,6 @@ fn examples_dir() -> PathBuf {
 }
 
 // --- génération des maillages ---
-
-fn polygon(points: &[[f64; 2]], size: f64, names: &[&str]) -> Geometry {
-    Geometry {
-        outer: (0..points.len())
-            .map(|i| Curve::line(points[i], size, names[i]))
-            .collect(),
-        holes: vec![],
-    }
-}
-
-fn mesh_text(geometry: &Geometry, quadratic: bool) -> String {
-    let t = triangulate(geometry, &MeshOptions::default()).unwrap();
-    let file = if quadratic {
-        MshFile::from_triangulation(&t.to_quadratic())
-    } else {
-        MshFile::from_triangulation(&t)
-    }
-    .unwrap();
-    write(&file).unwrap()
-}
 
 /// Cube unité en 6 tétraèdres Tet4 ; Sets de Nodes x0, x1, y0, z0.
 fn cube() -> MshFile {
@@ -90,28 +69,24 @@ fn cube() -> MshFile {
 #[ignore = "régénère les .msh d'examples/"]
 fn regenerate_example_meshes() {
     let dir = examples_dir();
-    let plate = polygon(
-        &[[0.0, 0.0], [4.0, 0.0], [4.0, 2.0], [0.0, 2.0]],
-        0.5,
-        &["bas", "droite", "haut", "gauche"],
-    );
-    let quench = polygon(
-        &[[0.0, 0.0], [20.0, 0.0], [20.0, 10.0], [0.0, 10.0]],
-        1.0,
-        &["isole", "trempe", "isole", "trempe"],
-    );
-    let tube = Geometry {
-        outer: vec![
-            Curve::line([10.0, 0.0], 1.0, "sym_x"),
-            Curve::arc([20.0, 0.0], [0.0, 0.0], false, 1.0, "exterieur"),
-            Curve::line([0.0, 20.0], 1.0, "sym_y"),
-            Curve::arc([0.0, 10.0], [0.0, 0.0], true, 1.0, "interieur"),
-        ],
-        holes: vec![],
-    };
-    fs::write(dir.join("plaque.msh"), mesh_text(&plate, true)).unwrap();
-    fs::write(dir.join("trempe.msh"), mesh_text(&quench, true)).unwrap();
-    fs::write(dir.join("tube.msh"), mesh_text(&tube, true)).unwrap();
+    for (name, size) in [("plaque", "0.5"), ("trempe", "1"), ("tube", "1")] {
+        let out = Command::new(env!("CARGO_BIN_EXE_maille"))
+            .args([
+                "mesh",
+                &format!("{name}.dxf"),
+                "--size",
+                size,
+                "--quadratic",
+            ])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{name} : {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
     fs::write(dir.join("cube.msh"), write(&cube()).unwrap()).unwrap();
 }
 
@@ -120,7 +95,7 @@ fn regenerate_example_meshes() {
 struct Workdir(PathBuf);
 
 impl Workdir {
-    /// Copie des `.toml` et `.msh` d'`examples/` dans un dossier temporaire : les résultats n'y
+    /// Copie des `.toml`, `.msh` et `.dxf` d'`examples/` dans un dossier temporaire : les résultats n'y
     /// salissent pas le dépôt.
     fn new(test: &str) -> Self {
         let dir = std::env::temp_dir().join(format!("maille-{test}-{}", std::process::id()));
@@ -130,7 +105,7 @@ impl Workdir {
             let path = entry.unwrap().path();
             if matches!(
                 path.extension().and_then(|e| e.to_str()),
-                Some("toml" | "msh")
+                Some("toml" | "msh" | "dxf")
             ) {
                 fs::copy(&path, dir.join(path.file_name().unwrap())).unwrap();
             }
@@ -187,6 +162,67 @@ fn traction_follows_the_analytic_field() {
         assert!((s[6 * i] - 210.0).abs() < 1e-6, "σx = {}", s[6 * i]);
         assert!(s[6 * i + 1].abs() < 1e-6);
     }
+}
+
+#[test]
+fn dxf_drawing_meshed_by_the_cli_follows_the_analytic_field() {
+    let w = Workdir::new("dxf");
+    let out = w.maille(&[
+        "mesh",
+        "plaque.dxf",
+        "--size",
+        "0.5",
+        "--quadratic",
+        "-o",
+        "dessin.msh",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("bas, droite, gauche, haut"));
+    // le modèle de la traction, sur le maillage issu du dessin
+    let model = fs::read_to_string(w.0.join("traction.toml")).unwrap();
+    fs::write(
+        w.0.join("dessin.toml"),
+        model.replace("plaque.msh", "dessin.msh"),
+    )
+    .unwrap();
+    w.solve("dessin.toml");
+    let (_, r) = w.results("dessin.pvd", None);
+    let (u, s) = (array(&r, "displacement"), array(&r, "stress"));
+    for (i, p) in r.nodes.iter().enumerate() {
+        assert!((u[3 * i] - 0.001 * p.x).abs() < 1e-9);
+        assert!((s[6 * i] - 210.0).abs() < 1e-6, "σx = {}", s[6 * i]);
+    }
+}
+
+#[test]
+fn mesh_command_reports_errors() {
+    let w = Workdir::new("mesh-erreurs");
+    let fail = |args: &[&str], expected: &str| {
+        let out = w.maille(args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{args:?}");
+        assert!(stderr.contains(expected), "{args:?} : {stderr}");
+    };
+    fail(&["mesh"], "usage");
+    fail(&["mesh", "plaque.dxf"], "--size manque");
+    fail(
+        &["mesh", "plaque.dxf", "--size", "grand"],
+        "--size attend un nombre",
+    );
+    fail(
+        &["mesh", "plaque.dxf", "--size", "-1"],
+        "strictement positive",
+    );
+    fail(&["mesh", "absent.dxf", "--size", "1"], "absent.dxf");
+    // un côté manque : contour ouvert
+    let text = fs::read_to_string(w.0.join("plaque.dxf")).unwrap();
+    let open = &text[..text.rfind("0\nLINE").unwrap()];
+    fs::write(w.0.join("ouvert.dxf"), format!("{open}0\nENDSEC\n0\nEOF\n")).unwrap();
+    fail(&["mesh", "ouvert.dxf", "--size", "1"], "contour ouvert");
 }
 
 #[test]
