@@ -93,6 +93,10 @@ pub enum IoError {
     InvalidModel {
         problem: String,
     },
+    /// Fichier de résultats VTK (`.vtu`, `.pvd`) illisible ou données inécrivables.
+    Vtk {
+        problem: String,
+    },
     /// `MshFile` incohérent à l'écriture (indice hors limites, Set mélangé…).
     Invalid {
         problem: String,
@@ -183,6 +187,7 @@ impl fmt::Display for IoError {
                 "l'Element {element} est dans sections[{first}] et sections[{second}] : une seule section par Element"
             ),
             Self::InvalidModel { problem } => write!(f, "{problem}"),
+            Self::Vtk { problem } => write!(f, "résultats VTK : {problem}"),
             Self::Invalid { problem } => write!(f, "MshFile invalide : {problem}"),
         }
     }

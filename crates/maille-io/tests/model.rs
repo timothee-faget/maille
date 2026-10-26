@@ -36,11 +36,11 @@ fn rectangle(w: f64, h: f64, size: f64, quadratic: bool) -> MshFile {
 }
 
 fn load(toml: &str, mesh: &MshFile) -> Loaded {
-    build(&parse(toml).unwrap(), mesh).unwrap()
+    build(&parse(toml).unwrap(), mesh, None).unwrap()
 }
 
 fn error(toml: &str, mesh: &MshFile) -> IoError {
-    build(&parse(toml).unwrap(), mesh).unwrap_err()
+    build(&parse(toml).unwrap(), mesh, None).unwrap_err()
 }
 
 const UNIAXIAL: &str = r#"
@@ -595,9 +595,15 @@ fn incomplete_materials_are_refused() {
 }
 
 #[test]
-fn temperatures_section_is_not_supported_yet() {
-    let toml = format!("{UNIAXIAL}\n[temperatures]\nfrom = \"trempe.pvd\"\nincrement = \"last\"\nreference = 20.0\n");
-    let e = error(&toml, &plate());
+fn temperatures_section_and_argument_go_together() {
+    let toml = format!(
+        "{UNIAXIAL}\n[temperatures]\nfrom = \"trempe.pvd\"\nincrement = \"last\"\nreference = 20.0\n"
+    );
+    let mesh = plate();
+    let file = parse(&toml).unwrap();
+    let e = build(&file, &mesh, None).unwrap_err();
+    assert!(e.to_string().contains("trempe.pvd"), "{e}");
+    let e = build(&parse(UNIAXIAL).unwrap(), &mesh, Some(&[0.0])).unwrap_err();
     assert!(e.to_string().contains("[temperatures]"), "{e}");
 }
 

@@ -16,18 +16,34 @@ fn invalid(problem: String) -> IoError {
 }
 
 /// Construit le `Model` et le calcul demandé. Les erreurs disent quel Set ou quelle clé corriger.
-pub fn build(file: &ModelFile, mesh: &MshFile) -> Result<Loaded, IoError> {
+///
+/// `temperatures` : une valeur par Node, lue par le CLI dans le fichier de `[temperatures]` ; elle
+/// est obligatoire si le modèle a cette section, et refusée sinon.
+pub fn build(
+    file: &ModelFile,
+    mesh: &MshFile,
+    temperatures: Option<&[f64]>,
+) -> Result<Loaded, IoError> {
     if file.units.trim().is_empty() {
         return Err(invalid(
             "`units` est vide : écrire le système d'unités cohérent utilisé, par exemple \"N, mm, MPa\""
                 .to_string(),
         ));
     }
-    if file.temperatures.is_some() {
-        return Err(invalid(
-            "[temperatures] n'est pas encore pris en charge : le couplage thermo-mécanique attend la lecture des résultats thermiques"
-                .to_string(),
-        ));
+    match (&file.temperatures, temperatures) {
+        (Some(def), None) => {
+            return Err(invalid(format!(
+                "[temperatures] demande les températures de {} : les lire (vtk::read_point_data) et les passer à build",
+                def.from
+            )))
+        }
+        (None, Some(_)) => {
+            return Err(invalid(
+                "des températures sont fournies mais le modèle n'a pas de [temperatures] : ajouter la section ou ne rien fournir"
+                    .to_string(),
+            ))
+        }
+        _ => {}
     }
     let analysis = match file.analysis {
         AnalysisKind::Static => Analysis::Static,
@@ -69,7 +85,10 @@ pub fn build(file: &ModelFile, mesh: &MshFile) -> Result<Loaded, IoError> {
             });
         }
     }
-    let mut model = Model::with_analysis(core_mesh, analysis, bcs, loads)?;
+    let mut model = Model::with_analysis(core_mesh.clone(), analysis, bcs, loads)?;
+    if let (Some(def), Some(t)) = (&file.temperatures, temperatures) {
+        model = model.with_temperatures(t.to_vec(), def.reference)?;
+    }
 
     if !file.heat_sources.is_empty() {
         let mut sources = Vec::new();
@@ -104,6 +123,7 @@ pub fn build(file: &ModelFile, mesh: &MshFile) -> Result<Loaded, IoError> {
     };
     Ok(Loaded {
         units: file.units.clone(),
+        mesh: core_mesh,
         model,
         run,
     })
