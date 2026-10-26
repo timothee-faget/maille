@@ -15,12 +15,14 @@ mod delaunay3;
 mod geometry;
 mod predicates;
 mod refine;
+mod surface;
 
 use std::collections::{BTreeMap, HashMap};
 
 use crate::error::MailleError;
 use crate::mesh::Node;
 pub use geometry::{Curve, CurveId, CurveKind, Geometry, MIN_CORNER};
+pub use surface::{Patch, Surface};
 
 /// Plafond de Nodes produits par le mailleur : au-delà, `TooManyNodes` plutôt qu'un calcul sans fin.
 pub const MAX_NODES: usize = 1_000_000;
