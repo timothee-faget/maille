@@ -10,17 +10,20 @@
 //! dans l'unité de longueur de l'utilisateur ; les angles sont en degrés.
 
 mod delaunay;
-#[cfg_attr(not(test), allow(dead_code))] // servira au mailleur 3D
 mod delaunay3;
 mod geometry;
 mod predicates;
 mod refine;
+mod surface;
+mod tetrahedralize;
 
 use std::collections::{BTreeMap, HashMap};
 
 use crate::error::MailleError;
 use crate::mesh::Node;
 pub use geometry::{Curve, CurveId, CurveKind, Geometry, MIN_CORNER};
+pub use surface::{Patch, Surface};
+pub use tetrahedralize::{tetrahedralize, Tetrahedralization};
 
 /// Plafond de Nodes produits par le mailleur : au-delà, `TooManyNodes` plutôt qu'un calcul sans fin.
 pub const MAX_NODES: usize = 1_000_000;
@@ -40,8 +43,8 @@ pub struct Triangulation<const N: usize> {
 pub struct BoundarySet {
     /// Nodes posés sur le bord, triés.
     pub nodes: Vec<usize>,
-    /// Faces de triangles sur le bord, (triangle, face) triés, faces numérotées comme
-    /// `Element::face_nodes` : 0 pour l'arête 0-1, 1 pour 1-2, 2 pour 2-0.
+    /// Faces d'Elements sur le bord, (triangle ou tétraèdre, face) triés, faces numérotées comme
+    /// `Element::face_nodes` : pour un triangle 0 pour l'arête 0-1, 1 pour 1-2, 2 pour 2-0.
     pub faces: Vec<(usize, usize)>,
 }
 

@@ -8,49 +8,7 @@ mod reader;
 mod surface;
 
 use crate::IoError;
-
-/// Surface fermée d'une pièce : sommets soudés et triangles dans le sens antihoraire vu de
-/// l'extérieur (normale sortante).
-#[derive(Debug, Clone, PartialEq)]
-pub struct Surface {
-    pub vertices: Vec<[f64; 3]>,
-    pub triangles: Vec<[usize; 3]>,
-    /// Morceaux nommés de la surface. Chaque triangle est dans exactement un patch.
-    pub patches: Vec<Patch>,
-}
-
-/// Morceau de surface nommé : un `solid` du fichier, ou une zone lisse limitée par des arêtes vives.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Patch {
-    pub name: String,
-    /// Indices dans `Surface::triangles`, croissants.
-    pub triangles: Vec<usize>,
-}
-
-impl Surface {
-    /// Aire totale de la surface.
-    pub fn area(&self) -> f64 {
-        self.triangles
-            .iter()
-            .map(|t| {
-                let [a, b, c] = t.map(|i| self.vertices[i]);
-                0.5 * norm(cross(sub(b, a), sub(c, a)))
-            })
-            .sum()
-    }
-
-    /// Volume enfermé par la surface (positif : les normales sortent).
-    pub fn volume(&self) -> f64 {
-        let o = self.vertices.first().copied().unwrap_or([0.0; 3]);
-        self.triangles
-            .iter()
-            .map(|t| {
-                let [a, b, c] = t.map(|i| sub(self.vertices[i], o));
-                dot(a, cross(b, c)) / 6.0
-            })
-            .sum()
-    }
-}
+pub use maille_core::mesher::{Patch, Surface};
 
 /// Lit un fichier STL (ASCII ou binaire, reconnu à sa taille). Un fichier ASCII à plusieurs
 /// `solid` donne un patch par nom ; sinon (un seul `solid`, ou binaire) la surface est découpée en
