@@ -1,4 +1,5 @@
 use crate::mesh::PlaneState;
+use crate::plasticity::{PlasticState, VonMises};
 use crate::quadrature::{GaussPoint, TetGaussPoint};
 use crate::results::{HeatFlux, Stress};
 use crate::shape::{Mapping, Mapping3d, ShapeFn, SolidShapeFn};
@@ -353,6 +354,96 @@ pub fn solid_gauss(
             }
         })
         .collect()
+}
+
+/// Réponse d'un Element élasto-plastique à un déplacement : forces internes, tangente, et contraintes
+/// et états aux points de Gauss.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ElementResponse {
+    /// Forces internes Σ_g w_g Bᵀ σ, DOF locaux.
+    pub internal_force: Vec<f64>,
+    /// Rigidité tangente Σ_g w_g Bᵀ C B, C tangente cohérente de la loi.
+    pub tangent: Vec<Vec<f64>>,
+    pub stresses: Vec<Stress>,
+    /// États à la fin du pas, un par point de Gauss.
+    pub states: Vec<PlasticState>,
+    /// Au moins un point de Gauss a plastifié pendant ce pas.
+    pub yielding: bool,
+}
+
+/// Réponse d'un triangle en déformations planes : la loi 3D reçoit εzz = γyz = γxz = 0, d'où σzz.
+/// `u_e` : déplacements locaux (ux, uy) par Node ; `previous` : états du début du pas.
+pub fn plane_strain_response(
+    points: &[GaussData<2>],
+    law: &VonMises,
+    u_e: &[f64],
+    previous: &[PlasticState],
+) -> ElementResponse {
+    let points = points.iter().map(|p| {
+        let b = strain_displacement(&p.dn_dx)
+            .into_iter()
+            .map(|[xx, yy, xy]| [xx, yy, 0.0, 0.0, 0.0, xy])
+            .collect();
+        (p.weight, b, [p.position[0], p.position[1], 0.0])
+    });
+    elastoplastic_response(points, law, u_e, previous)
+}
+
+/// Réponse d'un tétraèdre ; `u_e` : déplacements locaux (ux, uy, uz) par Node.
+pub fn solid_response(
+    points: &[GaussData<3>],
+    law: &VonMises,
+    u_e: &[f64],
+    previous: &[PlasticState],
+) -> ElementResponse {
+    let points = points
+        .iter()
+        .map(|p| (p.weight, solid_strain_displacement(&p.dn_dx), p.position));
+    elastoplastic_response(points, law, u_e, previous)
+}
+
+/// `points` : (poids, B en Voigt de `solid_d` stockée par colonne, position) de chaque point de Gauss.
+fn elastoplastic_response(
+    points: impl Iterator<Item = (f64, Vec<[f64; 6]>, [f64; 3])>,
+    law: &VonMises,
+    u_e: &[f64],
+    previous: &[PlasticState],
+) -> ElementResponse {
+    let m = u_e.len();
+    let mut out = ElementResponse {
+        internal_force: vec![0.0; m],
+        tangent: vec![vec![0.0; m]; m],
+        ..ElementResponse::default()
+    };
+    for ((weight, b, [x, y, z]), previous) in points.zip(previous) {
+        let strain: [f64; 6] =
+            std::array::from_fn(|r| b.iter().zip(u_e).map(|(col, u)| col[r] * u).sum());
+        let point = law.update(&strain, previous);
+        let s = point.stress;
+        for (i, col) in b.iter().enumerate() {
+            out.internal_force[i] += weight * (0..6).map(|r| col[r] * s[r]).sum::<f64>();
+            // (C B)_i = C · colonne i de B
+            let cb: [f64; 6] =
+                std::array::from_fn(|r| (0..6).map(|c| point.tangent[r][c] * col[c]).sum());
+            for (row, other) in out.tangent.iter_mut().zip(&b) {
+                row[i] += weight * (0..6).map(|r| other[r] * cb[r]).sum::<f64>();
+            }
+        }
+        out.stresses.push(Stress {
+            x,
+            y,
+            z,
+            sigma_xx: s[0],
+            sigma_yy: s[1],
+            sigma_zz: s[2],
+            tau_xy: s[5],
+            tau_yz: s[3],
+            tau_xz: s[4],
+        });
+        out.states.push(point.state);
+        out.yielding |= point.yielding;
+    }
+    out
 }
 
 /// Matrice de conduction K = Σ_g w_g k ∇Nᵀ ∇N, un DOF (T) par Node.

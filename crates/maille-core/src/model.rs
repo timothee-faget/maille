@@ -67,12 +67,15 @@ pub enum Analysis {
     Thermal,
 }
 
-/// Step transitoire : durée découpée en incréments égaux Δt, intégrée par la θ-méthode
-/// C (Tₙ₊₁ − Tₙ)/Δt + K (θ Tₙ₊₁ + (1 − θ) Tₙ) = F. Les BC, sources et convections du Model restent
-/// constantes pendant la Step. Voir `Model::solve_step`.
+/// Step : durée découpée en incréments égaux Δt. Deux usages :
+/// - transitoire (`Step::transient`, Model `Thermal`, voir `Model::solve_step`) : θ-méthode
+///   C (Tₙ₊₁ − Tₙ)/Δt + K (θ Tₙ₊₁ + (1 − θ) Tₙ) = F ; les BC, sources et convections du Model restent
+///   constantes pendant la Step ;
+/// - quasi-statique (`Step::quasi_static`, Model `Static`, voir `Model::solve_quasi_static`) :
+///   charges et valeurs imposées des BC suivent une `Amplitude` ; le temps ne sert qu'à la lire.
 ///
-/// La Step ne porte que le temps : elle s'applique à un Model dont l'Analysis est `Thermal`, et
-/// l'Analysis reste sur le Model, y compris en couplage séquentiel (voir `with_temperatures`).
+/// La Step ne porte que le temps : l'Analysis reste sur le Model, y compris en couplage séquentiel
+/// (voir `with_temperatures`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Step {
     time_period: f64,
@@ -93,6 +96,13 @@ impl Step {
             increments,
             theta: 1.0,
         })
+    }
+
+    /// Durée `time_period` (finie, strictement positive) en `increments` pas égaux, pour un calcul
+    /// élasto-plastique : chaque incrément est un équilibre résolu par Newton-Raphson. Plus
+    /// d'incréments aident Newton à converger quand la plasticité se développe vite. θ ne sert pas.
+    pub fn quasi_static(time_period: f64, increments: usize) -> Result<Self, MailleError> {
+        Self::transient(time_period, increments)
     }
 
     /// θ entre ½ et 1, stable quel que soit Δt. 1 : Euler implicite, d'ordre 1, qui amortit tout ;
@@ -120,6 +130,58 @@ impl Step {
     /// Pas de temps Δt.
     pub fn time_step(&self) -> f64 {
         self.time_period / self.increments as f64
+    }
+}
+
+/// Amplitude λ(t) d'une Step quasi-statique : les charges (Load, DistributedLoad) et les valeurs
+/// des BC du Model sont multipliées par λ(t). Linéaire par morceaux entre des points (t, λ),
+/// constante après le dernier (comme *AMPLITUDE dans Abaqus). Charger puis décharger :
+/// `Amplitude::new(vec![(0.0, 0.0), (1.0, 1.0), (2.0, 0.0)])`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Amplitude {
+    points: Vec<(f64, f64)>,
+}
+
+impl Amplitude {
+    /// Le premier point doit être (0, 0) : le calcul part du Mesh au repos. Les temps sont
+    /// strictement croissants et les valeurs finies.
+    pub fn new(points: Vec<(f64, f64)>) -> Result<Self, MailleError> {
+        if points.is_empty() {
+            return Err(MailleError::InvalidAmplitude { point: 0 });
+        }
+        for (k, &(t, value)) in points.iter().enumerate() {
+            let valid = t.is_finite()
+                && value.is_finite()
+                && match k {
+                    0 => t == 0.0 && value == 0.0,
+                    _ => t > points[k - 1].0,
+                };
+            if !valid {
+                return Err(MailleError::InvalidAmplitude { point: k });
+            }
+        }
+        Ok(Self { points })
+    }
+
+    /// Rampe de 0 à 1 sur `time_period`, puis 1.
+    pub fn ramp(time_period: f64) -> Result<Self, MailleError> {
+        Self::new(vec![
+            (0.0, 0.0),
+            (positive("durée de la rampe", time_period)?, 1.0),
+        ])
+    }
+
+    /// λ(t).
+    pub fn at(&self, t: f64) -> f64 {
+        let after = self.points.partition_point(|&(ti, _)| ti <= t);
+        match (
+            self.points.get(after.wrapping_sub(1)),
+            self.points.get(after),
+        ) {
+            (Some(&(t0, v0)), Some(&(t1, v1))) => v0 + (v1 - v0) * (t - t0) / (t1 - t0),
+            (Some(&(_, v)), None) | (None, Some(&(_, v))) => v,
+            (None, None) => 0.0,
+        }
     }
 }
 
@@ -326,6 +388,7 @@ impl Model {
                 stresses: (0..mesh.elements.len())
                     .map(|i| element_stresses(mesh, i, &u, &strains[i]))
                     .collect(),
+                equivalent_plastic_strains: Vec::new(),
                 displacements: u,
                 reactions,
                 temperatures: Vec::new(),
@@ -525,6 +588,7 @@ fn thermal_field(fluxes: &[FluxOperator], temperatures: Vec<f64>, reactions: Vec
         reactions,
         displacements: Vec::new(),
         stresses: Vec::new(),
+        equivalent_plastic_strains: Vec::new(),
     }
 }
 

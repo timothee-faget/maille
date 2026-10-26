@@ -1,10 +1,12 @@
 use crate::element::{
     bar_stiffness, bar_thermal_load, beam_stiffness, capacity, conduction, heat_fluxes,
-    in_plane_expansion, plane_d, plane_gauss, plane_stiffness, plane_stresses, plane_thermal_load,
-    solid_d, solid_gauss, solid_stiffness, solid_stresses, solid_thermal_load, GaussData,
+    in_plane_expansion, plane_d, plane_gauss, plane_stiffness, plane_strain_response,
+    plane_stresses, plane_thermal_load, solid_d, solid_gauss, solid_response, solid_stiffness,
+    solid_stresses, solid_thermal_load, ElementResponse, GaussData,
 };
 use crate::material::Material;
 use crate::mesh::{Element, Mesh, PlaneState, Tet10, Tet4, Tri3, Tri6};
+use crate::plasticity::{PlasticState, VonMises};
 use crate::quadrature::{
     GaussPoint, LinePoint, TetGaussPoint, LINE_2, LINE_3, TETRA_1, TETRA_14, TETRA_4, TRIANGLE_1,
     TRIANGLE_3, TRIANGLE_6,
@@ -30,6 +32,20 @@ pub fn element_dofs(e: &Element) -> Vec<usize> {
 /// E du Material, que `Model::new` garantit présent en statique.
 fn young(material: &Material) -> f64 {
     material.young.unwrap_or(0.0)
+}
+
+/// Loi de von Mises du Material (E et ν garantis par `Model::new`). Sans `Plasticity`, σy est
+/// infinie : la loi reste élastique.
+fn von_mises(material: &Material) -> VonMises {
+    let (yield_stress, hardening) = material
+        .plasticity
+        .map_or((f64::INFINITY, 0.0), |p| (p.yield_stress, p.hardening));
+    VonMises {
+        young: young(material),
+        poisson: material.poisson.unwrap_or(0.0),
+        yield_stress,
+        hardening,
+    }
 }
 
 /// Matrice de rigidité de l'Element `i`, DOF dans l'ordre de `element_dofs`.
@@ -114,14 +130,28 @@ impl<'a> PlaneKernel<'a> {
         )
     }
 
+    /// Déplacements locaux (ux, uy) par Node, tirés des déplacements globaux `u`.
+    fn displacements(&self, u: &[f64]) -> Vec<f64> {
+        self.nodes
+            .iter()
+            .flat_map(|&n| [u[2 * n], u[2 * n + 1]])
+            .collect()
+    }
+
+    /// Réponse élasto-plastique, en déformations planes (`Model` refuse les contraintes planes).
+    fn response(&self, mesh: &Mesh, u: &[f64], previous: &[PlasticState]) -> ElementResponse {
+        plane_strain_response(
+            &self.gauss(mesh),
+            &von_mises(self.material),
+            &self.displacements(u),
+            previous,
+        )
+    }
+
     fn stresses(&self, mesh: &Mesh, u: &[f64], strain_e: &[f64]) -> Vec<Stress> {
         let nu = self.nu();
         let d = plane_d(young(self.material), nu, self.state);
-        let u_e: Vec<f64> = self
-            .nodes
-            .iter()
-            .flat_map(|&n| [u[2 * n], u[2 * n + 1]])
-            .collect();
+        let u_e = self.displacements(u);
         plane_stresses(
             &mesh.coords(self.nodes),
             self.rule,
@@ -200,18 +230,30 @@ impl<'a> SolidKernel<'a> {
         solid_gauss(&mesh.coords_3d(self.nodes), self.rule, self.shape)
     }
 
-    fn stresses(&self, mesh: &Mesh, u: &[f64], strain_e: &[f64]) -> Vec<Stress> {
-        let u_e: Vec<f64> = self
-            .nodes
+    /// Déplacements locaux (ux, uy, uz) par Node, tirés des déplacements globaux `u`.
+    fn displacements(&self, u: &[f64]) -> Vec<f64> {
+        self.nodes
             .iter()
             .flat_map(|&n| [u[3 * n], u[3 * n + 1], u[3 * n + 2]])
-            .collect();
+            .collect()
+    }
+
+    fn response(&self, mesh: &Mesh, u: &[f64], previous: &[PlasticState]) -> ElementResponse {
+        solid_response(
+            &self.gauss(mesh),
+            &von_mises(self.material),
+            &self.displacements(u),
+            previous,
+        )
+    }
+
+    fn stresses(&self, mesh: &Mesh, u: &[f64], strain_e: &[f64]) -> Vec<Stress> {
         solid_stresses(
             &mesh.coords_3d(self.nodes),
             self.rule,
             self.shape,
             &self.d(),
-            &u_e,
+            &self.displacements(u),
             strain_e,
         )
     }
@@ -237,6 +279,36 @@ pub fn element_stresses(mesh: &Mesh, i: usize, u: &[f64], strain_e: &[f64]) -> V
         Element::Tet4(t) => SolidKernel::tet4(t).stresses(mesh, u, strain_e),
         Element::Tet10(t) => SolidKernel::tet10(t).stresses(mesh, u, strain_e),
         Element::Bar(_) | Element::Beam(_) => Vec::new(),
+    }
+}
+
+/// Nombre de points de Gauss de l'Element `i` pour la rigidité et les contraintes (0 pour les Bar et
+/// Beam).
+pub fn element_gauss_count(mesh: &Mesh, i: usize) -> usize {
+    match &mesh.elements[i] {
+        Element::Tri3(t) => PlaneKernel::tri3(t).rule.len(),
+        Element::Tri6(t) => PlaneKernel::tri6(t).rule.len(),
+        Element::Tet4(t) => SolidKernel::tet4(t).rule.len(),
+        Element::Tet10(t) => SolidKernel::tet10(t).rule.len(),
+        Element::Bar(_) | Element::Beam(_) => 0,
+    }
+}
+
+/// Réponse élasto-plastique de l'Element `i` aux déplacements globaux `u`, depuis les états
+/// `previous` de ses points de Gauss (DOF dans l'ordre de `element_dofs`). Triangles en
+/// déformations planes et tétraèdres ; vide pour les Bar et Beam (refusées par `Model`).
+pub fn element_response(
+    mesh: &Mesh,
+    i: usize,
+    u: &[f64],
+    previous: &[PlasticState],
+) -> ElementResponse {
+    match &mesh.elements[i] {
+        Element::Tri3(t) => PlaneKernel::tri3(t).response(mesh, u, previous),
+        Element::Tri6(t) => PlaneKernel::tri6(t).response(mesh, u, previous),
+        Element::Tet4(t) => SolidKernel::tet4(t).response(mesh, u, previous),
+        Element::Tet10(t) => SolidKernel::tet10(t).response(mesh, u, previous),
+        Element::Bar(_) | Element::Beam(_) => ElementResponse::default(),
     }
 }
 
@@ -496,7 +568,7 @@ mod capacity_tests {
     }
 
     /// Les Nodes `v` (sommets) suivis des milieux des arêtes `edges`.
-    fn with_mids(v: &[Node], edges: &[(usize, usize)]) -> Vec<Node> {
+    pub(super) fn with_mids(v: &[Node], edges: &[(usize, usize)]) -> Vec<Node> {
         let mut nodes = v.to_vec();
         nodes.extend(edges.iter().map(|&(a, b)| {
             Node::new(
@@ -575,5 +647,137 @@ mod capacity_tests {
             1.0,
             true,
         );
+    }
+}
+
+#[cfg(test)]
+mod response_tests {
+    use super::capacity_tests::with_mids;
+    use super::*;
+    use crate::mesh::Node;
+    use crate::shape::{TET10_EDGES, TRI6_EDGES};
+
+    /// Un Element de chaque type (triangles en déformations planes), de forme quelconque.
+    fn meshes(material: Material) -> Vec<(&'static str, Mesh)> {
+        let tri = [
+            Node::new_2d(0.0, 0.0),
+            Node::new_2d(2.0, 0.3),
+            Node::new_2d(0.4, 1.8),
+        ];
+        let tet = [
+            Node::new(1.0, 0.5, 0.0),
+            Node::new(3.0, 1.0, 0.5),
+            Node::new(1.5, 2.5, 0.0),
+            Node::new(1.2, 1.0, 2.0),
+        ];
+        let strain = PlaneState::Strain;
+        let tri3 = Tri3::new([0, 1, 2], material, 0.5, strain).unwrap();
+        let tri6 = Tri6::new(std::array::from_fn(|k| k), material, 0.5, strain).unwrap();
+        vec![
+            ("Tri3", Mesh::new(tri.to_vec(), vec![Element::Tri3(tri3)])),
+            (
+                "Tri6",
+                Mesh::new(with_mids(&tri, &TRI6_EDGES), vec![Element::Tri6(tri6)]),
+            ),
+            (
+                "Tet4",
+                Mesh::new(
+                    tet.to_vec(),
+                    vec![Element::Tet4(Tet4::new([0, 1, 2, 3], material))],
+                ),
+            ),
+            (
+                "Tet10",
+                Mesh::new(
+                    with_mids(&tet, &TET10_EDGES),
+                    vec![Element::Tet10(Tet10::new(
+                        std::array::from_fn(|k| k),
+                        material,
+                    ))],
+                ),
+            ),
+        ]
+        .into_iter()
+        .map(|(name, mesh)| (name, mesh.unwrap()))
+        .collect()
+    }
+
+    /// Déplacements de l'ordre de 3·10⁻³ fois la taille de l'Element, sans motif : déformations de
+    /// quelques 10⁻³, au-delà de σy/E = 1,2·10⁻³.
+    fn displacements(mesh: &Mesh) -> Vec<f64> {
+        (0..mesh.nodes.len() * mesh.dofs_per_node())
+            .map(|k| 3e-3 * (((k * 7) % 5) as f64 - 2.0 + 0.1 * k as f64))
+            .collect()
+    }
+
+    fn states(mesh: &Mesh) -> Vec<PlasticState> {
+        vec![PlasticState::default(); element_gauss_count(mesh, 0)]
+    }
+
+    #[test]
+    fn elastic_response_is_the_linear_stiffness() {
+        let elastic = Material::with_poisson(210e3, 0.3).unwrap();
+        for (name, mesh) in meshes(elastic) {
+            let u = displacements(&mesh);
+            let r = element_response(&mesh, 0, &u, &states(&mesh));
+            let k = element_stiffness(&mesh, 0);
+            let scale = k[0][0];
+            assert!(!r.yielding, "{name}");
+            for ((row, tangent_row), f) in k.iter().zip(&r.tangent).zip(&r.internal_force) {
+                let ku: f64 = row.iter().zip(&u).map(|(k, u)| k * u).sum();
+                assert!(
+                    (f - ku).abs() < 1e-9 * scale * 1e-2,
+                    "{name} : {f} au lieu de {ku}"
+                );
+                for (a, b) in row.iter().zip(tangent_row) {
+                    assert!((a - b).abs() < 1e-9 * scale, "{name}");
+                }
+            }
+            for (got, expected) in r.stresses.iter().zip(element_stresses(&mesh, 0, &u, &[])) {
+                for (a, b) in [
+                    (got.sigma_xx, expected.sigma_xx),
+                    (got.sigma_yy, expected.sigma_yy),
+                    (got.sigma_zz, expected.sigma_zz),
+                    (got.tau_xy, expected.tau_xy),
+                    (got.tau_yz, expected.tau_yz),
+                    (got.tau_xz, expected.tau_xz),
+                    (got.x, expected.x),
+                    (got.y, expected.y),
+                    (got.z, expected.z),
+                ] {
+                    assert!((a - b).abs() < 1e-9 * 210e3 * 1e-2, "{name} : {got:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn plastic_tangent_is_the_derivative_of_the_internal_forces() {
+        let plastic = Material::with_poisson(210e3, 0.3)
+            .and_then(|m| m.with_plasticity(250.0, 2000.0))
+            .unwrap();
+        for (name, mesh) in meshes(plastic) {
+            let u = displacements(&mesh);
+            let previous = states(&mesh);
+            let r = element_response(&mesh, 0, &u, &previous);
+            assert!(r.yielding, "{name}");
+            let scale = r.tangent[0][0].abs();
+            let h = 1e-9;
+            for j in 0..u.len() {
+                let (mut plus, mut minus) = (u.clone(), u.clone());
+                plus[j] += h;
+                minus[j] -= h;
+                let fp = element_response(&mesh, 0, &plus, &previous).internal_force;
+                let fm = element_response(&mesh, 0, &minus, &previous).internal_force;
+                for (i, row) in r.tangent.iter().enumerate() {
+                    let numeric = (fp[i] - fm[i]) / (2.0 * h);
+                    assert!(
+                        (row[j] - numeric).abs() < 1e-6 * scale,
+                        "{name} : K[{i}][{j}] = {} au lieu de {numeric}",
+                        row[j]
+                    );
+                }
+            }
+        }
     }
 }

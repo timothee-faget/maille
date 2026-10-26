@@ -253,6 +253,7 @@ mod tests {
             reactions: vec![0.0; displacements.len()],
             displacements,
             stresses,
+            equivalent_plastic_strains: Vec::new(),
             temperatures: Vec::new(),
             heat_fluxes: Vec::new(),
         }
@@ -383,6 +384,7 @@ mod tests {
             displacements: vec![0.0; 2],
             reactions: vec![0.0; 2],
             stresses: vec![Vec::new()],
+            equivalent_plastic_strains: Vec::new(),
             temperatures: Vec::new(),
             heat_fluxes: Vec::new(),
         };
@@ -400,6 +402,7 @@ mod tests {
             displacements: Vec::new(),
             reactions: vec![0.0; 4],
             stresses: Vec::new(),
+            equivalent_plastic_strains: Vec::new(),
             temperatures: temperatures.clone(),
             heat_fluxes: Vec::new(),
         };

@@ -57,6 +57,9 @@ pub struct Field {
     /// Statique : contraintes aux points de Gauss de chaque Element (indexé comme `Mesh::elements`).
     /// Vide pour les Bar et Beam.
     pub stresses: Vec<Vec<Stress>>,
+    /// Calcul élasto-plastique (`Model::solve_quasi_static`) : déformation plastique cumulée p aux
+    /// points de Gauss de chaque Element, indexée comme `stresses`. Vide sinon.
+    pub equivalent_plastic_strains: Vec<Vec<f64>>,
     /// Thermique : une température par Node.
     pub temperatures: Vec<f64>,
     /// Thermique : flux de chaleur aux points de Gauss de chaque Element.
@@ -230,6 +233,7 @@ mod tests {
             displacements: vec![0.0; 2],
             reactions: vec![0.0; 2],
             stresses: vec![Vec::new()],
+            equivalent_plastic_strains: Vec::new(),
             temperatures: Vec::new(),
             heat_fluxes: Vec::new(),
         };

@@ -82,6 +82,10 @@ pub enum MailleError {
     },
     /// Step transitoire sans aucun incrément.
     NoIncrements,
+    /// Point `point` d'une Amplitude invalide (ou Amplitude sans point).
+    InvalidAmplitude {
+        point: usize,
+    },
     /// θ hors de [½, 1] : en dessous de ½, le schéma n'est stable que pour de petits Δt.
     ThetaOutOfRange {
         theta: f64,
@@ -261,6 +265,10 @@ impl fmt::Display for MailleError {
             Self::NoIncrements => write!(
                 f,
                 "la Step n'a aucun incrément : en demander au moins un"
+            ),
+            Self::InvalidAmplitude { point } => write!(
+                f,
+                "le point {point} de l'Amplitude est invalide : le premier point doit être (0, 0), les temps strictement croissants et toutes les valeurs finies"
             ),
             Self::ThetaOutOfRange { theta } => write!(
                 f,
