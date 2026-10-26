@@ -39,7 +39,6 @@ pub fn incircle(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> f64 {
 /// Deux fois six fois le volume signé du tétraèdre abcd : positif si abcd est un tétraèdre
 /// positif (comme `Tet4`, d est du côté de la normale (b − a) × (c − a)), négatif s'il est
 /// inversé, 0 si les quatre points sont coplanaires (à l'arrondi près).
-#[cfg_attr(not(test), allow(dead_code))] // servira au Delaunay 3D
 pub fn orient3d(a: [f64; 3], b: [f64; 3], c: [f64; 3], d: [f64; 3]) -> f64 {
     let (det, permanent) = det3(sub(b, a), sub(c, a), sub(d, a));
     filter(det, permanent)
@@ -47,7 +46,6 @@ pub fn orient3d(a: [f64; 3], b: [f64; 3], c: [f64; 3], d: [f64; 3]) -> f64 {
 
 /// Positif si e est strictement dans la sphère circonscrite du tétraèdre positif abcd
 /// (`orient3d(a, b, c, d) > 0`), négatif s'il est dehors, 0 s'il est dessus (à l'arrondi près).
-#[cfg_attr(not(test), allow(dead_code))] // servira au Delaunay 3D
 pub fn insphere(a: [f64; 3], b: [f64; 3], c: [f64; 3], d: [f64; 3], e: [f64; 3]) -> f64 {
     // déterminant 4 × 4 des lignes (p − e, |p − e|²), développé selon la dernière colonne
     let rows = [a, b, c, d].map(|p| {
@@ -70,6 +68,12 @@ pub fn insphere(a: [f64; 3], b: [f64; 3], c: [f64; 3], d: [f64; 3], e: [f64; 3])
     }
     // le déterminant est positif pour e dehors quand abcd est positif : on inverse
     filter(-det, permanent)
+}
+
+/// Distance entre deux points de l'espace.
+pub fn distance3(p: [f64; 3], q: [f64; 3]) -> f64 {
+    let v = sub(p, q);
+    (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
 }
 
 fn sub(p: [f64; 3], q: [f64; 3]) -> [f64; 3] {
@@ -251,10 +255,5 @@ mod tests {
             assert!(insphere(a, b, c, d, at(0.9 * radius)) > 0.0);
             assert!(insphere(a, b, c, d, at(1.1 * radius)) < 0.0);
         }
-    }
-
-    fn distance3(p: [f64; 3], q: [f64; 3]) -> f64 {
-        let v = sub(p, q);
-        (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
     }
 }
