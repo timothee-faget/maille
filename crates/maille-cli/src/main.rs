@@ -1,12 +1,15 @@
 //! Cas d'exemple comparés à la solution analytique :
 //! - `console` (par défaut) : console en acier chargée en bout ;
 //! - `kirsch` : plaque trouée de Kirsch, voir `kirsch.rs` ;
-//! - `cylindre` : conduction dans un cylindre creux, voir `cylinder.rs`.
+//! - `cylindre` : conduction dans un cylindre creux, voir `cylinder.rs` ;
+//! - `trempe` : trempe d'une plaque, thermique transitoire, voir `quench.rs`.
 //!
-//! Unités cohérentes (N, mm, MPa en mécanique ; W, mm, K en thermique) : le cœur ne convertit rien.
+//! Unités cohérentes (N, mm, MPa en mécanique ; W, mm, K, et s en transitoire, en thermique) : le
+//! cœur ne convertit rien.
 
 mod cylinder;
 mod kirsch;
+mod quench;
 
 use maille_core::material::Material;
 use maille_core::mesh::{Beam, Dof, Element, Mesh, Node};
@@ -23,9 +26,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None | Some("console") => console(),
         Some("kirsch") => kirsch::run(),
         Some("cylindre") => cylinder::run(),
-        Some(other) => {
-            Err(format!("cas inconnu « {other} » : choisir console, kirsch ou cylindre").into())
-        }
+        Some("trempe") => quench::run(),
+        Some(other) => Err(format!(
+            "cas inconnu « {other} » : choisir console, kirsch, cylindre ou trempe"
+        )
+        .into()),
     }
 }
 
