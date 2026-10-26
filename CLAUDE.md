@@ -10,7 +10,7 @@ Les lire avant toute décision d'architecture. Ce fichier ne les duplique pas.
 
 ## État du projet
 
-M0 à M6 terminés : FEM 1D barre + poutre ; élasticité plane Tri3/Tri6 (dont Kirsch) ; viewer wgpu avec contraintes lissées aux Nodes ; 3D Tet4/Tet10 ; thermique stationnaire (conduction, source, convection) sur triangles et tétraèdres ; solveur creux maison (ligne de ciel + Cuthill-McKee inverse) ; mailleur 2D maison (`maille_core::mesher` : Delaunay contraint, raffinement de Ruppert, segments et arcs, tailles h par bord avec gradation, bords nommés pour les BC) ; thermique transitoire (`Step` à pas fixe, θ-méthode de Euler implicite à Crank-Nicolson, capacité cohérente avec ρ et c du Material, un `Increment` par pas) ; couplage thermo-mécanique séquentiel (champ de températures d'un calcul thermique donné au calcul statique, dilatation α sur Bar, triangles et tétraèdres) ; élasto-plasticité de von Mises en petites déformations (écrouissage isotrope linéaire, retour radial et tangente cohérente, Newton-Raphson par incrément, triangles en déformations planes et tétraèdres). Tout est validé contre l'analytique. Suite de M6 (autres non-linéarités) à décider dans la roadmap (28.41). Workspace Cargo : `crates/maille-core` (lib pure, zéro dépendance), `crates/maille-viewer` (client 2D : wgpu, winit, glyphon) et `crates/maille-cli` (client : `maille-cli kirsch`, `maille-cli cylindre`, `maille-cli trempe`, `maille-cli cylindre-thermo` et `maille-cli cylindre-plastique` maillent leur géométrie puis ouvrent le viewer).
+M0 à M6 terminés : FEM 1D barre + poutre ; élasticité plane Tri3/Tri6 (dont Kirsch) ; viewer wgpu avec contraintes lissées aux Nodes ; 3D Tet4/Tet10 ; thermique stationnaire (conduction, source, convection) sur triangles et tétraèdres ; solveur creux maison (ligne de ciel + Cuthill-McKee inverse) ; mailleur 2D maison (`maille_core::mesher` : Delaunay contraint, raffinement de Ruppert, segments et arcs, tailles h par bord avec gradation, bords nommés pour les BC) ; thermique transitoire (`Step` à pas fixe, θ-méthode de Euler implicite à Crank-Nicolson, capacité cohérente avec ρ et c du Material, un `Increment` par pas) ; couplage thermo-mécanique séquentiel (champ de températures d'un calcul thermique donné au calcul statique, dilatation α sur Bar, triangles et tétraèdres) ; élasto-plasticité de von Mises en petites déformations (écrouissage isotrope linéaire, retour radial et tangente cohérente, Newton-Raphson par incrément, triangles en déformations planes et tétraèdres). Tout est validé contre l'analytique. Suite (M7 à M11 : formats de fichiers, performance, import CAO, mailleur 3D) dans la roadmap (28.41). Workspace Cargo : `crates/maille-core` (lib pure, zéro dépendance), `crates/maille-viewer` (client 2D : wgpu, winit, glyphon) et `crates/maille-cli` (client : `maille-cli kirsch`, `maille-cli cylindre`, `maille-cli trempe`, `maille-cli cylindre-thermo` et `maille-cli cylindre-plastique` maillent leur géométrie puis ouvrent le viewer).
 
 Commandes :
 - `cargo build`
@@ -21,16 +21,24 @@ Commandes :
 ## Périmètre
 
 - Dedans : mécanique statique linéaire, thermique (stationnaire puis transitoire), couplage thermo-mécanique, plasticité
-  de von Mises en petites déformations (M6).
+  de von Mises en petites déformations (M6), fichiers de maillage, de modèle et de résultats (M7), performance du solveur
+  (M8), import CAO en 2D (DXF, M9) et en 3D (STL, mailleur 3D, M10 ; STEP, M11).
 - Dehors, sauf demande explicite : fluides, électromagnétisme, contact général, grandes déformations,
-  calcul parallèle/GPU, import CAO (STEP).
+  calcul parallèle/GPU, interface graphique (viendra une fois les formats stables).
 - Ne pas élargir le périmètre de ta propre initiative. En cas de doute, demander.
 
 ## Ordre de travail
 
-Le plan suit les jalons M0 à M6 de la roadmap (28.41) : FEM 1D, puis 2D, viewer minimal, 3D,
-mailleur 2D, thermique transitoire, non-linéarités. Ne pas sauter de jalon : le viewer et
+Le plan suit les jalons M0 à M11 de la roadmap (28.41) : FEM 1D, puis 2D, viewer minimal, 3D,
+mailleur 2D, thermique transitoire, non-linéarités (M0 à M6, terminés), puis flux de fichiers (M7),
+performance (M8), import DXF 2D (M9), mailleur 3D et viewer 3D (M10), import STEP (M11). Les autres
+non-linéarités (contact, grandes déformations) passent en M12+. Ne pas sauter de jalon : le viewer et
 le mailleur arrivent après un solveur validé, pas avant.
+
+Flux de fichiers cible : CAO (DXF, STL, STEP) → mailleur → fichier de maillage (Gmsh `.msh` 4.1, ensembles nommés =
+physical groups) ; fichier de modèle (TOML) qui y renvoie par son nom ; `maille solve` écrit le fichier de résultats
+(VTK `.vtu` + `.pvd`). Choix du STEP (crate Rust, OpenCASCADE ou outil externe) : spike avant M11, et décision de Tim
+(licence : attention au LGPL).
 
 ## Règles transverses
 
