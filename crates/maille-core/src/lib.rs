@@ -22,6 +22,7 @@ pub mod material;
 pub mod mesh;
 pub mod mesher;
 pub mod model;
+pub mod plasticity;
 pub mod quadrature;
 pub mod results;
 pub mod shape;

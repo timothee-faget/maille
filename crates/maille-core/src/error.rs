@@ -16,6 +16,11 @@ pub enum MailleError {
         name: &'static str,
         value: f64,
     },
+    /// Valeur qui doit être finie et positive ou nulle.
+    NegativeProperty {
+        name: &'static str,
+        value: f64,
+    },
     UnknownNode {
         node: usize,
     },
@@ -196,6 +201,9 @@ impl fmt::Display for MailleError {
                 write!(f, "{name} = {value} : doit être fini et strictement positif")
             }
             Self::NonFinite { name, value } => write!(f, "{name} = {value} : doit être fini"),
+            Self::NegativeProperty { name, value } => {
+                write!(f, "{name} = {value} : doit être fini et positif ou nul")
+            }
             Self::UnknownNode { node } => {
                 write!(f, "le Node {node} n'existe pas dans le Mesh")
             }

@@ -10,7 +10,8 @@ pub(crate) fn positive(name: &'static str, value: f64) -> Result<f64, MailleErro
 
 /// Matériau isotrope. Chaque propriété n'est exigée que par l'analyse qui s'en sert (vérifié par
 /// `Model`) : E (et ν pour les triangles et tétraèdres) en statique, et α pour la dilatation d'un
-/// champ de températures ; k en thermique, et en plus ρ et c en thermique transitoire.
+/// champ de températures ; k en thermique, et en plus ρ et c en thermique transitoire. Avec une
+/// `Plasticity`, le Material est élasto-plastique (calcul par `Model::solve_quasi_static`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Material {
     /// Module d'Young E.
@@ -26,6 +27,19 @@ pub struct Material {
     pub specific_heat: Option<f64>,
     /// Coefficient de dilatation thermique α : déformation par degré (ex. 1/K ; acier : 1,2·10⁻⁵).
     pub expansion: Option<f64>,
+    /// Plasticité de von Mises, absente pour un Material élastique.
+    pub plasticity: Option<Plasticity>,
+}
+
+/// Plasticité de von Mises à écrouissage isotrope linéaire : limite d'élasticité σy(p) = σy0 + H p,
+/// p étant la déformation plastique cumulée.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Plasticity {
+    /// Limite d'élasticité initiale σy0 (une contrainte, ex. MPa).
+    pub yield_stress: f64,
+    /// Module d'écrouissage H (une contrainte, ex. MPa) : pente de σy en fonction de p. H = 0 :
+    /// parfaitement plastique.
+    pub hardening: f64,
 }
 
 impl Material {
@@ -38,6 +52,7 @@ impl Material {
             density: None,
             specific_heat: None,
             expansion: None,
+            plasticity: None,
         })
     }
 
@@ -50,6 +65,7 @@ impl Material {
             density: None,
             specific_heat: None,
             expansion: None,
+            plasticity: None,
         })
     }
 
@@ -85,6 +101,25 @@ impl Material {
         })
     }
 
+    /// Rend le Material élasto-plastique (von Mises) : limite d'élasticité initiale σy0 > 0 et module
+    /// d'écrouissage H ≥ 0 (0 : parfaitement plastique), voir `Plasticity`.
+    pub fn with_plasticity(self, yield_stress: f64, hardening: f64) -> Result<Self, MailleError> {
+        let yield_stress = positive("σy0 (limite d'élasticité)", yield_stress)?;
+        if !(hardening.is_finite() && hardening >= 0.0) {
+            return Err(MailleError::NegativeProperty {
+                name: "H (module d'écrouissage)",
+                value: hardening,
+            });
+        }
+        Ok(Self {
+            plasticity: Some(Plasticity {
+                yield_stress,
+                hardening,
+            }),
+            ..self
+        })
+    }
+
     /// Matériau élastique isotrope pour les triangles et tétraèdres, avec −1 < ν < 0,5.
     pub fn with_poisson(young: f64, poisson: f64) -> Result<Self, MailleError> {
         if !(poisson > -1.0 && poisson < 0.5) {
@@ -111,5 +146,35 @@ impl Section {
         Ok(Self {
             area: positive("A (aire de section)", area)?,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plasticity_needs_a_positive_yield_stress_and_a_non_negative_hardening() {
+        let m = Material::with_poisson(210e3, 0.3).unwrap();
+        let perfect = m.with_plasticity(250.0, 0.0).unwrap();
+        assert_eq!(
+            perfect.plasticity,
+            Some(Plasticity {
+                yield_stress: 250.0,
+                hardening: 0.0
+            })
+        );
+        for sy in [0.0, -1.0, f64::NAN] {
+            assert!(matches!(
+                m.with_plasticity(sy, 0.0),
+                Err(MailleError::InvalidProperty { .. })
+            ));
+        }
+        for h in [-1.0, f64::INFINITY, f64::NAN] {
+            assert!(matches!(
+                m.with_plasticity(250.0, h),
+                Err(MailleError::NegativeProperty { .. })
+            ));
+        }
     }
 }
