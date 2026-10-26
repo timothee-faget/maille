@@ -883,6 +883,13 @@ name = "maille-core"
 version = "0.1.0"
 
 [[package]]
+name = "maille-io"
+version = "0.1.0"
+dependencies = [
+ "maille-core",
+]
+
+[[package]]
 name = "maille-viewer"
 version = "0.1.0"
 dependencies = [
