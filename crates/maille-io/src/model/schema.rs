@@ -46,8 +46,9 @@ pub struct ModelFile {
     pub heat_sources: Vec<HeatSourceDef>,
     #[serde(default)]
     pub convections: Vec<ConvectionDef>,
-    /// Couplage thermo-mécanique : pas encore pris en charge, refusé par `build`.
-    pub temperatures: Option<toml::Value>,
+    /// Couplage thermo-mécanique : les températures d'un calcul thermique dilatent le modèle
+    /// statique. Le CLI lit le fichier `from` et les passe à `build`.
+    pub temperatures: Option<TemperaturesDef>,
     /// Sans `[step]` : calcul linéaire.
     pub step: Option<StepDef>,
 }
@@ -144,4 +145,23 @@ pub struct StepDef {
     pub initial_temperature: Option<f64>,
     /// Quasi-statique seulement : points (t, λ), rampe de 0 à 1 sur la durée par défaut.
     pub amplitude: Option<Vec<[f64; 2]>>,
+}
+
+/// `[temperatures]` : champ de températures lu dans un fichier de résultats thermiques (`.pvd`).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TemperaturesDef {
+    /// Fichier `.pvd` du calcul thermique, sur le même maillage.
+    pub from: String,
+    /// `"last"` (par défaut) ou l'indice de l'incrément, depuis 0.
+    pub increment: Option<IncrementDef>,
+    /// T_ref : température sans contrainte, dans la même unité que les températures du fichier.
+    pub reference: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(untagged)]
+pub enum IncrementDef {
+    Index(usize),
+    Name(String),
 }
