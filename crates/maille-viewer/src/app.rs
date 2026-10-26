@@ -17,8 +17,8 @@ use crate::view::View;
 
 /// Touches et souris, rappelées dans le terminal à l'ouverture.
 pub const HELP: &str =
-    "Touches : 1 von Mises, 2 σxx, 3 σyy, 4 τxy, 5 |u| (thermique : 1 T), D déformée, \
-C colormap, R recadrer, Échap quitter. Souris : molette pour zoomer, glisser pour déplacer.";
+    "Touches : 1 von Mises, 2 σxx, 3 σyy, 4 τxy, 5 |u|, 6 εp si plastique (thermique : 1 T), \
+D déformée, C colormap, R recadrer, Échap quitter. Souris : molette pour zoomer, glisser pour déplacer.";
 
 /// Facteur de zoom par cran de molette.
 const WHEEL_ZOOM: f64 = 1.2;
@@ -121,6 +121,7 @@ impl App {
             PhysicalKey::Code(KeyCode::Digit3 | KeyCode::Numpad3) => Some(2),
             PhysicalKey::Code(KeyCode::Digit4 | KeyCode::Numpad4) => Some(3),
             PhysicalKey::Code(KeyCode::Digit5 | KeyCode::Numpad5) => Some(4),
+            PhysicalKey::Code(KeyCode::Digit6 | KeyCode::Numpad6) => Some(5),
             _ => None,
         };
         if let Some(k) = digit {

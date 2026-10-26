@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use std::fmt;
 
 use maille_core::mesh::{Element, Mesh};
-use maille_core::results::{nodal_stresses, Field, Stress};
+use maille_core::results::{nodal_plastic_strains, nodal_stresses, Field, Stress};
 use maille_core::MailleError;
 
 /// Part de la taille du Mesh occupée par le plus grand déplacement, dans la déformée amplifiée.
@@ -21,6 +21,8 @@ pub enum Quantity {
     /// Norme du déplacement |u|.
     Displacement,
     Temperature,
+    /// Déformation plastique cumulée p.
+    PlasticStrain,
 }
 
 impl Quantity {
@@ -33,6 +35,16 @@ impl Quantity {
         Self::Displacement,
     ];
 
+    /// Champs d'un Field élasto-plastique : les champs mécaniques, puis p (touche 6).
+    pub const PLASTIC: [Self; 6] = [
+        Self::VonMises,
+        Self::SigmaXx,
+        Self::SigmaYy,
+        Self::TauXy,
+        Self::Displacement,
+        Self::PlasticStrain,
+    ];
+
     pub fn label(self) -> &'static str {
         match self {
             Self::VonMises => "von Mises",
@@ -41,6 +53,7 @@ impl Quantity {
             Self::TauXy => "τxy",
             Self::Displacement => "|u|",
             Self::Temperature => "T",
+            Self::PlasticStrain => "εp (déformation plastique cumulée)",
         }
     }
 }
@@ -53,6 +66,8 @@ pub struct Scene {
     stresses: Vec<Stress>,
     /// Vide pour un Field statique.
     temperatures: Vec<f64>,
+    /// Déformation plastique cumulée p aux Nodes, vide hors calcul élasto-plastique.
+    plastic_strains: Vec<f64>,
     /// Triangles à remplir (indices de Nodes, antihoraires) : 1 par Tri3, 4 par Tri6.
     pub triangles: Vec<[u32; 3]>,
     /// Segments du contour des Elements, sans doublon : les arêtes internes des Tri6 découpés
@@ -134,17 +149,25 @@ impl Scene {
             },
             stresses,
             temperatures: field.temperatures.clone(),
+            plastic_strains: if field.equivalent_plastic_strains.is_empty() {
+                Vec::new()
+            } else {
+                nodal_plastic_strains(mesh, field)?
+            },
             triangles,
             edges,
         })
     }
 
-    /// Champs affichables : la température pour un Field thermique, sinon les champs mécaniques.
+    /// Champs affichables : la température pour un Field thermique, sinon les champs mécaniques,
+    /// plus p pour un Field élasto-plastique.
     pub fn quantities(&self) -> &'static [Quantity] {
-        if self.temperatures.is_empty() {
-            &Quantity::MECHANICAL
-        } else {
+        if !self.temperatures.is_empty() {
             &[Quantity::Temperature]
+        } else if !self.plastic_strains.is_empty() {
+            &Quantity::PLASTIC
+        } else {
+            &Quantity::MECHANICAL
         }
     }
 
@@ -167,6 +190,7 @@ impl Scene {
                 .map(|u| u[0].hypot(u[1]))
                 .collect(),
             Quantity::Temperature => self.temperatures.clone(),
+            Quantity::PlasticStrain => self.plastic_strains.clone(),
         }
     }
 
@@ -340,6 +364,24 @@ mod tests {
         }
         let (lo, hi) = range(&norms);
         assert!(lo.abs() < 1e-12 && (hi - 10.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_plastic_field_adds_the_plastic_strain() {
+        let mesh = two_tri3();
+        let elastic = Scene::new(&mesh, &field(&mesh, [100.0, 0.0, 0.0], vec![0.0; 8])).unwrap();
+        assert_eq!(elastic.quantities(), &Quantity::MECHANICAL);
+        // p = 0,01 dans le premier Tri3, 0 dans le second : moyenne 0,005 sur l'arête partagée 0-2
+        let plastic = Field {
+            equivalent_plastic_strains: vec![vec![0.01], vec![0.0]],
+            ..field(&mesh, [100.0, 0.0, 0.0], vec![0.0; 8])
+        };
+        let scene = Scene::new(&mesh, &plastic).unwrap();
+        assert_eq!(scene.quantities(), &Quantity::PLASTIC);
+        let p = scene.values(Quantity::PlasticStrain);
+        for (got, expected) in p.iter().zip([0.005, 0.01, 0.005, 0.0]) {
+            assert!((got - expected).abs() < 1e-15, "{p:?}");
+        }
     }
 
     #[test]

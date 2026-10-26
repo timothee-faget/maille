@@ -3,13 +3,15 @@
 //! - `kirsch` : plaque trouée de Kirsch, voir `kirsch.rs` ;
 //! - `cylindre` : conduction dans un cylindre creux, voir `cylinder.rs` ;
 //! - `trempe` : trempe d'une plaque, thermique transitoire, voir `quench.rs` ;
-//! - `cylindre-thermo` : contraintes thermiques dans un tube épais, voir `thermal_stress.rs`.
+//! - `cylindre-thermo` : contraintes thermiques dans un tube épais, voir `thermal_stress.rs` ;
+//! - `cylindre-plastique` : tube épais qui plastifie sous pression, voir `plastic_tube.rs`.
 //!
 //! Unités cohérentes (N, mm, MPa en mécanique ; W, mm, K en thermique, plus s et kg en transitoire) :
 //! le cœur ne convertit rien.
 
 mod cylinder;
 mod kirsch;
+mod plastic_tube;
 mod quench;
 mod thermal_stress;
 
@@ -30,8 +32,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("cylindre") => cylinder::run(),
         Some("trempe") => quench::run(),
         Some("cylindre-thermo") => thermal_stress::run(),
+        Some("cylindre-plastique") => plastic_tube::run(),
         Some(other) => Err(format!(
-            "cas inconnu « {other} » : choisir console, kirsch, cylindre, trempe ou cylindre-thermo"
+            "cas inconnu « {other} » : choisir console, kirsch, cylindre, trempe, cylindre-thermo ou cylindre-plastique"
         )
         .into()),
     }

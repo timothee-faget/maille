@@ -164,6 +164,8 @@ pub enum MailleError {
     NoStresses,
     /// Le Field ne correspond pas au Mesh (nombre d'Elements ou de points de Gauss).
     FieldMeshMismatch,
+    /// Déformation plastique aux Nodes demandée sur un Field qui n'en a pas.
+    NoPlasticStrains,
     /// Le mailleur bute sur un cas dégénéré à l'arrondi près (points de la géométrie confondus ou
     /// presque cocirculaires).
     MeshingFailed,
@@ -380,6 +382,10 @@ impl fmt::Display for MailleError {
             Self::FieldMeshMismatch => write!(
                 f,
                 "le Field ne vient pas de ce Mesh : passer le Field renvoyé par la résolution du Model construit sur ce Mesh"
+            ),
+            Self::NoPlasticStrains => write!(
+                f,
+                "le Field n'a pas de déformation plastique : elle n'existe que dans les Increments de Model::solve_quasi_static"
             ),
             Self::MeshingFailed => write!(
                 f,

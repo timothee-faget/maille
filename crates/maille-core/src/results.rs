@@ -128,13 +128,68 @@ pub fn nodal_stresses(mesh: &Mesh, field: &Field) -> Result<Vec<Stress>, MailleE
     if !field.temperatures.is_empty() {
         return Err(MailleError::NoStresses);
     }
-    if field.stresses.len() != mesh.elements.len() {
+    // (σxx, σyy, σzz, τxy, τyz, τxz) de chaque point de Gauss
+    let values: Vec<Vec<[f64; 6]>> = field
+        .stresses
+        .iter()
+        .map(|points| {
+            points
+                .iter()
+                .map(|p| {
+                    [
+                        p.sigma_xx, p.sigma_yy, p.sigma_zz, p.tau_xy, p.tau_yz, p.tau_xz,
+                    ]
+                })
+                .collect()
+        })
+        .collect();
+    Ok(mesh
+        .nodes
+        .iter()
+        .zip(smooth(mesh, &values)?)
+        .map(|(node, s)| Stress {
+            x: node.x,
+            y: node.y,
+            z: node.z,
+            sigma_xx: s[0],
+            sigma_yy: s[1],
+            sigma_zz: s[2],
+            tau_xy: s[3],
+            tau_yz: s[4],
+            tau_xz: s[5],
+        })
+        .collect())
+}
+
+/// Déformation plastique cumulée p lissée aux Nodes, comme `nodal_stresses`. L'extrapolation
+/// peut passer sous zéro au bord d'une zone plastique : la valeur est ramenée à 0.
+pub fn nodal_plastic_strains(mesh: &Mesh, field: &Field) -> Result<Vec<f64>, MailleError> {
+    if field.equivalent_plastic_strains.is_empty() {
+        return Err(MailleError::NoPlasticStrains);
+    }
+    let values: Vec<Vec<[f64; 1]>> = field
+        .equivalent_plastic_strains
+        .iter()
+        .map(|points| points.iter().map(|&p| [p]).collect())
+        .collect();
+    Ok(smooth(mesh, &values)?
+        .into_iter()
+        .map(|[p]| p.max(0.0))
+        .collect())
+}
+
+/// Valeurs aux points de Gauss (`values[e][g]`, N composantes) extrapolées vers les Nodes de chaque
+/// Element, puis moyennées entre les Elements qui partagent un Node ; zéro pour un Node isolé.
+fn smooth<const N: usize>(
+    mesh: &Mesh,
+    values: &[Vec<[f64; N]>],
+) -> Result<Vec<[f64; N]>, MailleError> {
+    if values.len() != mesh.elements.len() {
         return Err(MailleError::FieldMeshMismatch);
     }
-    // somme de (σxx, σyy, σzz, τxy, τyz, τxz) et nombre d'Elements, par Node
-    let mut sum = vec![[0.0; 6]; mesh.nodes.len()];
+    let mut sum = vec![[0.0; N]; mesh.nodes.len()];
     let mut count = vec![0_usize; mesh.nodes.len()];
-    for (e, points) in mesh.elements.iter().zip(&field.stresses) {
+    for (e, points) in mesh.elements.iter().zip(values) {
         let extrapolation: &[&[f64]] = match e {
             Element::Tri3(_) => &TRI3_EXTRAPOLATION,
             Element::Tri6(_) => &TRI6_EXTRAPOLATION,
@@ -147,34 +202,17 @@ pub fn nodal_stresses(mesh: &Mesh, field: &Field) -> Result<Vec<Stress>, MailleE
         }
         for (&n, weights) in e.nodes().iter().zip(extrapolation) {
             for (p, w) in points.iter().zip(weights.iter()) {
-                let components = [
-                    p.sigma_xx, p.sigma_yy, p.sigma_zz, p.tau_xy, p.tau_yz, p.tau_xz,
-                ];
-                for (s, c) in sum[n].iter_mut().zip(components) {
+                for (s, c) in sum[n].iter_mut().zip(p) {
                     *s += w * c;
                 }
             }
             count[n] += 1;
         }
     }
-    Ok(mesh
-        .nodes
-        .iter()
-        .zip(sum.iter().zip(&count))
-        .map(|(node, (s, &c))| {
-            let c = c.max(1) as f64;
-            Stress {
-                x: node.x,
-                y: node.y,
-                z: node.z,
-                sigma_xx: s[0] / c,
-                sigma_yy: s[1] / c,
-                sigma_zz: s[2] / c,
-                tau_xy: s[3] / c,
-                tau_yz: s[4] / c,
-                tau_xz: s[5] / c,
-            }
-        })
+    Ok(sum
+        .into_iter()
+        .zip(count)
+        .map(|(s, c)| s.map(|v| v / c.max(1) as f64))
         .collect())
 }
 

@@ -9,7 +9,7 @@ use maille_core::mesh::{Dof, Element, Mesh, Node, PlaneState, Tet10, Tet4, Tri3,
 use maille_core::mesher::{triangulate, Curve, Geometry, MeshOptions};
 use maille_core::model::{Amplitude, Analysis, Bc, Load, Model, Step};
 use maille_core::plasticity::{PlasticState, VonMises};
-use maille_core::results::{Increment, Stress};
+use maille_core::results::{nodal_plastic_strains, Increment, Stress};
 use maille_core::MailleError;
 
 const E: f64 = 210e3;
@@ -319,6 +319,11 @@ fn homogeneous_strain_history_matches_the_material_point() {
             }
         }
         assert!(state.p > 0.0, "{name} : le chemin doit plastifier");
+        // p uniforme : le lissage aux Nodes la retrouve partout
+        let last = &history.last().unwrap().field;
+        for p in nodal_plastic_strains(&mesh, last).unwrap() {
+            assert!((p - state.p).abs() < 1e-9, "{name} : p = {p} aux Nodes");
+        }
     }
 }
 
@@ -532,6 +537,14 @@ fn plasticity_inputs_are_typed_errors() {
     assert_eq!(
         plane_stress.solve_quasi_static(&step, &ramp),
         Err(MailleError::UnsupportedPlasticElement { element: 0 })
+    );
+
+    let linear = Model::new(mesh(elastic, PlaneState::Strain), bcs(), Vec::new())
+        .and_then(|m| m.solve())
+        .unwrap();
+    assert_eq!(
+        nodal_plastic_strains(&mesh(elastic, PlaneState::Strain), &linear),
+        Err(MailleError::NoPlasticStrains)
     );
 
     let model = Model::new(mesh(plastic(H), PlaneState::Strain), bcs(), Vec::new()).unwrap();
