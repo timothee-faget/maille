@@ -59,9 +59,15 @@ impl SkylineMatrix {
         self.data[self.start[i] + j - self.first[i]] += v;
     }
 
-    /// Résout A x = b par Cholesky A = L Lᵀ, L écrasant A dans le même profil.
+    /// Résout A x = b par Cholesky, voir `factorize`.
+    pub fn cholesky_solve(self, b: &[f64]) -> Result<Vec<f64>, MailleError> {
+        Ok(self.factorize()?.solve(b))
+    }
+
+    /// Factorisation de Cholesky A = L Lᵀ, L écrasant A dans le même profil : une fois faite, elle
+    /// résout A x = b pour autant de seconds membres b qu'on veut.
     /// Renvoie `Singular` si un pivot est négligeable devant la plus grande diagonale.
-    pub fn cholesky_solve(mut self, b: &[f64]) -> Result<Vec<f64>, MailleError> {
+    pub fn factorize(mut self) -> Result<Cholesky, MailleError> {
         let n = self.n();
         let max_diag = (0..n).map(|i| self.get(i, i)).fold(0.0_f64, f64::max);
         let tol = 1e-12 * max_diag;
@@ -84,25 +90,36 @@ impl SkylineMatrix {
                 }
             }
         }
+        Ok(Cholesky(self))
+    }
+}
 
+/// Facteur L de Cholesky, dans le profil de la matrice factorisée.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Cholesky(SkylineMatrix);
+
+impl Cholesky {
+    /// Résout L Lᵀ x = b.
+    pub fn solve(&self, b: &[f64]) -> Vec<f64> {
+        let l = &self.0;
         // L y = b
         let mut x = b.to_vec();
-        for i in 0..n {
-            let row = self.row(i);
-            let (fi, diag) = (self.first[i], row[i - self.first[i]]);
+        for i in 0..l.n() {
+            let row = l.row(i);
+            let (fi, diag) = (l.first[i], row[i - l.first[i]]);
             let s: f64 = (fi..i).map(|k| row[k - fi] * x[k]).sum();
             x[i] = (x[i] - s) / diag;
         }
         // Lᵀ x = y, par colonne : la ligne i de L est la colonne i de Lᵀ
-        for i in (0..n).rev() {
-            let row = self.row(i);
-            let fi = self.first[i];
+        for i in (0..l.n()).rev() {
+            let row = l.row(i);
+            let fi = l.first[i];
             x[i] /= row[i - fi];
             for k in fi..i {
                 x[k] -= row[k - fi] * x[i];
             }
         }
-        Ok(x)
+        x
     }
 }
 
@@ -235,6 +252,20 @@ mod tests {
         );
         for (a, b) in x_full.iter().zip(&x_sky) {
             assert!((a - b).abs() < 1e-13);
+        }
+    }
+
+    #[test]
+    fn one_factorization_solves_several_right_hand_sides() {
+        let a: [&[f64]; 3] = [&[4.0, 1.0, 0.0], &[1.0, 3.0, 1.0], &[0.0, 1.0, 2.0]];
+        let factor = dense(&a).factorize().unwrap();
+        for b in [[1.0, 0.0, 0.0], [0.5, -2.0, 3.0]] {
+            let (x, direct) = (factor.solve(&b), dense(&a).cholesky_solve(&b).unwrap());
+            for (row, bi) in a.iter().zip(b) {
+                let ax: f64 = row.iter().zip(&x).map(|(a, x)| a * x).sum();
+                assert!((ax - bi).abs() < 1e-14);
+            }
+            assert!(x.iter().zip(&direct).all(|(a, b)| (a - b).abs() < 1e-15));
         }
     }
 

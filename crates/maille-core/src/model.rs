@@ -7,7 +7,7 @@ use crate::error::MailleError;
 use crate::material::positive;
 use crate::mesh::{Dof, Element, Mesh};
 use crate::results::Field;
-use crate::solve::{reverse_cuthill_mckee, SkylineMatrix};
+use crate::solve::{reverse_cuthill_mckee, Cholesky, SkylineMatrix};
 
 /// Condition aux limites de Dirichlet : valeur imposée à un DOF d'un Node.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -258,10 +258,7 @@ impl Model {
             fixed[i] = true;
         }
 
-        let uf = solve_free(&dofs, &matrix, &fixed, &u, &f)?;
-        for (i, v) in (0..n).filter(|&i| !fixed[i]).zip(uf) {
-            u[i] = v;
-        }
+        FreeSystem::new(&dofs, &matrix, &fixed, &u)?.solve(&f, &mut u);
 
         let mut reactions = vec![0.0; n];
         for (i, dofs) in dofs.iter().enumerate() {
@@ -313,75 +310,96 @@ fn dof_index(mesh: &Mesh, analysis: Analysis, node: usize, dof: Dof) -> Result<u
     }
 }
 
-/// Résout K_ff u_f = F_f − K_fc u_c, avec `dofs[i]` les DOF globaux de l'Element i et `matrix(i)`
-/// sa matrice. Les DOF libres sont renumérotés par Cuthill-McKee inverse (graphe : deux DOF sont
-/// voisins s'ils partagent un Element) avant l'assemblage en ligne de ciel.
-/// Renvoie u_f dans l'ordre croissant des DOF libres.
-fn solve_free(
-    dofs: &[Vec<usize>],
-    matrix: &impl Fn(usize) -> Vec<Vec<f64>>,
-    fixed: &[bool],
-    u: &[f64],
-    f: &[f64],
-) -> Result<Vec<f64>, MailleError> {
-    // free[g] : indice du DOF global g parmi les DOF libres
-    let mut free = vec![None; fixed.len()];
-    let mut count = 0;
-    for (g, _) in fixed.iter().enumerate().filter(|(_, &c)| !c) {
-        free[g] = Some(count);
-        count += 1;
-    }
-    if count == 0 {
-        return Ok(Vec::new());
-    }
-    let element_free: Vec<Vec<usize>> = dofs
-        .iter()
-        .map(|d| d.iter().filter_map(|&g| free[g]).collect())
-        .collect();
+/// Système K_ff u_f = F_f − K_fc u_c factorisé une fois, pour résoudre autant de seconds membres F
+/// qu'on veut tant que K et les valeurs imposées u_c ne changent pas.
+struct FreeSystem {
+    /// free[g] : indice du DOF global g parmi les DOF libres
+    free: Vec<Option<usize>>,
+    /// rank[a] : position du DOF libre a dans la numérotation du solveur
+    rank: Vec<usize>,
+    factor: Cholesky,
+    /// K_fc u_c, dans la numérotation du solveur
+    coupling: Vec<f64>,
+}
 
-    let mut adjacency = vec![Vec::new(); count];
-    for local in &element_free {
-        for &a in local {
-            adjacency[a].extend(local.iter().filter(|&&b| b != a));
+impl FreeSystem {
+    /// `dofs[i]` : DOF globaux de l'Element i, `matrix(i)` : sa matrice, `u` : valeurs imposées
+    /// aux DOF `fixed`. Les DOF libres sont renumérotés par Cuthill-McKee inverse (graphe : deux DOF
+    /// sont voisins s'ils partagent un Element) avant l'assemblage en ligne de ciel.
+    fn new(
+        dofs: &[Vec<usize>],
+        matrix: &impl Fn(usize) -> Vec<Vec<f64>>,
+        fixed: &[bool],
+        u: &[f64],
+    ) -> Result<Self, MailleError> {
+        let mut free = vec![None; fixed.len()];
+        let mut count = 0;
+        for (g, _) in fixed.iter().enumerate().filter(|(_, &c)| !c) {
+            free[g] = Some(count);
+            count += 1;
         }
-    }
-    for neighbours in &mut adjacency {
-        neighbours.sort_unstable();
-        neighbours.dedup();
-    }
-    // rank[a] : position du DOF libre a dans la numérotation du solveur
-    let mut rank = vec![0; count];
-    for (r, a) in reverse_cuthill_mckee(&adjacency).into_iter().enumerate() {
-        rank[a] = r;
-    }
-    let mut first: Vec<usize> = (0..count).collect();
-    for (a, neighbours) in adjacency.iter().enumerate() {
-        for &b in neighbours {
-            first[rank[a]] = first[rank[a]].min(rank[b]);
-        }
-    }
+        let element_free: Vec<Vec<usize>> = dofs
+            .iter()
+            .map(|d| d.iter().filter_map(|&g| free[g]).collect())
+            .collect();
 
-    let mut kff = SkylineMatrix::zeros(first);
-    let mut rhs = vec![0.0; count];
-    for (g, a) in free.iter().enumerate() {
-        if let Some(a) = a {
-            rhs[rank[*a]] += f[g];
+        let mut adjacency = vec![Vec::new(); count];
+        for local in &element_free {
+            for &a in local {
+                adjacency[a].extend(local.iter().filter(|&&b| b != a));
+            }
         }
-    }
-    for (i, dofs) in dofs.iter().enumerate() {
-        for (row, &gi) in matrix(i).iter().zip(dofs) {
-            let Some(a) = free[gi] else { continue };
-            for (k, &gj) in row.iter().zip(dofs) {
-                match free[gj] {
-                    // K symétrique : chaque paire (i, j) est ajoutée une fois, en dessous de la diagonale
-                    Some(b) if rank[b] <= rank[a] => kff.add(rank[a], rank[b], *k),
-                    Some(_) => {}
-                    None => rhs[rank[a]] -= k * u[gj],
+        for neighbours in &mut adjacency {
+            neighbours.sort_unstable();
+            neighbours.dedup();
+        }
+        let mut rank = vec![0; count];
+        for (r, a) in reverse_cuthill_mckee(&adjacency).into_iter().enumerate() {
+            rank[a] = r;
+        }
+        let mut first: Vec<usize> = (0..count).collect();
+        for (a, neighbours) in adjacency.iter().enumerate() {
+            for &b in neighbours {
+                first[rank[a]] = first[rank[a]].min(rank[b]);
+            }
+        }
+
+        let mut kff = SkylineMatrix::zeros(first);
+        let mut coupling = vec![0.0; count];
+        for (i, dofs) in dofs.iter().enumerate() {
+            for (row, &gi) in matrix(i).iter().zip(dofs) {
+                let Some(a) = free[gi] else { continue };
+                for (k, &gj) in row.iter().zip(dofs) {
+                    match free[gj] {
+                        // K symétrique : chaque paire (i, j) est ajoutée une fois, en dessous de la diagonale
+                        Some(b) if rank[b] <= rank[a] => kff.add(rank[a], rank[b], *k),
+                        Some(_) => {}
+                        None => coupling[rank[a]] += k * u[gj],
+                    }
                 }
             }
         }
+        Ok(Self {
+            free,
+            rank,
+            factor: kff.factorize()?,
+            coupling,
+        })
     }
 
-    let x = kff.cholesky_solve(&rhs)?;
-    Ok(rank.iter().map(|&r| x[r]).collect())
+    /// Résout K_ff u_f = F_f − K_fc u_c (`f` : vecteur global) et écrit u_f dans `u`.
+    fn solve(&self, f: &[f64], u: &mut [f64]) {
+        let mut rhs: Vec<f64> = self.coupling.iter().map(|c| -c).collect();
+        for (g, a) in self.free.iter().enumerate() {
+            if let Some(a) = a {
+                rhs[self.rank[*a]] += f[g];
+            }
+        }
+        let x = self.factor.solve(&rhs);
+        for (g, a) in self.free.iter().enumerate() {
+            if let Some(a) = a {
+                u[g] = x[self.rank[*a]];
+            }
+        }
+    }
 }
