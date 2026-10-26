@@ -2,6 +2,7 @@
 //! - `maille solve modele.toml` résout un modèle (fichiers `.msh` et `.toml`) et écrit les
 //!   résultats (`.vtu` et `.pvd`), voir `files.rs` ;
 //! - `maille view resultats.pvd` affiche des résultats, voir `files.rs` ;
+//! - `maille mesh dessin.dxf --size h` maille un dessin DXF 2D, voir `mesh.rs` ;
 //! - les cas d'exemple ci-dessous, comparés à la solution analytique.
 //!
 //! Cas d'exemple :
@@ -18,6 +19,7 @@
 mod cylinder;
 mod files;
 mod kirsch;
+mod mesh;
 mod plastic_tube;
 mod quench;
 mod thermal_stress;
@@ -42,6 +44,8 @@ const USAGE: &str = "maille : calcul par éléments finis, mécanique et thermiq
 Usage :
   maille solve <modele.toml> [-o <préfixe>]   résout un modèle, écrit <préfixe>.pvd et les .vtu
   maille view <resultats.pvd|.vtu> [indice]   affiche un incrément (le dernier par défaut)
+  maille mesh <dessin.dxf> --size <h> [--quadratic] [-o <maillage.msh>]
+                                              maille un dessin DXF 2D (calque = nom de bord)
 
 Cas d'exemple, comparés à la solution analytique :
   maille console | kirsch | cylindre | trempe | cylindre-thermo | cylindre-plastique
@@ -65,6 +69,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some("solve") => files::solve(&args[1..]),
         Some("view") => files::view(&args[1..]),
+        Some("mesh") => mesh::mesh(&args[1..]),
         Some("console") => console(),
         Some("kirsch") => kirsch::run(),
         Some("cylindre") => cylinder::run(),
@@ -72,7 +77,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some("cylindre-thermo") => thermal_stress::run(),
         Some("cylindre-plastique") => plastic_tube::run(),
         Some(other) => Err(format!(
-            "commande inconnue « {other} » : choisir solve, view, console, kirsch, cylindre, trempe, cylindre-thermo ou cylindre-plastique (maille help pour le détail)"
+            "commande inconnue « {other} » : choisir solve, view, mesh, console, kirsch, cylindre, trempe, cylindre-thermo ou cylindre-plastique (maille help pour le détail)"
         )
         .into()),
     }
