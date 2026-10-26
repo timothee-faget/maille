@@ -1,0 +1,38 @@
+# Plaque rectangulaire en traction, contraintes planes.
+#
+# La plaque fait 4 mm × 2 mm. Son bord gauche est bloqué en x, son bord droit est tiré de 0,004 mm
+# (allongement de 0,1 %), et le bord bas empêche le mouvement de corps rigide en y.
+# Solution exacte : ux = 0,001 x, uy = -ν 0,001 y, contrainte uniforme σx = E × 0,001 = 210 MPa.
+#
+# Lancer : maille solve traction.toml     puis : maille view traction.pvd
+
+# Unités cohérentes de votre choix : Maille ne convertit rien. Ici : N, mm, MPa.
+units = "N, mm, MPa"
+mesh = "plaque.msh"
+analysis = "static"
+
+[materials.acier]
+young = 210e3
+poisson = 0.3
+
+# Chaque Element doit avoir une section. « domaine » est le Set de tous les triangles.
+[[sections]]
+set = "domaine"
+material = "acier"
+thickness = 2.0
+plane_state = "stress"
+
+[[bcs]]
+set = "gauche"
+dof = "ux"
+value = 0.0
+
+[[bcs]]
+set = "droite"
+dof = "ux"
+value = 0.004
+
+[[bcs]]
+set = "bas"
+dof = "uy"
+value = 0.0

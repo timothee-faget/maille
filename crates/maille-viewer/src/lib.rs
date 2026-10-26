@@ -10,6 +10,8 @@ mod render;
 mod scene;
 mod view;
 
+pub use scene::NodalResults;
+
 use maille_core::mesh::Mesh;
 use maille_core::results::Field;
 
@@ -23,7 +25,21 @@ pub fn show(mesh: &Mesh, field: &Field) -> Result<(), Box<dyn std::error::Error>
         // un seul des deux est rempli, selon l'analyse
         field.displacements.len() + field.temperatures.len()
     );
-    let scene = scene::Scene::new(mesh, field)?;
+    run(title, scene::Scene::new(mesh, field)?)
+}
+
+/// Ouvre une fenêtre sur un résultat déjà lissé aux Nodes (relu d'un `.vtu`). Mêmes erreurs que
+/// `show` : maillage qui n'est pas fait de triangles, champs de tailles incohérentes.
+pub fn show_nodal(results: &NodalResults) -> Result<(), Box<dyn std::error::Error>> {
+    let title = format!(
+        "Maille — {} Elements, {} Nodes",
+        results.cells.len(),
+        results.nodes.len()
+    );
+    run(title, scene::Scene::from_nodal(results)?)
+}
+
+fn run(title: String, scene: scene::Scene) -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", app::HELP);
     let event_loop = winit::event_loop::EventLoop::new()?;
     let mut app = app::App::new(title, scene);

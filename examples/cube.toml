@@ -1,0 +1,40 @@
+# Cube de 1 mm de côté en traction, 3D (6 tétraèdres Tet4).
+#
+# La face x = 0 est bloquée en x, la face x = 1 est tirée de 0,01 mm (allongement de 1 %). Les faces
+# y = 0 et z = 0 empêchent le mouvement de corps rigide. Solution exacte : ux = 0,01 x,
+# uy = -ν 0,01 y, uz = -ν 0,01 z.
+#
+# Lancer : maille solve cube.toml     (le viewer de Maille est 2D : ouvrir cube.pvd dans ParaView)
+
+units = "N, mm, MPa"
+mesh = "cube.msh"
+analysis = "static"
+
+[materials.acier]
+young = 200e3
+poisson = 0.25
+
+# En 3D, ni thickness ni plane_state.
+[[sections]]
+set = "domaine"
+material = "acier"
+
+[[bcs]]
+set = "x0"
+dof = "ux"
+value = 0.0
+
+[[bcs]]
+set = "x1"
+dof = "ux"
+value = 0.01
+
+[[bcs]]
+set = "y0"
+dof = "uy"
+value = 0.0
+
+[[bcs]]
+set = "z0"
+dof = "uz"
+value = 0.0

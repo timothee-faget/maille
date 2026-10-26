@@ -1,0 +1,32 @@
+# Trempe d'une plaque d'acier, thermique transitoire.
+#
+# La plaque, épaisse de 20 mm (en x), est à 850 °C. À t = 0 ses deux faces x = 0 et x = 20 passent à
+# 20 °C. Les bords haut et bas sont isolés (par défaut, sans rien écrire). La température ne dépend
+# que de x : série de Fourier, comparée à la solution du calcul dans les tests.
+#
+# Lancer : maille solve trempe.toml     puis : maille view trempe.pvd 50
+
+# Unités : W, mm, K, s, kg (ρ en kg/mm³, c en J/(kg·K), k en W/(mm·K)).
+units = "W, mm, K, s, kg"
+mesh = "trempe.msh"
+analysis = "thermal"
+
+[materials.acier]
+conductivity = 0.05
+density = 7.85e-6
+specific_heat = 460.0
+
+[[sections]]
+set = "domaine"
+material = "acier"
+
+[[bcs]]
+set = "trempe"
+dof = "t"
+value = 20.0
+
+[step]
+kind = "transient"
+duration = 10.0
+increments = 200
+initial_temperature = 850.0

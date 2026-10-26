@@ -14,27 +14,32 @@ Chaque élément et chaque physique sont validés contre une solution analytique
 - Plasticité de von Mises en petites déformations (écrouissage isotrope linéaire)
 - Mailleur 2D (Delaunay contraint, raffinement de Ruppert) et viewer natif (wgpu)
 
-Le projet est en cours de développement : l'API n'est pas stable et il n'y a pas encore de format de fichier
-d'entrée.
+Le projet est en cours de développement : l'API n'est pas stable.
 
 ## Démarrer
 
 ```sh
 cargo build --release
-cargo run --release -p maille-cli -- kirsch
+cd examples
+../target/release/maille solve traction.toml     # maillage .msh + modèle .toml → résultats .vtu/.pvd
+../target/release/maille view traction.pvd       # ouvre le viewer 2D
 ```
 
-Les cas disponibles sont `console`, `kirsch`, `cylindre`, `trempe`, `cylindre-thermo` et
-`cylindre-plastique`. Chacun maille sa géométrie, compare le résultat à la solution analytique, puis ouvre le
-viewer.
+Le flux de travail (maillage Gmsh `.msh`, modèle `.toml`, résultats VTK lisibles par ParaView) et les exemples
+sont décrits dans [`examples/README.md`](examples/README.md).
+
+Des cas d'exemple, qui maillent leur géométrie, comparent le résultat à la solution analytique, puis ouvrent le
+viewer : `maille console`, `kirsch`, `cylindre`, `trempe`, `cylindre-thermo` et `cylindre-plastique`
+(par exemple `cargo run --release -p maille-cli -- kirsch`).
 
 ## Organisation
 
 | Crate | Rôle |
 |---|---|
 | `maille-core` | Cœur de calcul pur (maillage, éléments, assemblage, solveur), sans dépendance ni I/O |
+| `maille-io` | Fichiers : maillage Gmsh `.msh`, modèle TOML, résultats VTK |
 | `maille-viewer` | Viewer 2D (wgpu, winit, glyphon) |
-| `maille-cli` | Cas d'exemple en ligne de commande |
+| `maille-cli` | Le binaire `maille` : `solve`, `view` et les cas d'exemple |
 
 ## Unités
 

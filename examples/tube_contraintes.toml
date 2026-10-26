@@ -1,0 +1,38 @@
+# Tube épais chauffé de l'intérieur : étape 2, les contraintes thermiques.
+#
+# Même maillage que tube_thermique.toml. Les températures du calcul thermique dilatent le tube
+# (déformations planes, surfaces libres). Solution de Timoshenko et Goodier.
+#
+# Lancer d'abord : maille solve tube_thermique.toml
+# Puis :           maille solve tube_contraintes.toml     et : maille view tube_contraintes.pvd
+
+units = "N, mm, MPa"
+mesh = "tube.msh"
+analysis = "static"
+
+[materials.acier]
+young = 210e3
+poisson = 0.3
+expansion = 1.2e-5          # coefficient de dilatation α, en 1/K
+
+[[sections]]
+set = "domaine"
+material = "acier"
+plane_state = "strain"
+
+# Symétries du quart de section, en appui glissant.
+[[bcs]]
+set = "sym_x"
+dof = "uy"
+value = 0.0
+
+[[bcs]]
+set = "sym_y"
+dof = "ux"
+value = 0.0
+
+# Couplage : températures lues dans les résultats d'un calcul thermique sur le même maillage.
+[temperatures]
+from = "tube_thermique.pvd"
+increment = "last"          # "last" ou un indice entier, depuis 0
+reference = 20.0            # T_ref : température sans contrainte

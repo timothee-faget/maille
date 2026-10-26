@@ -70,6 +70,42 @@ pub struct Scene {
     pub edges: Vec<[u32; 2]>,
 }
 
+/// Résultat lissé aux Nodes, tel que le relit un `.vtu` : une valeur par Node, pas de points de
+/// Gauss. Un champ statique remplit `displacements` et `stresses`, un champ thermique
+/// `temperatures` ; `plastic_strains` reste vide hors calcul élasto-plastique.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct NodalResults {
+    /// Positions (x, y).
+    pub nodes: Vec<[f64; 2]>,
+    /// Triangles : 3 Nodes (Tri3) ou 6 (Tri6, sommets puis milieux 0-1, 1-2, 2-0).
+    pub cells: Vec<Vec<usize>>,
+    pub displacements: Vec<[f64; 2]>,
+    pub stresses: Vec<Stress>,
+    pub temperatures: Vec<f64>,
+    pub plastic_strains: Vec<f64>,
+}
+
+/// Ajoute les triangles à remplir et le contour d'un triangle de 3 (Tri3) ou 6 Nodes (Tri6).
+/// Faux, sans rien ajouter, pour un autre nombre de Nodes.
+fn add_cell(triangles: &mut Vec<[u32; 3]>, edges: &mut HashSet<[u32; 2]>, n: &[u32]) -> bool {
+    let (tris, outline): (&[[usize; 3]], &[[usize; 2]]) = match n.len() {
+        3 => (&[[0, 1, 2]], &[[0, 1], [1, 2], [2, 0]]),
+        // sommets 0, 1, 2 puis milieux 3 (0-1), 4 (1-2), 5 (2-0)
+        6 => (
+            &[[0, 3, 5], [3, 1, 4], [5, 4, 2], [3, 4, 5]],
+            &[[0, 3], [3, 1], [1, 4], [4, 2], [2, 5], [5, 0]],
+        ),
+        _ => return false,
+    };
+    triangles.extend(tris.iter().map(|t| t.map(|k| n[k])));
+    edges.extend(
+        outline
+            .iter()
+            .map(|&[a, b]| [n[a].min(n[b]), n[a].max(n[b])]),
+    );
+    true
+}
+
 /// Raison pour laquelle un Mesh ne peut pas être affiché.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SceneError {
@@ -115,23 +151,13 @@ impl Scene {
         let mut edges = HashSet::new();
         for e in &mesh.elements {
             let n: Vec<u32> = e.nodes().iter().map(|&i| i as u32).collect();
-            let (tris, outline): (&[[usize; 3]], &[[usize; 2]]) = match e {
-                Element::Tri3(_) => (&[[0, 1, 2]], &[[0, 1], [1, 2], [2, 0]]),
-                // sommets 0, 1, 2 puis milieux 3 (0-1), 4 (1-2), 5 (2-0)
-                Element::Tri6(_) => (
-                    &[[0, 3, 5], [3, 1, 4], [5, 4, 2], [3, 4, 5]],
-                    &[[0, 3], [3, 1], [1, 4], [4, 2], [2, 5], [5, 0]],
-                ),
+            match e {
                 // déjà refusé par `nodal_stresses`
                 Element::Bar(_) | Element::Beam(_) => return Err(MailleError::NoStresses.into()),
                 Element::Tet4(_) | Element::Tet10(_) => return Err(SceneError::Solid),
-            };
-            triangles.extend(tris.iter().map(|t| t.map(|k| n[k])));
-            edges.extend(
-                outline
-                    .iter()
-                    .map(|&[a, b]| [n[a].min(n[b]), n[a].max(n[b])]),
-            );
+                Element::Tri3(_) | Element::Tri6(_) => {}
+            }
+            add_cell(&mut triangles, &mut edges, &n);
         }
         let mut edges: Vec<[u32; 2]> = edges.into_iter().collect();
         edges.sort_unstable();
@@ -149,6 +175,46 @@ impl Scene {
             } else {
                 nodal_equivalent_plastic_strains(mesh, field)?
             },
+            triangles,
+            edges,
+        })
+    }
+
+    /// Scène d'un résultat déjà lissé aux Nodes (relu d'un `.vtu`). Erreur si une cellule n'est pas
+    /// un triangle ou si un champ n'a pas une valeur par Node.
+    pub fn from_nodal(r: &NodalResults) -> Result<Self, SceneError> {
+        let n = r.nodes.len();
+        let thermal = !r.temperatures.is_empty();
+        let sized = |len: usize, wanted: usize| len == 0 || len == wanted;
+        if (thermal && r.temperatures.len() != n)
+            || (!thermal && (r.stresses.len() != n || r.displacements.len() != n))
+            || !sized(r.plastic_strains.len(), n)
+        {
+            return Err(MailleError::FieldMeshMismatch.into());
+        }
+        let mut triangles = Vec::new();
+        let mut edges = HashSet::new();
+        for cell in &r.cells {
+            let ids: Vec<u32> = cell.iter().map(|&i| i as u32).collect();
+            if ids.iter().any(|&i| i as usize >= n) {
+                return Err(MailleError::FieldMeshMismatch.into());
+            }
+            if !add_cell(&mut triangles, &mut edges, &ids) {
+                return Err(SceneError::Solid);
+            }
+        }
+        let mut edges: Vec<[u32; 2]> = edges.into_iter().collect();
+        edges.sort_unstable();
+        Ok(Self {
+            nodes: r.nodes.clone(),
+            displacements: if thermal {
+                vec![[0.0; 2]; n]
+            } else {
+                r.displacements.clone()
+            },
+            stresses: r.stresses.clone(),
+            temperatures: r.temperatures.clone(),
+            plastic_strains: r.plastic_strains.clone(),
             triangles,
             edges,
         })
@@ -478,5 +544,82 @@ mod tests {
         let mesh = Mesh::new(nodes, vec![Element::Tet4(tet)]).unwrap();
         let field = field(&mesh, [0.0; 3], vec![0.0; 12]);
         assert_eq!(Scene::new(&mesh, &field).err(), Some(SceneError::Solid));
+    }
+
+    /// Un Tri6 à champ de contrainte uniforme, comme `Scene::new` le voit et comme un `.vtu` le donne.
+    fn nodal_triangle() -> NodalResults {
+        let stress = Stress {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            sigma_xx: 3.0,
+            sigma_yy: 0.0,
+            sigma_zz: 0.0,
+            tau_xy: 0.0,
+            tau_yz: 0.0,
+            tau_xz: 0.0,
+        };
+        NodalResults {
+            nodes: vec![
+                [0.0, 0.0],
+                [2.0, 0.0],
+                [0.0, 2.0],
+                [1.0, 0.0],
+                [1.0, 1.0],
+                [0.0, 1.0],
+            ],
+            cells: vec![vec![0, 1, 2, 3, 4, 5]],
+            displacements: vec![[0.5, 0.0]; 6],
+            stresses: vec![stress; 6],
+            ..NodalResults::default()
+        }
+    }
+
+    #[test]
+    fn nodal_results_build_the_same_scene_as_a_field() {
+        let nodes: Vec<Node> = nodal_triangle()
+            .nodes
+            .iter()
+            .map(|p| Node::new_2d(p[0], p[1]))
+            .collect();
+        let tri = Tri6::new([0, 1, 2, 3, 4, 5], material(), 1.0, PlaneState::Stress).unwrap();
+        let mesh = Mesh::new(nodes, vec![Element::Tri6(tri)]).unwrap();
+        let from_field =
+            Scene::new(&mesh, &field(&mesh, [3.0, 0.0, 0.0], [0.5, 0.0].repeat(6))).unwrap();
+        let from_nodal = Scene::from_nodal(&nodal_triangle()).unwrap();
+        assert_eq!(from_nodal.triangles, from_field.triangles);
+        assert_eq!(from_nodal.edges, from_field.edges);
+        for q in [
+            Quantity::VonMises,
+            Quantity::SigmaXx,
+            Quantity::Displacement,
+        ] {
+            let (a, b) = (from_nodal.values(q), from_field.values(q));
+            assert!(
+                a.iter().zip(&b).all(|(x, y)| (x - y).abs() < 1e-12),
+                "{q:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn nodal_results_refuse_solids_and_wrong_sizes() {
+        let mut solid = nodal_triangle();
+        solid.cells = vec![vec![0, 1, 2, 3]];
+        assert_eq!(Scene::from_nodal(&solid).err(), Some(SceneError::Solid));
+
+        let mut short = nodal_triangle();
+        short.stresses.pop();
+        assert_eq!(
+            Scene::from_nodal(&short).err(),
+            Some(SceneError::Core(MailleError::FieldMeshMismatch))
+        );
+
+        let mut outside = nodal_triangle();
+        outside.cells = vec![vec![0, 1, 9]];
+        assert_eq!(
+            Scene::from_nodal(&outside).err(),
+            Some(SceneError::Core(MailleError::FieldMeshMismatch))
+        );
     }
 }

@@ -12,7 +12,7 @@ use maille_core::results::Stress;
 use maille_io::model::{build, parse, Run};
 use maille_io::msh::{read, write, CellKind, MshFile};
 use maille_io::vtk::{
-    read_point_data, read_pvd, result_arrays, write_pvd, write_vtu, Entry, PointArray,
+    read_point_data, read_pvd, read_results, result_arrays, write_pvd, write_vtu, Entry, PointArray,
 };
 use maille_io::IoError;
 
@@ -122,6 +122,46 @@ fn cell_types_and_connectivity_follow_vtk() {
         );
         assert!(text.contains(&format!("NumberOfCells=\"{cells}\"")));
     }
+}
+
+#[test]
+fn whole_file_round_trips_for_every_cell_kind() {
+    for mesh in [
+        rectangle(false),
+        rectangle(true),
+        one_tet(CellKind::Tet4),
+        one_tet(CellKind::Tet10),
+    ] {
+        let t = PointArray {
+            name: "temperature".to_string(),
+            components: 1,
+            values: (0..mesh.nodes.len()).map(|i| 0.1 * i as f64).collect(),
+        };
+        let text = write_vtu(&mesh, "W, mm, K", std::slice::from_ref(&t)).unwrap();
+        let back = read_results(&text).unwrap();
+        assert_eq!(back.kind, mesh.kind);
+        assert_eq!(back.cells, mesh.cells);
+        assert_eq!(back.nodes, mesh.nodes);
+        assert_eq!(back.arrays, vec![t]);
+        assert_eq!(back.units.as_deref(), Some("W, mm, K"));
+    }
+}
+
+#[test]
+fn whole_file_errors() {
+    let mesh = rectangle(false);
+    let text = write_vtu(&mesh, "u", &[]).unwrap();
+    let odd = text.replace(
+        "<DataArray type=\"UInt8\" Name=\"types\" format=\"ascii\">\n5",
+        "<DataArray type=\"UInt8\" Name=\"types\" format=\"ascii\">\n9",
+    );
+    assert!(vtk_message(read_results(&odd).unwrap_err()).contains("type de cellule VTK 9"));
+    let marker = "Name=\"connectivity\" format=\"ascii\">\n";
+    let at = text.find(marker).unwrap() + marker.len();
+    let first = mesh.cells[0][0].to_string().len();
+    let outside = format!("{}999999{}", &text[..at], &text[at + first..]);
+    assert!(vtk_message(read_results(&outside).unwrap_err()).contains("connectivité"));
+    assert!(vtk_message(read_results("<VTKFile/>").unwrap_err()).contains("Points"));
 }
 
 #[test]

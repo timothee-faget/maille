@@ -1,2 +1,6 @@
 /target
 /graphify-out
+
+# résultats des exemples (maille solve examples/*.toml)
+/examples/*.vtu
+/examples/*.pvd
