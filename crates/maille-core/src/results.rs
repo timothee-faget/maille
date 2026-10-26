@@ -66,13 +66,19 @@ pub struct Field {
     pub heat_fluxes: Vec<Vec<HeatFlux>>,
 }
 
-/// Résultat d'un incrément d'une Step transitoire : le Field (thermique) au temps `time`, compté
-/// depuis le début de la Step. Les `reactions` y sont la puissance moyenne fournie par les
-/// températures imposées pendant le pas qui finit à `time` (nulles à t = 0).
+/// Résultat d'un incrément d'une Step : le Field au temps `time`, compté depuis le début de la Step.
+/// En transitoire, les `reactions` y sont la puissance moyenne fournie par les températures
+/// imposées pendant le pas qui finit à `time` (nulles à t = 0).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Increment {
     pub time: f64,
     pub field: Field,
+    /// Quasi-statique : norme du résidu d'équilibre ‖F_int − λ F‖ sur les DOF libres, relative à la
+    /// plus grande norme des forces vue depuis le début de la Step, avant chaque itération de
+    /// Newton-Raphson. La première mesure le déséquilibre au début de l'incrément, avant d'imposer
+    /// l'incrément des BC ; la dernière est sous la tolérance (10⁻⁸). Près de la solution, chaque
+    /// valeur est de l'ordre du carré de la précédente. Vide en transitoire et à t = 0.
+    pub residuals: Vec<f64>,
 }
 
 /// Extrapolation du Tri3 : son unique point de Gauss donne la valeur de ses 3 Nodes.

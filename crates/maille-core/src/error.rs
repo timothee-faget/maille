@@ -100,8 +100,30 @@ pub enum MailleError {
     NonFiniteTemperature {
         node: usize,
     },
-    /// Champ de températures (dilatation) sur un Model qui n'est pas statique.
+    /// Champ de températures (dilatation) ou calcul quasi-statique sur un Model qui n'est pas statique.
     StaticOnly,
+    /// Plasticité, ou calcul quasi-statique, sur un Element qui n'est ni un triangle en déformations
+    /// planes ni un tétraèdre.
+    UnsupportedPlasticElement {
+        element: usize,
+    },
+    /// `Model::solve` (élastique linéaire) sur un Material plastique.
+    PlasticityNeedsQuasiStatic {
+        element: usize,
+    },
+    /// Champ de températures dans un calcul quasi-statique (thermo-plasticité non gérée).
+    QuasiStaticWithTemperatures,
+    /// Newton-Raphson n'a pas trouvé l'équilibre de l'incrément `increment` (temps `time`).
+    NotConverged {
+        increment: usize,
+        time: f64,
+    },
+    /// Tangente singulière alors que des points de Gauss plastifient : la charge dépasse la charge
+    /// limite de la structure (mécanisme plastique).
+    PlasticCollapse {
+        increment: usize,
+        time: f64,
+    },
     /// La dilatation d'un champ de températures demande α.
     MissingExpansion {
         element: usize,
@@ -284,7 +306,27 @@ impl fmt::Display for MailleError {
             ),
             Self::StaticOnly => write!(
                 f,
-                "le champ de températures (dilatation thermique) ne sert qu'en statique : le donner au Model créé avec Model::new, le champ venant d'un calcul thermique sur le même Mesh"
+                "le champ de températures (dilatation thermique) et le calcul quasi-statique ne servent qu'en statique : créer le Model avec Model::new (pour la dilatation, le champ vient d'un calcul thermique sur le même Mesh)"
+            ),
+            Self::UnsupportedPlasticElement { element } => write!(
+                f,
+                "l'Element {element} n'a pas de version élasto-plastique : la plasticité et le calcul quasi-statique demandent des triangles en déformations planes (PlaneState::Strain) ou des tétraèdres"
+            ),
+            Self::PlasticityNeedsQuasiStatic { element } => write!(
+                f,
+                "le Material de l'Element {element} est plastique : Model::solve est élastique linéaire, utiliser Model::solve_quasi_static avec une Step::quasi_static et une Amplitude"
+            ),
+            Self::QuasiStaticWithTemperatures => write!(
+                f,
+                "le calcul quasi-statique ne prend pas de champ de températures (la thermo-plasticité n'est pas gérée) : retirer with_temperatures"
+            ),
+            Self::NotConverged { increment, time } => write!(
+                f,
+                "Newton-Raphson ne converge pas à l'incrément {increment} (t = {time}) : augmenter le nombre d'incréments de la Step. Si la plasticité est parfaite (H = 0), la charge dépasse peut-être la charge limite de la structure"
+            ),
+            Self::PlasticCollapse { increment, time } => write!(
+                f,
+                "ruine plastique à l'incrément {increment} (t = {time}) : la charge dépasse la charge limite de la structure, qui n'a plus de rigidité. Réduire l'Amplitude, imposer un déplacement plutôt qu'une force, ou ajouter de l'écrouissage (H > 0)"
             ),
             Self::MissingExpansion { element } => write!(
                 f,

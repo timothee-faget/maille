@@ -1,14 +1,16 @@
 use std::ops::Deref;
 
 use crate::assembly::{
-    element_capacity, element_conduction, element_dofs, element_heat_flux_operator,
-    element_heat_source, element_stiffness, element_stresses, element_thermal_load,
-    element_thermal_strains, face_convection, FaceConvection, FluxOperator,
+    element_capacity, element_conduction, element_dofs, element_gauss_count,
+    element_heat_flux_operator, element_heat_source, element_response, element_stiffness,
+    element_stresses, element_thermal_load, element_thermal_strains, face_convection,
+    FaceConvection, FluxOperator,
 };
-use crate::element::{bar_equivalent_load, beam_equivalent_load};
+use crate::element::{bar_equivalent_load, beam_equivalent_load, ElementResponse};
 use crate::error::MailleError;
 use crate::material::positive;
-use crate::mesh::{Dof, Element, Mesh};
+use crate::mesh::{Dof, Element, Mesh, PlaneState};
+use crate::plasticity::PlasticState;
 use crate::results::{Field, Increment};
 use crate::solve::{reverse_cuthill_mckee, Cholesky, SkylineMatrix};
 
@@ -222,6 +224,9 @@ impl Model {
                 Analysis::Static if !one_d && m.poisson.is_none() => {
                     return Err(MailleError::MissingPoisson { element: i })
                 }
+                Analysis::Static if m.plasticity.is_some() && !elastoplastic(e) => {
+                    return Err(MailleError::UnsupportedPlasticElement { element: i })
+                }
                 Analysis::Thermal if one_d => {
                     return Err(MailleError::UnsupportedThermalElement { element: i })
                 }
@@ -321,6 +326,9 @@ impl Model {
             });
         }
         for (i, e) in self.mesh.elements.iter().enumerate() {
+            if e.material().plasticity.is_some() {
+                return Err(MailleError::QuasiStaticWithTemperatures);
+            }
             if matches!(e, Element::Beam(_)) {
                 return Err(MailleError::UnsupportedThermalStrain { element: i });
             }
@@ -353,6 +361,13 @@ impl Model {
     /// assemblée en ligne de ciel, les réactions sont recalculées Element par Element.
     pub fn solve(&self) -> Result<Field, MailleError> {
         let mesh = &self.mesh;
+        if let Some(i) = mesh
+            .elements
+            .iter()
+            .position(|e| e.material().plasticity.is_some())
+        {
+            return Err(MailleError::PlasticityNeedsQuasiStatic { element: i });
+        }
         let mut a = self.assemble()?;
         // dilatation : α (T − T_ref) aux Nodes de chaque Element (vide sans champ de températures),
         // et ses forces nodales dans F
@@ -451,6 +466,7 @@ impl Model {
         let mut history = vec![Increment {
             time: 0.0,
             field: thermal_field(&fluxes, t.clone(), vec![0.0; n]),
+            residuals: Vec::new(),
         }];
         for s in 1..=step.increments() {
             let carried = product(&a.dofs, &right, &t, &all);
@@ -467,9 +483,142 @@ impl Model {
             history.push(Increment {
                 time: s as f64 * dt,
                 field: thermal_field(&fluxes, t.clone(), reactions),
+                residuals: Vec::new(),
             });
         }
         Ok(history)
+    }
+
+    /// Calcul quasi-statique, élasto-plastique si des Materials ont une `Plasticity` : les charges et
+    /// les valeurs des BC du Model sont multipliées par λ(t) de l'`amplitude`, et chaque incrément de
+    /// la Step cherche l'équilibre F_int(u) = λ F par Newton-Raphson, avec la tangente cohérente de la
+    /// loi de von Mises (convergence quadratique). L'état plastique de chaque point de Gauss n'est
+    /// gardé qu'à la convergence. Renvoie l'incrément t = 0 (Mesh au repos), puis un par pas.
+    /// Réactions : F_int − λ F aux DOF imposés.
+    ///
+    /// Triangles en déformations planes et tétraèdres seulement, sans champ de températures. Un
+    /// Material sans `Plasticity` reste élastique : le résultat est alors celui de `solve` mis à
+    /// l'échelle par λ, chaque incrément convergeant en une itération.
+    pub fn solve_quasi_static(
+        &self,
+        step: &Step,
+        amplitude: &Amplitude,
+    ) -> Result<Vec<Increment>, MailleError> {
+        if self.analysis != Analysis::Static {
+            return Err(MailleError::StaticOnly);
+        }
+        if self.temperatures.is_some() {
+            return Err(MailleError::QuasiStaticWithTemperatures);
+        }
+        let mesh = &self.mesh;
+        if let Some(i) = mesh.elements.iter().position(|e| !elastoplastic(e)) {
+            return Err(MailleError::UnsupportedPlasticElement { element: i });
+        }
+        let a = self.assemble()?;
+        let mut committed: Vec<Vec<PlasticState>> = (0..mesh.elements.len())
+            .map(|i| vec![PlasticState::default(); element_gauss_count(mesh, i)])
+            .collect();
+        let mut u = vec![0.0; a.f.len()];
+        let rest = self.responses(&u, &committed);
+        let mut history = vec![Increment {
+            time: 0.0,
+            field: quasi_static_field(u.clone(), vec![0.0; a.f.len()], rest),
+            residuals: Vec::new(),
+        }];
+        // échelle des forces : la plus grande norme de F_int ou de λ F vue depuis le début de la Step
+        // (F_int contient les réactions, la référence reste non nulle sous déplacement imposé et
+        // quand la décharge ramène les forces à zéro)
+        let mut scale: f64 = 0.0;
+        for increment in 1..=step.increments() {
+            let time = increment as f64 * step.time_step();
+            let lambda = amplitude.at(time);
+            let external: Vec<f64> = a.f.iter().map(|f| lambda * f).collect();
+            let fail = |collapse: bool| {
+                if collapse {
+                    MailleError::PlasticCollapse { increment, time }
+                } else {
+                    MailleError::NotConverged { increment, time }
+                }
+            };
+            let mut residuals = Vec::new();
+            let (responses, residual) = loop {
+                let responses = self.responses(&u, &committed);
+                let mut internal = vec![0.0; u.len()];
+                for (r, dofs) in responses.iter().zip(&a.dofs) {
+                    for (&g, f) in dofs.iter().zip(&r.internal_force) {
+                        internal[g] += f;
+                    }
+                }
+                let residual: Vec<f64> =
+                    internal.iter().zip(&external).map(|(i, e)| i - e).collect();
+                scale = scale.max(norm(&internal)).max(norm(&external));
+                let free: Vec<f64> = residual
+                    .iter()
+                    .zip(&a.fixed)
+                    .filter(|(_, &c)| !c)
+                    .map(|(r, _)| *r)
+                    .collect();
+                let free = norm(&free);
+                let relative = if scale > 0.0 { free / scale } else { free };
+                if !relative.is_finite() {
+                    return Err(fail(false));
+                }
+                residuals.push(relative);
+                // au moins une itération : la première applique l'incrément des valeurs imposées
+                if residuals.len() > 1 && relative <= NEWTON_TOLERANCE {
+                    break (responses, residual);
+                }
+                if residuals.len() > NEWTON_ITERATIONS {
+                    return Err(fail(false));
+                }
+                // δu impose aux DOF contraints ce qui manque pour atteindre λ × valeur de la BC (non
+                // nul à la première itération seulement) : K_ff δu_f = −r_f − K_fc δu_c. Partir de
+                // l'état convergé plutôt que de déplacer d'un coup les Nodes imposés évite une
+                // plastification artificielle des Elements du bord.
+                let mut du: Vec<f64> = (0..u.len())
+                    .map(|g| {
+                        if a.fixed[g] {
+                            lambda * a.imposed[g] - u[g]
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect();
+                let tangent = |i: usize| responses[i].tangent.as_slice();
+                let system = FreeSystem::new(&a.dofs, &tangent, &a.fixed, &du).map_err(|e| {
+                    if e == MailleError::Singular && responses.iter().any(|r| r.yielding) {
+                        fail(true)
+                    } else {
+                        e
+                    }
+                })?;
+                system.solve(&residual.iter().map(|r| -r).collect::<Vec<_>>(), &mut du);
+                for (u, du) in u.iter_mut().zip(du) {
+                    *u += du;
+                }
+            };
+            committed = responses.iter().map(|r| r.states.clone()).collect();
+            let reactions = residual
+                .iter()
+                .zip(&a.fixed)
+                .map(|(r, &c)| if c { *r } else { 0.0 })
+                .collect();
+            history.push(Increment {
+                time,
+                field: quasi_static_field(u.clone(), reactions, responses),
+                residuals,
+            });
+        }
+        Ok(history)
+    }
+
+    /// Réponse élasto-plastique de chaque Element aux déplacements `u`, depuis les états `committed`.
+    fn responses(&self, u: &[f64], committed: &[Vec<PlasticState>]) -> Vec<ElementResponse> {
+        committed
+            .iter()
+            .enumerate()
+            .map(|(i, previous)| element_response(&self.mesh, i, u, previous))
+            .collect()
     }
 
     /// Ce que les résolutions partagent : DOF des Elements, convection, F et valeurs imposées.
@@ -534,6 +683,45 @@ impl Model {
             imposed,
             fixed,
         })
+    }
+}
+
+/// Tolérance de Newton-Raphson sur le résidu relatif (voir `Increment::residuals`).
+const NEWTON_TOLERANCE: f64 = 1e-8;
+/// Nombre maximal d'itérations de Newton-Raphson par incrément.
+const NEWTON_ITERATIONS: usize = 25;
+
+/// Triangle en déformations planes ou tétraèdre : les Elements du calcul élasto-plastique.
+fn elastoplastic(e: &Element) -> bool {
+    match e {
+        Element::Tri3(t) => t.state == PlaneState::Strain,
+        Element::Tri6(t) => t.state == PlaneState::Strain,
+        Element::Tet4(_) | Element::Tet10(_) => true,
+        Element::Bar(_) | Element::Beam(_) => false,
+    }
+}
+
+fn norm(v: &[f64]) -> f64 {
+    v.iter().map(|x| x * x).sum::<f64>().sqrt()
+}
+
+/// Field d'un incrément quasi-statique : contraintes et p aux points de Gauss des `responses`.
+fn quasi_static_field(
+    displacements: Vec<f64>,
+    reactions: Vec<f64>,
+    responses: Vec<ElementResponse>,
+) -> Field {
+    let (stresses, equivalent_plastic_strains) = responses
+        .into_iter()
+        .map(|r| (r.stresses, r.states.iter().map(|s| s.p).collect()))
+        .unzip();
+    Field {
+        displacements,
+        reactions,
+        stresses,
+        equivalent_plastic_strains,
+        temperatures: Vec::new(),
+        heat_fluxes: Vec::new(),
     }
 }
 
