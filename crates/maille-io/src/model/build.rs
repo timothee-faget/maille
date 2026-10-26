@@ -4,7 +4,9 @@ use std::collections::BTreeMap;
 
 use maille_core::material::Material;
 use maille_core::mesh::{Dof, Element, Mesh, PlaneState, Tet10, Tet4, Tri3, Tri6};
-use maille_core::model::{Amplitude, Analysis, Bc, Convection, HeatSource, Load, Model, Step};
+use maille_core::model::{
+    Amplitude, Analysis, Bc, Convection, HeatSource, Load, Model, Pressure, Step,
+};
 
 use super::schema::*;
 use super::{Loaded, Run};
@@ -115,6 +117,20 @@ pub fn build(
             }));
         }
         model = model.with_convection(convection)?;
+    }
+
+    if !file.pressures.is_empty() {
+        let mut pressures = Vec::new();
+        for (i, def) in file.pressures.iter().enumerate() {
+            let set = find(mesh, &format!("pressures[{i}]"), &def.set)?;
+            expect(!set.faces.is_empty(), &def.set, "de faces (un bord)")?;
+            pressures.extend(set.faces.iter().map(|&(element, face)| Pressure {
+                element,
+                face,
+                value: def.value,
+            }));
+        }
+        model = model.with_pressures(pressures)?;
     }
 
     let run = match &file.step {
