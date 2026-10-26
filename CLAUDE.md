@@ -54,7 +54,9 @@ Thermique (M3) : **Analysis** (`Static` / `Thermal`, la physique résolue), **He
 **Convection** (échange h (T − T∞) sur une face, champs `film` et `sink` comme Abaqus). **Step** reste réservé à
 l'étape de calcul avec son temps (M5).
 Transitoire (M5) : **Step** porte le temps (durée, nombre d'incréments, θ) et s'applique à un Model dont l'Analysis est
-`Thermal` ; l'Analysis passera dans la Step avec le couplage. **Increment** : résultat d'un pas (temps + Field).
+`Thermal` ; l'Analysis reste sur le Model. **Increment** : résultat d'un pas (temps + Field).
+Couplage (M5) : séquentiel, comme Abaqus : le **champ de températures** d'un Field thermique est donné au Model statique
+(`with_temperatures`, dilatation α (T − T_ref)). Ce n'est pas une BC : « BC de température » reste le Dirichlet sur `T`.
 Mailleur (M4) : **Geometry** (domaine : contour extérieur + trous), **Curve** (morceau de bord, segment ou arc, avec sa
 taille h et son nom), **Triangulation** (sortie du mailleur : Nodes, triangles, bords nommés ; ce n'est pas un Mesh),
 **BoundarySet** (Nodes et faces d'un bord nommé).

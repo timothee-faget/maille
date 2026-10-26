@@ -91,9 +91,9 @@ pub enum MailleError {
     NonFiniteTemperature {
         node: usize,
     },
-    /// Températures imposées (dilatation) sur un Model qui n'est pas statique.
+    /// Champ de températures (dilatation) sur un Model qui n'est pas statique.
     StaticOnly,
-    /// Des températures imposées en statique demandent α.
+    /// La dilatation d'un champ de températures demande α.
     MissingExpansion {
         element: usize,
     },
@@ -268,11 +268,11 @@ impl fmt::Display for MailleError {
             ),
             Self::StaticOnly => write!(
                 f,
-                "les températures imposées (dilatation thermique) ne servent qu'en statique : les donner au Model créé avec Model::new, le champ venant d'un calcul thermique sur le même Mesh"
+                "le champ de températures (dilatation thermique) ne sert qu'en statique : le donner au Model créé avec Model::new, le champ venant d'un calcul thermique sur le même Mesh"
             ),
             Self::MissingExpansion { element } => write!(
                 f,
-                "le Material de l'Element {element} n'a pas de coefficient de dilatation, requis quand on impose des températures : ajouter with_expansion"
+                "le Material de l'Element {element} n'a pas de coefficient de dilatation, requis pour la dilatation d'un champ de températures : ajouter with_expansion"
             ),
             Self::UnsupportedThermalStrain { element } => write!(
                 f,

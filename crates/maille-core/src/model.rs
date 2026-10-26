@@ -72,8 +72,7 @@ pub enum Analysis {
 /// constantes pendant la Step. Voir `Model::solve_step`.
 ///
 /// La Step ne porte que le temps : elle s'applique à un Model dont l'Analysis est `Thermal`, et
-/// l'Analysis reste sur le Model. Elle passera dans la Step quand une même Step devra enchaîner
-/// deux physiques (couplage thermo-mécanique).
+/// l'Analysis reste sur le Model, y compris en couplage séquentiel (voir `with_temperatures`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Step {
     time_period: f64,
@@ -133,7 +132,7 @@ pub struct Model {
     distributed: Vec<DistributedLoad>,
     heat_sources: Vec<HeatSource>,
     convection: Vec<Convection>,
-    /// Températures imposées aux Nodes et T_ref (statique), voir `with_temperatures`.
+    /// Champ de températures aux Nodes et T_ref (statique), voir `with_temperatures`.
     temperatures: Option<(Vec<f64>, f64)>,
 }
 
@@ -238,8 +237,9 @@ impl Model {
         Ok(self)
     }
 
-    /// Températures imposées aux Nodes, en statique seulement (couplage thermo-mécanique séquentiel) :
-    /// une par Node, par exemple les `temperatures` d'un Field thermique calculé sur le même Mesh.
+    /// Champ de températures qui dilate le Mesh, en statique seulement (couplage thermo-mécanique
+    /// séquentiel) : une valeur par Node, par exemple les `temperatures` d'un Field thermique calculé
+    /// sur le même Mesh. Ce n'est pas une BC : aucun DOF `T` n'est résolu en statique.
     /// Chaque Element se dilate de α (T − `reference`), `reference` étant la température sans
     /// contrainte ; les contraintes du Field sont alors σ = D (ε − ε_th). Bar, triangles et
     /// tétraèdres, dont le Material doit avoir α.
@@ -292,19 +292,18 @@ impl Model {
     pub fn solve(&self) -> Result<Field, MailleError> {
         let mesh = &self.mesh;
         let mut a = self.assemble()?;
-        // dilatation : α (T − T_ref) aux Nodes de chaque Element, et ses forces nodales dans F
-        let strains: Vec<Vec<f64>> = (0..mesh.elements.len())
-            .map(|i| match &self.temperatures {
-                Some((t, reference)) => element_thermal_strains(mesh, i, t, *reference),
-                None => Vec::new(),
-            })
-            .collect();
-        for (i, strain_e) in strains.iter().enumerate().filter(|(_, s)| !s.is_empty()) {
-            for (&g, v) in a.dofs[i]
-                .iter()
-                .zip(element_thermal_load(mesh, i, strain_e))
-            {
-                a.f[g] += v;
+        // dilatation : α (T − T_ref) aux Nodes de chaque Element (vide sans champ de températures),
+        // et ses forces nodales dans F
+        let mut strains = vec![Vec::new(); mesh.elements.len()];
+        if let Some((t, reference)) = &self.temperatures {
+            for (i, strain_e) in strains.iter_mut().enumerate() {
+                *strain_e = element_thermal_strains(mesh, i, t, *reference);
+                for (&g, v) in a.dofs[i]
+                    .iter()
+                    .zip(element_thermal_load(mesh, i, strain_e))
+                {
+                    a.f[g] += v;
+                }
             }
         }
         let matrix = |i: usize| match self.analysis {

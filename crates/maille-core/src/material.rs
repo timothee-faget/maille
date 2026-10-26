@@ -9,8 +9,8 @@ pub(crate) fn positive(name: &'static str, value: f64) -> Result<f64, MailleErro
 }
 
 /// Matériau isotrope. Chaque propriété n'est exigée que par l'analyse qui s'en sert (vérifié par
-/// `Model`) : E (et ν pour les triangles et tétraèdres) en statique, et α si on impose des
-/// températures ; k en thermique, et en plus ρ et c en thermique transitoire.
+/// `Model`) : E (et ν pour les triangles et tétraèdres) en statique, et α pour la dilatation d'un
+/// champ de températures ; k en thermique, et en plus ρ et c en thermique transitoire.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Material {
     /// Module d'Young E.

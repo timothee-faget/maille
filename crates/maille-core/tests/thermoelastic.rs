@@ -96,6 +96,23 @@ fn plane_strain(mesh: &Mesh) -> bool {
     )
 }
 
+/// α, ou α (1 + ν) en déformations planes : facteur de la déformation libre dans le plan.
+fn expansion_scale(mesh: &Mesh) -> f64 {
+    if plane_strain(mesh) {
+        ALPHA * (1.0 + NU)
+    } else {
+        ALPHA
+    }
+}
+
+fn dofs_per_node(mesh: &Mesh) -> usize {
+    if solid(mesh) {
+        3
+    } else {
+        2
+    }
+}
+
 /// Dilatation libre ε = a(x) I, avec a(x) = s (α ou α(1 + ν) en déformations planes) fois
 /// ΔT(x) = d0 + g·x : u = s (d0 x + (g·x) x − |x|² g / 2). Le terme antisymétrique (g·x) x − x (g·x)
 /// du gradient est une rotation : la déformation est bien a(x) I.
@@ -149,14 +166,10 @@ fn others_than_zz(s: &Stress) -> [f64; 5] {
 fn free_uniform_heating_expands_without_stress() {
     let dt = 80.0;
     for (name, mesh) in meshes() {
-        let scale = if plane_strain(&mesh) {
-            ALPHA * (1.0 + NU)
-        } else {
-            ALPHA
-        };
+        let scale = expansion_scale(&mesh);
         let exact = |p: &Node| free_expansion(p, scale, dt, [0.0; 3]);
         let field = heated(&mesh, rigid_body_bcs(&mesh, exact), |_| T_REF + dt);
-        let d = if solid(&mesh) { 3 } else { 2 };
+        let d = dofs_per_node(&mesh);
         for (n, p) in mesh.nodes.iter().enumerate() {
             for k in 0..d {
                 let got = field.displacements[d * n + k];
@@ -194,7 +207,7 @@ fn clamped_uniform_heating_gives_the_blocked_stress() {
     // planes et 3D, état hydrostatique −E α ΔT / (1 − 2ν)
     let dt = 80.0;
     for (name, mesh) in meshes() {
-        let d = if solid(&mesh) { 3 } else { 2 };
+        let d = dofs_per_node(&mesh);
         let dofs = [Dof::Ux, Dof::Uy, Dof::Uz];
         let bcs = (0..mesh.nodes.len())
             .flat_map(|node| {
@@ -240,15 +253,11 @@ fn free_linear_temperature_is_stress_free_with_quadratic_elements() {
         .filter(|(name, _)| name.starts_with("Tri6") || *name == "Tet10")
     {
         let g = if solid(&mesh) { g } else { [g[0], g[1], 0.0] };
-        let scale = if plane_strain(&mesh) {
-            ALPHA * (1.0 + NU)
-        } else {
-            ALPHA
-        };
+        let scale = expansion_scale(&mesh);
         let exact = |p: &Node| free_expansion(p, scale, d0, g);
         let temperature = |p: &Node| T_REF + d0 + g[0] * p.x + g[1] * p.y + g[2] * p.z;
         let field = heated(&mesh, rigid_body_bcs(&mesh, exact), temperature);
-        let d = if solid(&mesh) { 3 } else { 2 };
+        let d = dofs_per_node(&mesh);
         for (n, p) in mesh.nodes.iter().enumerate() {
             for k in 0..d {
                 let got = field.displacements[d * n + k];
@@ -327,7 +336,7 @@ fn heated_bars_expand_freely_or_push_on_their_supports() {
     }
 }
 
-/// Cylindre creux rᵢ < r < rₑ, températures imposées Tᵢ et Tₑ (profil en ln r), déformations planes
+/// Cylindre creux rᵢ < r < rₑ, BC de température Tᵢ et Tₑ (profil en ln r), déformations planes
 /// (εz = 0), surfaces libres : Timoshenko et Goodier, avec I(r) = ∫ᵣᵢʳ ΔT r dr,
 /// σr = αE / ((1 − ν) r²) [(r² − rᵢ²)/(rₑ² − rᵢ²) I(rₑ) − I(r)],
 /// σθ = αE / ((1 − ν) r²) [(r² + rᵢ²)/(rₑ² − rᵢ²) I(rₑ) + I(r) − ΔT r²],
@@ -436,17 +445,24 @@ mod cylinder {
         (Mesh::new(t.nodes, elements).unwrap(), sets)
     }
 
+    /// (σr, σθ, σz) d'un point de Gauss.
+    fn polar(s: &Stress) -> [f64; 3] {
+        let r = s.x.hypot(s.y);
+        let (c, sn) = (s.x / r, s.y / r);
+        [
+            s.sigma_xx * c * c + s.sigma_yy * sn * sn + 2.0 * s.tau_xy * c * sn,
+            s.sigma_xx * sn * sn + s.sigma_yy * c * c - 2.0 * s.tau_xy * c * sn,
+            s.sigma_zz,
+        ]
+    }
+
     /// Erreur RMS sur (σr, σθ, σz) aux points de Gauss, rapportée au plus grand |σθ| exact.
     pub fn error(field: &Field) -> f64 {
         let scale = exact(INNER)[1].abs().max(exact(OUTER)[1].abs());
         let (mut sum, mut count) = (0.0, 0);
         for s in field.stresses.iter().flatten() {
-            let r = s.x.hypot(s.y);
-            let (c, sn) = (s.x / r, s.y / r);
-            let sr = s.sigma_xx * c * c + s.sigma_yy * sn * sn + 2.0 * s.tau_xy * c * sn;
-            let st = s.sigma_xx * sn * sn + s.sigma_yy * c * c - 2.0 * s.tau_xy * c * sn;
-            let e = exact(r);
-            sum += (sr - e[0]).powi(2) + (st - e[1]).powi(2) + (s.sigma_zz - e[2]).powi(2);
+            let (p, e) = (polar(s), exact(s.x.hypot(s.y)));
+            sum += (0..3).map(|k| (p[k] - e[k]).powi(2)).sum::<f64>();
             count += 3;
         }
         (sum / count as f64).sqrt() / scale

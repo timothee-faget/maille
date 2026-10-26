@@ -1,5 +1,5 @@
 //! Cas d'exemple : contraintes thermiques dans un tube épais, couplage thermo-mécanique séquentiel,
-//! Tri6. Températures imposées Tᵢ sur le rayon intérieur rᵢ et Tₑ sur le rayon extérieur rₑ : on
+//! Tri6. BC de température Tᵢ sur le rayon intérieur rᵢ et Tₑ sur le rayon extérieur rₑ : on
 //! calcule d'abord le champ T (profil en ln r), puis la dilatation en déformations planes (tube long,
 //! εz = 0), surfaces libres. Solution de Timoshenko et Goodier, avec ΔT = T − T_ref et
 //! I(r) = ∫ᵣᵢʳ ΔT r dr :
@@ -71,9 +71,9 @@ fn polar(s: &Stress) -> [f64; 3] {
     ]
 }
 
-/// Quart de tube maillé : calcul thermique, puis statique sur le même Mesh. Renvoie le Mesh, le
-/// Field thermique et le Field mécanique.
-pub fn solve() -> Result<(Mesh, Field, Field), MailleError> {
+/// Quart de tube maillé : calcul thermique, puis statique sur le même Mesh. Renvoie le Mesh et le
+/// Field mécanique.
+pub fn solve() -> Result<(Mesh, Field), MailleError> {
     let geometry = Geometry {
         outer: vec![
             Curve::line([INNER, 0.0], SIZE, "sym_x"),
@@ -118,15 +118,15 @@ pub fn solve() -> Result<(Mesh, Field, Field), MailleError> {
         }));
     }
     let mechanical = Model::new(mesh.clone(), bcs, vec![])?
-        .with_temperatures(thermal.temperatures.clone(), T_REF)?
+        .with_temperatures(thermal.temperatures, T_REF)?
         .solve()?;
-    Ok((mesh, thermal, mechanical))
+    Ok((mesh, mechanical))
 }
 
 /// Affiche les contraintes face à la solution analytique, puis ouvre le viewer sur le Field
 /// mécanique.
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let (mesh, _, mechanical) = solve()?;
+    let (mesh, mechanical) = solve()?;
 
     println!(
         "Tube épais chauffé de l'intérieur : rᵢ = {INNER} mm, rₑ = {OUTER} mm, Tᵢ = {T_INNER} °C, Tₑ = {T_OUTER} °C, T_ref = {T_REF} °C"
@@ -172,7 +172,7 @@ mod tests {
     fn stresses_follow_timoshenko() {
         // erreur RMS sur (σr, σθ, σz) aux points de Gauss sous 0,2 % du plus grand |σθ| ; point par
         // point sous 2 % : près des rayons, le bord en cordes (côtés droits) dévie localement
-        let (_, _, mechanical) = solve().unwrap();
+        let (_, mechanical) = solve().unwrap();
         let scale = exact(INNER)[1].abs();
         let (mut sum, mut count) = (0.0, 0);
         for s in mechanical.stresses.iter().flatten() {
