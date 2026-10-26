@@ -20,6 +20,7 @@
 pub mod assembly;
 pub mod element;
 pub mod error;
+pub mod iterative;
 pub mod material;
 pub mod mesh;
 pub mod mesher;

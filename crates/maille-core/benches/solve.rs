@@ -15,7 +15,7 @@ use maille_core::material::Material;
 use maille_core::mesh::{Dof, Element, Mesh, PlaneState, Tet10, Tri6};
 use maille_core::mesher::{triangulate, Curve, Geometry, MeshOptions};
 use maille_core::model::{Amplitude, Analysis, Bc, Load, Model, Step};
-use maille_core::solve::{reverse_cuthill_mckee, SkylineMatrix};
+use maille_core::solve::{reverse_cuthill_mckee, SkylineMatrix, SolverKind};
 
 /// Unités cohérentes (N, mm, MPa).
 const E: f64 = 210e3;
@@ -131,13 +131,19 @@ fn slow<'a>(c: &'a mut Criterion, name: &str) -> BenchmarkGroup<'a, WallTime> {
 
 fn bench_cantilever(c: &mut Criterion) {
     let mut group = slow(c, "cantilever_tet10_solve");
-    for n in [[10, 2, 2], [20, 4, 4], [30, 6, 6]] {
+    for n in [[10, 2, 2], [20, 4, 4], [30, 6, 6], [40, 8, 8]] {
         let (model, nodes) = cantilever(n);
         let dofs = 3 * nodes;
         group.throughput(Throughput::Elements(dofs as u64));
-        group.bench_function(BenchmarkId::new("dofs", dofs), |b| {
-            b.iter(|| model.solve().unwrap())
-        });
+        for (name, kind) in [
+            ("direct", SolverKind::Direct),
+            ("iterative", SolverKind::Iterative),
+        ] {
+            let model = model.clone().with_solver(kind);
+            group.bench_function(BenchmarkId::new(name, dofs), |b| {
+                b.iter(|| model.solve().unwrap())
+            });
+        }
     }
     group.finish();
 }

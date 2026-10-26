@@ -8,11 +8,12 @@ use crate::assembly::{
 };
 use crate::element::{bar_equivalent_load, beam_equivalent_load, ElementResponse};
 use crate::error::MailleError;
+use crate::iterative::{Csr, Graph, Pcg};
 use crate::material::positive;
 use crate::mesh::{Dof, Element, Mesh, PlaneState};
 use crate::plasticity::PlasticState;
 use crate::results::{Field, Increment};
-use crate::solve::{reverse_cuthill_mckee, Cholesky, SkylineMatrix};
+use crate::solve::{reverse_cuthill_mckee, Adjacency, Cholesky, SkylineMatrix, SolverKind};
 
 /// Condition aux limites de Dirichlet : valeur imposée à un DOF d'un Node.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -213,6 +214,7 @@ pub struct Model {
     pressures: Vec<Pressure>,
     /// Champ de températures aux Nodes et T_ref (statique), voir `with_temperatures`.
     temperatures: Option<(Vec<f64>, f64)>,
+    solver: SolverKind,
 }
 
 impl Model {
@@ -274,7 +276,14 @@ impl Model {
             convection: Vec::new(),
             pressures: Vec::new(),
             temperatures: None,
+            solver: SolverKind::default(),
         })
+    }
+
+    /// Solveur du système K_ff u_f = b. Par défaut `SolverKind::Auto` : direct pour les petits
+    /// modèles, itératif (gradients conjugués préconditionnés) pour les gros.
+    pub fn with_solver(self, solver: SolverKind) -> Self {
+        Self { solver, ..self }
     }
 
     pub fn with_distributed_loads(
@@ -433,7 +442,7 @@ impl Model {
             Analysis::Thermal => thermal_matrix(mesh, &a.faces, i),
         };
         let mut u = a.imposed.clone();
-        FreeSystem::new(&a.dofs, &matrix, &a.fixed, &u)?.solve(&a.f, &mut u);
+        FreeSystem::new(&a.dofs, &matrix, &a.fixed, &u, self.solver)?.solve(&a.f, &mut u)?;
 
         let mut reactions = product(&a.dofs, &matrix, &u, &a.fixed);
         for (g, r) in reactions
@@ -505,7 +514,7 @@ impl Model {
         for (g, _) in a.fixed.iter().enumerate().filter(|(_, &c)| c) {
             t[g] = a.imposed[g];
         }
-        let system = FreeSystem::new(&a.dofs, &left, &a.fixed, &t)?;
+        let system = FreeSystem::new(&a.dofs, &left, &a.fixed, &t, self.solver)?;
         let all = vec![true; n];
         let fluxes = flux_operators(mesh);
         let mut history = vec![Increment {
@@ -516,7 +525,7 @@ impl Model {
         for s in 1..=step.increments() {
             let carried = product(&a.dofs, &right, &t, &all);
             let rhs: Vec<f64> = carried.iter().zip(&a.f).map(|(c, f)| c + f).collect();
-            system.solve(&rhs, &mut t);
+            system.solve(&rhs, &mut t)?;
             let mut reactions = product(&a.dofs, &left, &t, &a.fixed);
             for (g, r) in reactions
                 .iter_mut()
@@ -653,13 +662,13 @@ impl Model {
                 .map(|((&c, imposed), u)| if c { lambda * imposed - u } else { 0.0 })
                 .collect();
             let tangent = |i: usize| responses[i].tangent.as_slice();
-            let system = match FreeSystem::new(&a.dofs, &tangent, &a.fixed, &du) {
+            let system = match FreeSystem::new(&a.dofs, &tangent, &a.fixed, &du, self.solver) {
                 Err(MailleError::Singular) if responses.iter().any(|r| r.yielding) => {
                     return Err(MailleError::PlasticCollapse { increment, time })
                 }
                 other => other?,
             };
-            system.solve(&residual.iter().map(|r| -r).collect::<Vec<_>>(), &mut du);
+            system.solve(&residual.iter().map(|r| -r).collect::<Vec<_>>(), &mut du)?;
             for (u, du) in u.iter_mut().zip(du) {
                 *u += du;
             }
@@ -891,6 +900,42 @@ fn dof_index(mesh: &Mesh, analysis: Analysis, node: usize, dof: Dof) -> Result<u
     }
 }
 
+/// K_ff dans le stockage du solveur choisi.
+enum FreeMatrix {
+    Skyline(SkylineMatrix),
+    Sparse(Csr),
+}
+
+impl FreeMatrix {
+    fn add(&mut self, i: usize, j: usize, v: f64) {
+        match self {
+            Self::Skyline(m) => m.add(i, j, v),
+            Self::Sparse(m) => m.add(i, j, v),
+        }
+    }
+
+    fn factorize(self) -> Result<Factor, MailleError> {
+        Ok(match self {
+            Self::Skyline(m) => Factor::Direct(m.factorize()?),
+            Self::Sparse(m) => Factor::Iterative(Pcg::new(m)?),
+        })
+    }
+}
+
+enum Factor {
+    Direct(Cholesky),
+    Iterative(Pcg),
+}
+
+impl Factor {
+    fn solve(&self, rhs: &[f64]) -> Result<Vec<f64>, MailleError> {
+        match self {
+            Self::Direct(c) => Ok(c.solve(rhs)),
+            Self::Iterative(p) => p.solve(rhs),
+        }
+    }
+}
+
 /// Système K_ff u_f = F_f − K_fc u_c factorisé une fois, pour résoudre autant de seconds membres F
 /// qu'on veut tant que K et les valeurs imposées u_c ne changent pas.
 struct FreeSystem {
@@ -898,7 +943,7 @@ struct FreeSystem {
     free: Vec<Option<usize>>,
     /// rank[a] : position du DOF libre a dans la numérotation du solveur
     rank: Vec<usize>,
-    factor: Cholesky,
+    factor: Factor,
     /// K_fc u_c, dans la numérotation du solveur
     coupling: Vec<f64>,
 }
@@ -906,12 +951,14 @@ struct FreeSystem {
 impl FreeSystem {
     /// `dofs[i]` : DOF globaux de l'Element i, `matrix(i)` : sa matrice, `u` : valeurs imposées
     /// aux DOF `fixed`. Les DOF libres sont renumérotés par Cuthill-McKee inverse (graphe : deux DOF
-    /// sont voisins s'ils partagent un Element) avant l'assemblage en ligne de ciel.
+    /// sont voisins s'ils partagent un Element) avant l'assemblage, en ligne de ciel (solveur
+    /// direct) ou en CSR (solveur itératif), selon `solver`.
     fn new<M: Deref<Target = [Vec<f64>]>>(
         dofs: &[Vec<usize>],
         matrix: &impl Fn(usize) -> M,
         fixed: &[bool],
         u: &[f64],
+        solver: SolverKind,
     ) -> Result<Self, MailleError> {
         let mut free = vec![None; fixed.len()];
         let mut count = 0;
@@ -924,28 +971,25 @@ impl FreeSystem {
             .map(|d| d.iter().filter_map(|&g| free[g]).collect())
             .collect();
 
-        let mut adjacency = vec![Vec::new(); count];
-        for local in &element_free {
-            for &a in local {
-                adjacency[a].extend(local.iter().filter(|&&b| b != a));
-            }
-        }
-        for neighbours in &mut adjacency {
-            neighbours.sort_unstable();
-            neighbours.dedup();
-        }
+        let graph = Graph::from_elements(count, &element_free);
+        let order = reverse_cuthill_mckee(&graph);
         let mut rank = vec![0; count];
-        for (r, a) in reverse_cuthill_mckee(&adjacency).into_iter().enumerate() {
+        for (r, &a) in order.iter().enumerate() {
             rank[a] = r;
         }
-        let mut first: Vec<usize> = (0..count).collect();
-        for (a, neighbours) in adjacency.iter().enumerate() {
-            for &b in neighbours {
-                first[rank[a]] = first[rank[a]].min(rank[b]);
-            }
-        }
 
-        let mut kff = SkylineMatrix::zeros(first);
+        let mut kff = if solver.is_iterative(count) {
+            FreeMatrix::Sparse(Csr::zeros(&graph, &order, &rank))
+        } else {
+            let mut first: Vec<usize> = (0..count).collect();
+            for a in 0..count {
+                for &b in graph.neighbours(a) {
+                    first[rank[a]] = first[rank[a]].min(rank[b]);
+                }
+            }
+            FreeMatrix::Skyline(SkylineMatrix::zeros(first))
+        };
+        drop(graph);
         let mut coupling = vec![0.0; count];
         for (i, dofs) in dofs.iter().enumerate() {
             for (row, &gi) in matrix(i).iter().zip(dofs) {
@@ -969,18 +1013,19 @@ impl FreeSystem {
     }
 
     /// Résout K_ff u_f = F_f − K_fc u_c (`f` : vecteur global) et écrit u_f dans `u`.
-    fn solve(&self, f: &[f64], u: &mut [f64]) {
+    fn solve(&self, f: &[f64], u: &mut [f64]) -> Result<(), MailleError> {
         let mut rhs: Vec<f64> = self.coupling.iter().map(|c| -c).collect();
         for (g, a) in self.free.iter().enumerate() {
             if let Some(a) = a {
                 rhs[self.rank[*a]] += f[g];
             }
         }
-        let x = self.factor.solve(&rhs);
+        let x = self.factor.solve(&rhs)?;
         for (g, a) in self.free.iter().enumerate() {
             if let Some(a) = a {
                 u[g] = x[self.rank[*a]];
             }
         }
+        Ok(())
     }
 }
