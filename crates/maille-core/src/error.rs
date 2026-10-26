@@ -184,6 +184,10 @@ pub enum MailleError {
     TooManyNodes {
         max: usize,
     },
+    /// Surface 3D inutilisable par le mailleur (indice hors limites, coordonnée non finie…).
+    InvalidSurface {
+        problem: String,
+    },
     /// Taille h d'une Curve nulle, négative ou non finie.
     InvalidCurveSize {
         curve: CurveId,
@@ -419,6 +423,7 @@ impl fmt::Display for MailleError {
                 f,
                 "le mailleur n'a pas pu trianguler la géométrie (points de la géométrie confondus ou presque cocirculaires à l'arrondi près) : déplacer légèrement un point de la géométrie ou changer les tailles h"
             ),
+            Self::InvalidSurface { problem } => write!(f, "surface 3D inutilisable : {problem}"),
             Self::TooManyNodes { max } => write!(
                 f,
                 "le maillage dépasserait {max} Nodes : augmenter les tailles h des Curves"

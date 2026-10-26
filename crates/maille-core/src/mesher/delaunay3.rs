@@ -28,12 +28,22 @@ struct Tet {
     alive: bool,
 }
 
+/// Cavité d'une insertion : tétraèdres retirés, faces de leur bord avec le tétraèdre d'en face,
+/// arêtes orientées de ces faces (arête → face et position).
+type Cavity = (
+    Vec<usize>,
+    Vec<([usize; 3], Option<usize>)>,
+    HashMap<(usize, usize), (usize, usize)>,
+);
+
 #[derive(Debug, Clone)]
 pub struct Delaunay3 {
     points: Vec<[f64; 3]>,
     tets: Vec<Tet>,
     /// Tétraèdre de départ de la recherche du prochain point : le dernier créé.
     hint: usize,
+    /// Un tétraèdre vivant qui contient chaque point.
+    vertex_tet: Vec<usize>,
 }
 
 impl Delaunay3 {
@@ -60,6 +70,7 @@ impl Delaunay3 {
                 alive: true,
             }],
             hint: 0,
+            vertex_tet: vec![0; SUPER],
         }
     }
 
@@ -77,6 +88,58 @@ impl Delaunay3 {
             return Err(MailleError::MeshingFailed);
         }
 
+        // d'abord sans les tétraèdres dont la sphère passe par p ; si la cavité est incohérente
+        // (points cosphériques en nombre), avec eux
+        let (cavity, boundary, edges) = [false, true]
+            .into_iter()
+            .find_map(|ties| self.cavity(start, p, ties))
+            .ok_or(MailleError::MeshingFailed)?;
+        // position de chaque face du bord dans le tétraèdre d'en face : celle du sommet qui n'en fait pas partie
+        let outside: Vec<Option<(usize, usize)>> = boundary
+            .iter()
+            .map(|&([a, b, c], o)| match o {
+                None => Ok(None),
+                Some(o) => self.tets[o]
+                    .v
+                    .iter()
+                    .position(|v| ![a, b, c].contains(v))
+                    .map(|j| Some((o, j)))
+                    .ok_or(MailleError::MeshingFailed),
+            })
+            .collect::<Result<_, _>>()?;
+
+        let pi = self.points.len();
+        self.points.push(p);
+        self.vertex_tet.push(0);
+        for &t in &cavity {
+            self.tets[t].alive = false;
+        }
+        let first = self.tets.len();
+        for (k, (&([a, b, c], o), &link)) in boundary.iter().zip(&outside).enumerate() {
+            let mut n = [None, None, None, o];
+            for (slot, edge) in n.iter_mut().zip([(c, b), (a, c), (b, a)]) {
+                *slot = Some(first + edges[&edge].0);
+            }
+            self.tets.push(Tet {
+                v: [a, b, c, pi],
+                n,
+                alive: true,
+            });
+            for v in [a, b, c, pi] {
+                self.vertex_tet[v] = first + k;
+            }
+            if let Some((o, j)) = link {
+                self.tets[o].n[j] = Some(first + k);
+            }
+        }
+        self.hint = first;
+        Ok(pi - SUPER)
+    }
+
+    /// Cavité de `p` à partir du tétraèdre `start` : tétraèdres à retirer, faces (a, b, c) de son
+    /// bord et arêtes orientées de ces faces. `ties` : y mettre aussi les tétraèdres dont la
+    /// sphère passe par p. `None` si la cavité n'est pas étoilée vue de p.
+    fn cavity(&self, start: usize, p: [f64; 3], ties: bool) -> Option<Cavity> {
         // cavité : tétraèdres connexes au tétraèdre de départ dont la sphère circonscrite contient p ;
         // faces (a, b, c) de son bord, tournées vers la cavité, avec le tétraèdre de l'autre côté
         let mut cavity = vec![start];
@@ -89,7 +152,7 @@ impl Delaunay3 {
             for (i, face) in FACE.iter().enumerate() {
                 match t.n[i] {
                     Some(o) if inside.contains(&o) => {}
-                    Some(o) if self.in_circumsphere(o, p) => {
+                    Some(o) if self.in_circumsphere(o, p, ties) => {
                         inside.insert(o);
                         cavity.push(o);
                     }
@@ -107,7 +170,7 @@ impl Delaunay3 {
                 orient3d(self.points[a], self.points[b], self.points[c], p) <= 0.0
             })
         {
-            return Err(MailleError::MeshingFailed);
+            return None;
         }
         // arêtes orientées du bord : chacune doit avoir son inverse dans une autre face
         let mut edges: HashMap<(usize, usize), (usize, usize)> = HashMap::new();
@@ -120,47 +183,13 @@ impl Delaunay3 {
         if edges.len() != 3 * boundary.len()
             || edges.keys().any(|&(x, y)| !edges.contains_key(&(y, x)))
         {
-            return Err(MailleError::MeshingFailed);
+            return None;
         }
-        // position de chaque face du bord dans le tétraèdre d'en face : celle du sommet qui n'en fait pas partie
-        let outside: Vec<Option<(usize, usize)>> = boundary
-            .iter()
-            .map(|&([a, b, c], o)| match o {
-                None => Ok(None),
-                Some(o) => self.tets[o]
-                    .v
-                    .iter()
-                    .position(|v| ![a, b, c].contains(v))
-                    .map(|j| Some((o, j)))
-                    .ok_or(MailleError::MeshingFailed),
-            })
-            .collect::<Result<_, _>>()?;
-
-        let pi = self.points.len();
-        self.points.push(p);
-        for &t in &cavity {
-            self.tets[t].alive = false;
-        }
-        let first = self.tets.len();
-        for (k, (&([a, b, c], o), &link)) in boundary.iter().zip(&outside).enumerate() {
-            let mut n = [None, None, None, o];
-            for (slot, edge) in n.iter_mut().zip([(c, b), (a, c), (b, a)]) {
-                *slot = Some(first + edges[&edge].0);
-            }
-            self.tets.push(Tet {
-                v: [a, b, c, pi],
-                n,
-                alive: true,
-            });
-            if let Some((o, j)) = link {
-                self.tets[o].n[j] = Some(first + k);
-            }
-        }
-        self.hint = first;
-        Ok(pi - SUPER)
+        Some((cavity, boundary, edges))
     }
 
     /// Nombre de points insérés.
+    #[cfg(test)]
     pub fn point_count(&self) -> usize {
         self.points.len() - SUPER
     }
@@ -175,13 +204,47 @@ impl Delaunay3 {
             .collect()
     }
 
+    /// Vrai si les points insérés `a` et `b` sont reliés par une arête.
+    pub fn has_edge(&self, a: usize, b: usize) -> bool {
+        let (a, b) = (a + SUPER, b + SUPER);
+        self.tets_around(a).any(|t| self.tets[t].v.contains(&b))
+    }
+
+    /// Vrai si les points insérés `a`, `b` et `c` forment une face d'un tétraèdre.
+    pub fn has_face(&self, a: usize, b: usize, c: usize) -> bool {
+        let (a, b, c) = (a + SUPER, b + SUPER, c + SUPER);
+        self.tets_around(a)
+            .any(|t| self.tets[t].v.contains(&b) && self.tets[t].v.contains(&c))
+    }
+
+    /// Tétraèdres vivants qui contiennent le point `v` (indice brut), de proche en proche par les
+    /// faces qui le contiennent.
+    fn tets_around(&self, v: usize) -> impl Iterator<Item = usize> {
+        let mut seen = HashSet::from([self.vertex_tet[v]]);
+        let mut stack = vec![self.vertex_tet[v]];
+        let mut out = Vec::new();
+        while let Some(t) = stack.pop() {
+            out.push(t);
+            let tet = self.tets[t];
+            for (i, &o) in tet.n.iter().enumerate() {
+                if tet.v[i] != v {
+                    if let Some(o) = o.filter(|o| seen.insert(*o)) {
+                        stack.push(o);
+                    }
+                }
+            }
+        }
+        out.into_iter()
+    }
+
     fn corners(&self, t: usize) -> [[f64; 3]; 4] {
         self.tets[t].v.map(|v| self.points[v])
     }
 
-    fn in_circumsphere(&self, t: usize, p: [f64; 3]) -> bool {
+    fn in_circumsphere(&self, t: usize, p: [f64; 3], ties: bool) -> bool {
         let [a, b, c, d] = self.corners(t);
-        insphere(a, b, c, d, p) > 0.0
+        let s = insphere(a, b, c, d, p);
+        s > 0.0 || (ties && s == 0.0)
     }
 
     /// Plus grande arête du tétraèdre `t` : l'échelle du test de point confondu.

@@ -3,6 +3,9 @@
 
 use std::f64::consts::PI;
 
+use std::collections::HashMap;
+
+use maille_core::mesher::{tetrahedralize, Tetrahedralization};
 use maille_io::stl::{read_surface, Surface};
 use maille_io::IoError;
 
@@ -126,10 +129,8 @@ fn normales_rentrantes_corrigees() {
     assert!(near(s.volume(), 6.0), "{}", s.volume());
 }
 
-/// Cylindre facetté de n côtés (rayon 1, hauteur 2) : volume ½ n sin(2π/n) · h, trois patches.
-#[test]
-fn cylindre_trois_patches_par_angle_vif() {
-    let n = 64;
+/// Cylindre facetté de n côtés (rayon 1, hauteur 2).
+fn cylinder(n: usize) -> Vec<Facet> {
     let at = |i: usize, z: f64| {
         let t = 2.0 * PI * i as f64 / n as f64;
         [t.cos(), t.sin(), z]
@@ -142,6 +143,14 @@ fn cylindre_trois_patches_par_angle_vif() {
         facets.push([[0., 0., 0.], at(j, 0.), at(i, 0.)]);
         facets.push([[0., 0., 2.], at(i, 2.), at(j, 2.)]);
     }
+    facets
+}
+
+/// Volume ½ n sin(2π/n) · h, trois patches.
+#[test]
+fn cylindre_trois_patches_par_angle_vif() {
+    let n = 64;
+    let facets = cylinder(n);
     let s = read_surface(&ascii(&[("cyl", &facets)]), 30.0).unwrap();
     let exact = 0.5 * n as f64 * (2.0 * PI / n as f64).sin() * 2.0;
     assert!(near(s.volume(), exact), "{} contre {exact}", s.volume());
@@ -201,4 +210,190 @@ fn fichiers_illisibles_refuses() {
     let facets = flat(&cuboid(1., 1., 1., [0.; 3]));
     assert!(message(read_surface(&ascii(&[("b", &facets)]), 0.0)).contains("angle vif"));
     assert!(message(read_surface(b"solid vide\nendsolid vide\n", 30.0)).contains("aucune facette"));
+}
+
+/// Prisme en L (équerre de 2 × 2 dont on retire un carré, épaisseur 1) : volume 3, arête rentrante.
+fn l_prism() -> Vec<Facet> {
+    let mut facets = Vec::new();
+    for (x, y) in [(0., 0.), (1., 0.), (0., 1.)] {
+        for z in [0., 1.] {
+            let q = |dx: f64, dy: f64| [x + dx, y + dy, z];
+            let (t1, t2) = (
+                [q(0., 0.), q(1., 0.), q(1., 1.)],
+                [q(0., 0.), q(1., 1.), q(0., 1.)],
+            );
+            if z == 1. {
+                facets.extend([t1, t2]);
+            } else {
+                facets.extend([[t1[0], t1[2], t1[1]], [t2[0], t2[2], t2[1]]]);
+            }
+        }
+    }
+    let ring = [
+        (0., 0.),
+        (1., 0.),
+        (2., 0.),
+        (2., 1.),
+        (1., 1.),
+        (1., 2.),
+        (0., 2.),
+        (0., 1.),
+    ];
+    for k in 0..ring.len() {
+        let (p, q) = (ring[k], ring[(k + 1) % ring.len()]);
+        let at = |c: (f64, f64), z: f64| [c.0, c.1, z];
+        facets.push([at(p, 0.), at(q, 0.), at(q, 1.)]);
+        facets.push([at(p, 0.), at(q, 1.), at(p, 1.)]);
+    }
+    facets
+}
+
+fn tet_volume(t: &Tetrahedralization<4>, tet: [usize; 4]) -> f64 {
+    let p = tet.map(|i| [t.nodes[i].x, t.nodes[i].y, t.nodes[i].z]);
+    let (u, v, w) = (
+        [p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]],
+        [p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]],
+        [p[3][0] - p[0][0], p[3][1] - p[0][1], p[3][2] - p[0][2]],
+    );
+    (u[0] * (v[1] * w[2] - v[2] * w[1]) - u[1] * (v[0] * w[2] - v[2] * w[0])
+        + u[2] * (v[0] * w[1] - v[1] * w[0]))
+        / 6.0
+}
+
+/// Volume des tétraèdres égal à celui du solide, tétraèdres positifs, faces de bord = faces à un
+/// seul tétraèdre, aire du bord égale à celle de la surface.
+fn check_tetrahedralization(s: &Surface, t: &Tetrahedralization<4>) {
+    let mut volume = 0.0;
+    let mut count: HashMap<[usize; 3], usize> = HashMap::new();
+    for &tet in &t.tetrahedra {
+        let v = tet_volume(t, tet);
+        assert!(v > 0.0, "tétraèdre {tet:?} non positif : {v}");
+        volume += v;
+        for face in [[0, 1, 2], [0, 3, 1], [1, 3, 2], [2, 3, 0]] {
+            let mut f = face.map(|k| tet[k]);
+            f.sort_unstable();
+            *count.entry(f).or_default() += 1;
+        }
+    }
+    assert!(near(volume, s.volume()), "{volume} contre {}", s.volume());
+    assert!(count.values().all(|&c| c <= 2));
+    let on_surface = count.values().filter(|&&c| c == 1).count();
+    let (mut faces, mut area) = (0, 0.0);
+    for name in t.boundary_names() {
+        let set = t.boundary(name).unwrap();
+        for &(e, f) in &set.faces {
+            let face = [[0, 1, 2], [0, 3, 1], [1, 3, 2], [2, 3, 0]][f].map(|k| t.tetrahedra[e][k]);
+            let [a, b, c] = face.map(|i| [t.nodes[i].x, t.nodes[i].y, t.nodes[i].z]);
+            let (u, v) = (
+                [b[0] - a[0], b[1] - a[1], b[2] - a[2]],
+                [c[0] - a[0], c[1] - a[1], c[2] - a[2]],
+            );
+            let n = [
+                u[1] * v[2] - u[2] * v[1],
+                u[2] * v[0] - u[0] * v[2],
+                u[0] * v[1] - u[1] * v[0],
+            ];
+            area += 0.5 * (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            faces += 1;
+        }
+    }
+    assert_eq!(
+        faces, on_surface,
+        "faces de bord contre faces à un tétraèdre"
+    );
+    assert!(
+        near(area, s.area()),
+        "aire du bord {area} contre {}",
+        s.area()
+    );
+}
+
+#[test]
+fn boite_tetraedres_conformes() {
+    let s = read_surface(
+        &ascii(&[("boite", &flat(&cuboid(2., 3., 4., [0.; 3])))]),
+        30.0,
+    )
+    .unwrap();
+    let t = tetrahedralize(&s).unwrap();
+    check_tetrahedralization(&s, &t);
+    let names: Vec<_> = t.boundary_names().collect();
+    assert_eq!(
+        names,
+        [
+            "surface_1",
+            "surface_2",
+            "surface_3",
+            "surface_4",
+            "surface_5",
+            "surface_6"
+        ]
+    );
+}
+
+#[test]
+fn solids_nommes_donnent_les_bords() {
+    let faces = cuboid(1., 1., 1., [0.; 3]);
+    let names = ["gauche", "droite", "devant", "derriere", "bas", "haut"];
+    let solids: Vec<(&str, &[Facet])> = names
+        .iter()
+        .zip(&faces)
+        .map(|(n, f)| (*n, f.as_slice()))
+        .collect();
+    let s = read_surface(&ascii(&solids), 30.0).unwrap();
+    let t = tetrahedralize(&s).unwrap();
+    check_tetrahedralization(&s, &t);
+    assert!(t
+        .boundary("gauche")
+        .unwrap()
+        .nodes
+        .iter()
+        .all(|&i| t.nodes[i].x == 0.0));
+    assert!(t
+        .boundary("haut")
+        .unwrap()
+        .nodes
+        .iter()
+        .all(|&i| t.nodes[i].z == 1.0));
+    assert!(t.boundary("dessous").is_err());
+}
+
+#[test]
+fn cylindre_tetraedres_conformes() {
+    let s = read_surface(&ascii(&[("cyl", &cylinder(64))]), 30.0).unwrap();
+    let t = tetrahedralize(&s).unwrap();
+    check_tetrahedralization(&s, &t);
+    assert_eq!(t.boundary_names().count(), 3);
+}
+
+#[test]
+fn prisme_en_l_non_convexe() {
+    let s = read_surface(&ascii(&[("l", &l_prism())]), 30.0).unwrap();
+    assert!(near(s.volume(), 3.0));
+    let t = tetrahedralize(&s).unwrap();
+    check_tetrahedralization(&s, &t);
+}
+
+/// 256 sommets cosphériques : le Delaunay a des égalités partout, la surface reste récupérée.
+#[test]
+fn cylindre_fin_de_128_cotes() {
+    let s = read_surface(&ascii(&[("cyl", &cylinder(128))]), 30.0).unwrap();
+    let t = tetrahedralize(&s).unwrap();
+    check_tetrahedralization(&s, &t);
+}
+
+/// Éventail de 200 triangles de 1,8° au centre : hors de portée, refusé avec un message.
+#[test]
+fn eventail_trop_effile_refuse() {
+    let s = read_surface(&ascii(&[("cyl", &cylinder(200))]), 30.0).unwrap();
+    let m = tetrahedralize(&s).unwrap_err().to_string();
+    assert!(m.contains("ne se laisse pas récupérer"), "{m}");
+}
+
+#[test]
+fn surface_inutilisable_refusee() {
+    let mut s = read_surface(&ascii(&[("b", &flat(&cuboid(1., 1., 1., [0.; 3])))]), 30.0).unwrap();
+    s.triangles[0][0] = 99;
+    let m = tetrahedralize(&s).unwrap_err().to_string();
+    assert!(m.contains("sommet qui n'existe pas"), "{m}");
 }
