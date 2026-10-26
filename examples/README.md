@@ -23,6 +23,7 @@ maille view trempe.pvd 50         # un incrément précis, depuis 0
 | `traction` | plaque en contraintes planes, Tri6 | champ linéaire |
 | `trempe` | thermique transitoire, 200 incréments | série de Fourier |
 | `tube_thermique` puis `tube_contraintes` | couplage thermo-mécanique (lancer dans cet ordre) | Timoshenko et Goodier |
+| `tube_pression` | pression sur un bord, déformations planes | Lamé |
 | `cube` | 3D, Tet4 (ouvrir dans ParaView) | champ linéaire |
 
 Les tests lancent chaque exemple et le comparent à sa solution exacte : ils restent justes.
@@ -60,6 +61,7 @@ Une clé inconnue ou mal écrite est une erreur, avec la ligne et la colonne. Le
 | `[[loads]]` | comme `[[bcs]]` : une force **par Node** (pas la force totale) |
 | `[[heat_sources]]` | `set` d'Elements, `value` (puissance par volume) |
 | `[[convections]]` | `set` de bord, `film` (h) et `sink` (T∞) |
+| `[[pressures]]` | `set` de bord, `value` : une pression positive comprime (contre la normale sortante), négative elle tire. Statique, triangles et tétraèdres |
 | `[temperatures]` | couplage : `from` (un `.pvd` thermique sur le même maillage), `increment`, `reference` (T_ref) |
 | `[step]` | absent : calcul linéaire. Sinon `kind`, `duration`, `increments` |
 
@@ -69,7 +71,7 @@ Une clé inconnue ou mal écrite est une erreur, avec la ligne et la colonne. Le
 - `kind = "quasi_static"` (analyse statique, plasticité) : `amplitude = [[0, 0], [1, 1]]` multiplie
   les charges et les valeurs des BC (rampe de 0 à 1 par défaut). Le premier point est (0, 0).
 
-Pas encore possible : une valeur de BC qui varie le long d'un bord, et la pression sur une face.
+Pas encore possible : une valeur de BC qui varie le long d'un bord.
 
 ## Les résultats : VTK `.vtu` + `.pvd`
 

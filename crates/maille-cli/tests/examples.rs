@@ -280,6 +280,45 @@ fn tube_thermal_stresses_follow_timoshenko() {
 }
 
 #[test]
+fn tube_under_pressure_follows_lame() {
+    let w = Workdir::new("tube-pression");
+    w.solve("tube_pression.toml");
+    let (_, r) = w.results("tube_pression.pvd", None);
+    let s = array(&r, "stress");
+    let (pi, po, ri, ro, nu): (f64, f64, f64, f64, f64) = (100.0, 20.0, 10.0, 20.0, 0.3);
+    let span = ro * ro - ri * ri;
+    let a = (pi * ri * ri - po * ro * ro) / span;
+    let b = (pi - po) * ri * ri * ro * ro / span;
+    let scale = a + b / (ri * ri);
+    let (mut sum, mut count) = (0.0, 0);
+    for (i, p) in r.nodes.iter().enumerate() {
+        let radius = p.x.hypot(p.y);
+        let (c, sn) = (p.x / radius, p.y / radius);
+        let (xx, yy, xy) = (s[6 * i], s[6 * i + 1], s[6 * i + 3]);
+        let got = [
+            xx * c * c + yy * sn * sn + 2.0 * xy * c * sn,
+            xx * sn * sn + yy * c * c - 2.0 * xy * c * sn,
+            s[6 * i + 2],
+        ];
+        let want = [
+            a - b / (radius * radius),
+            a + b / (radius * radius),
+            2.0 * nu * a,
+        ];
+        for (g, x) in got.iter().zip(want) {
+            sum += (g - x) * (g - x);
+            count += 1;
+            assert!(
+                (g - x).abs() < 5e-2 * scale,
+                "r = {radius} : {g} contre {x}"
+            );
+        }
+    }
+    let rms = (sum / count as f64).sqrt() / scale;
+    assert!(rms < 4e-3, "erreur RMS {rms:.2e}");
+}
+
+#[test]
 fn commands_report_errors_and_usage() {
     let w = Workdir::new("erreurs");
     let help = w.maille(&[]);
