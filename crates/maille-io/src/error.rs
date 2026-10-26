@@ -1,5 +1,7 @@
 use std::fmt;
 
+use maille_core::MailleError;
+
 use crate::msh::CellKind;
 
 /// Erreur de lecture ou d'écriture d'un fichier. Les messages disent quoi corriger.
@@ -55,6 +57,41 @@ pub enum IoError {
     BoundaryFaceNotFound {
         line: usize,
         set: String,
+    },
+    /// Fichier de modèle TOML mal formé (le message de `toml` donne la ligne et la colonne).
+    Toml(String),
+    /// Le cœur refuse le modèle construit.
+    Model(MailleError),
+    /// Un Set cité par le modèle n'existe pas dans le maillage.
+    UnknownSet {
+        key: String,
+        name: String,
+        known: Vec<String>,
+    },
+    /// Le Set existe mais n'a pas ce qu'il faut (des Elements, des faces, des Nodes).
+    WrongSetKind {
+        name: String,
+        expected: &'static str,
+    },
+    UnknownMaterial {
+        key: String,
+        name: String,
+        known: Vec<String>,
+    },
+    /// Des Elements n'ont aucune section.
+    UncoveredElements {
+        count: usize,
+        first: usize,
+    },
+    /// Un Element est dans deux sections.
+    OverlappingSections {
+        element: usize,
+        first: usize,
+        second: usize,
+    },
+    /// Modèle incohérent (clé mal combinée, DOF invalide…) : le message dit quoi corriger.
+    InvalidModel {
+        problem: String,
     },
     /// `MshFile` incohérent à l'écriture (indice hors limites, Set mélangé…).
     Invalid {
@@ -117,8 +154,53 @@ impl fmt::Display for IoError {
                 f,
                 "ligne {line} : un élément du groupe « {set} » ne correspond à aucune face d'Element : le bord doit être maillé avec le domaine"
             ),
+            Self::Toml(message) => write!(f, "fichier de modèle : {message}"),
+            Self::Model(e) => write!(f, "{e}"),
+            Self::UnknownSet { key, name, known } => write!(
+                f,
+                "{key} : le maillage n'a pas de Set « {name} » ; Sets connus : {}",
+                names(known)
+            ),
+            Self::WrongSetKind { name, expected } => write!(
+                f,
+                "le Set « {name} » ne convient pas ici : il faut un Set {expected}"
+            ),
+            Self::UnknownMaterial { key, name, known } => write!(
+                f,
+                "{key} : matériau « {name} » inconnu ; matériaux définis : {}",
+                names(known)
+            ),
+            Self::UncoveredElements { count, first } => write!(
+                f,
+                "{count} Element(s) sans section, dont l'Element {first} : ajouter une [[sections]] qui couvre tout le domaine"
+            ),
+            Self::OverlappingSections {
+                element,
+                first,
+                second,
+            } => write!(
+                f,
+                "l'Element {element} est dans sections[{first}] et sections[{second}] : une seule section par Element"
+            ),
+            Self::InvalidModel { problem } => write!(f, "{problem}"),
             Self::Invalid { problem } => write!(f, "MshFile invalide : {problem}"),
         }
+    }
+}
+
+fn names(list: &[String]) -> String {
+    if list.is_empty() {
+        return "aucun".to_string();
+    }
+    list.iter()
+        .map(|n| format!("« {n} »"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+impl From<MailleError> for IoError {
+    fn from(e: MailleError) -> Self {
+        Self::Model(e)
     }
 }
 
