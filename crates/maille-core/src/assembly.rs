@@ -1,12 +1,13 @@
 use crate::element::{
-    bar_stiffness, beam_stiffness, conduction, heat_fluxes, plane_d, plane_gauss, plane_stiffness,
-    plane_stresses, solid_d, solid_gauss, solid_stiffness, solid_stresses, GaussData,
+    bar_stiffness, beam_stiffness, capacity, conduction, heat_fluxes, plane_d, plane_gauss,
+    plane_stiffness, plane_stresses, solid_d, solid_gauss, solid_stiffness, solid_stresses,
+    GaussData,
 };
 use crate::material::Material;
 use crate::mesh::{Element, Mesh, PlaneState, Tet10, Tet4, Tri3, Tri6};
 use crate::quadrature::{
-    GaussPoint, LinePoint, TetGaussPoint, LINE_2, LINE_3, TETRA_1, TETRA_4, TRIANGLE_1, TRIANGLE_3,
-    TRIANGLE_6,
+    GaussPoint, LinePoint, TetGaussPoint, LINE_2, LINE_3, TETRA_1, TETRA_14, TETRA_4, TRIANGLE_1,
+    TRIANGLE_3, TRIANGLE_6,
 };
 use crate::results::{HeatFlux, Stress};
 use crate::shape::{line2, line3, tet10, tet4, tri3_vec, tri6_vec, ShapeFn, SolidShapeFn};
@@ -221,6 +222,50 @@ pub fn element_conduction(mesh: &Mesh, i: usize) -> Vec<Vec<f64>> {
     }
 }
 
+/// ρc du Material, que `Model` garantit présent en thermique transitoire.
+fn heat_capacity(material: &Material) -> f64 {
+    material.density.unwrap_or(0.0) * material.specific_heat.unwrap_or(0.0)
+}
+
+/// Matrice de capacité cohérente de l'Element `i`, un DOF (T) par Node dans l'ordre de ses Nodes.
+/// Règle de Gauss d'un degré au-dessus de celle de la conduction : N Nᵀ y est intégré exactement.
+/// Vide pour les Bar et Beam.
+pub fn element_capacity(mesh: &Mesh, i: usize) -> Vec<Vec<f64>> {
+    let e = &mesh.elements[i];
+    let rho_c = heat_capacity(e.material());
+    match e {
+        Element::Tri3(t) => {
+            let kernel = PlaneKernel {
+                rule: &TRIANGLE_3,
+                ..PlaneKernel::tri3(t)
+            };
+            capacity(&kernel.gauss(mesh), rho_c)
+        }
+        Element::Tri6(t) => {
+            let kernel = PlaneKernel {
+                rule: &TRIANGLE_6,
+                ..PlaneKernel::tri6(t)
+            };
+            capacity(&kernel.gauss(mesh), rho_c)
+        }
+        Element::Tet4(t) => {
+            let kernel = SolidKernel {
+                rule: &TETRA_4,
+                ..SolidKernel::tet4(t)
+            };
+            capacity(&kernel.gauss(mesh), rho_c)
+        }
+        Element::Tet10(t) => {
+            let kernel = SolidKernel {
+                rule: &TETRA_14,
+                ..SolidKernel::tet10(t)
+            };
+            capacity(&kernel.gauss(mesh), rho_c)
+        }
+        Element::Bar(_) | Element::Beam(_) => Vec::new(),
+    }
+}
+
 /// Flux de chaleur aux points de Gauss de l'Element `i`, à partir des températures `t` des Nodes.
 /// Vide pour les Bar et Beam.
 pub fn element_heat_fluxes(mesh: &Mesh, i: usize, t: &[f64]) -> Vec<HeatFlux> {
@@ -350,4 +395,120 @@ pub fn face_convection(
         matrix,
         load,
     })
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::*;
+    use crate::mesh::Node;
+    use crate::shape::{TET10_EDGES, TRI6_EDGES};
+
+    const RHO_C: f64 = 3.0 * 0.5; // ρ = 3, c = 0,5
+
+    fn material() -> Material {
+        Material::conductive(1.0)
+            .and_then(|m| m.with_density(3.0))
+            .and_then(|m| m.with_specific_heat(0.5))
+            .unwrap()
+    }
+
+    /// Somme de tous les monômes de degré `p` en `s` (polynôme symétrique complet h_p).
+    fn complete(s: &[f64], p: u32) -> f64 {
+        match s {
+            [] => f64::from(u8::from(p == 0)),
+            [first, rest @ ..] => (0..=p)
+                .map(|k| first.powi(k as i32) * complete(rest, p - k))
+                .sum(),
+        }
+    }
+
+    /// ∫ (g·x)^p sur un simplexe de dimension d, de mesure `measure`, dont les sommets valent sᵢ = g·xᵢ :
+    /// en coordonnées barycentriques, ∫ λ^α = measure d! α! / (|α| + d)!, d'où measure p! d! h_p(s) / (p + d)!.
+    fn simplex_power(s: &[f64], p: u32, measure: f64) -> f64 {
+        let fact = |n: u32| (1..=n).map(f64::from).product::<f64>();
+        let d = s.len() as u32 - 1;
+        measure * fact(p) * fact(d) / fact(p + d) * complete(s, p)
+    }
+
+    /// Les Nodes `v` (sommets) suivis des milieux des arêtes `edges`.
+    fn with_mids(v: &[Node], edges: &[(usize, usize)]) -> Vec<Node> {
+        let mut nodes = v.to_vec();
+        nodes.extend(edges.iter().map(|&(a, b)| {
+            Node::new(
+                (v[a].x + v[b].x) / 2.0,
+                (v[a].y + v[b].y) / 2.0,
+                (v[a].z + v[b].z) / 2.0,
+            )
+        }));
+        nodes
+    }
+
+    /// C symétrique, Σ C = ρc V, et Tᵀ C T = ρc ∫ φ² dV pour φ = g·x (linéaire) ou (g·x)²
+    /// (quadratique), que l'Element représente exactement.
+    fn check(mesh: &Mesh, vertices: usize, volume: f64, quadratic: bool) {
+        let c = element_capacity(mesh, 0);
+        let g = [3.0, -2.0, 0.5];
+        let s = |n: &Node| g[0] * n.x + g[1] * n.y + g[2] * n.z;
+        let power = if quadratic { 2 } else { 1 };
+        let t: Vec<f64> = mesh.nodes.iter().map(|n| s(n).powi(power)).collect();
+        let mut total = 0.0;
+        let mut energy = 0.0;
+        for (i, row) in c.iter().enumerate() {
+            for (j, v) in row.iter().enumerate() {
+                assert!((v - c[j][i]).abs() < 1e-14 * c[0][0]);
+                total += v;
+                energy += t[i] * v * t[j];
+            }
+        }
+        assert!(
+            (total - RHO_C * volume).abs() < 1e-13 * volume,
+            "Σ C = {total}"
+        );
+        let corners: Vec<f64> = mesh.nodes[..vertices].iter().map(s).collect();
+        let expected = RHO_C * simplex_power(&corners, 2 * power as u32, volume);
+        assert!(
+            (energy - expected).abs() < 1e-12 * expected,
+            "{energy} au lieu de {expected}"
+        );
+    }
+
+    #[test]
+    fn capacity_matrices_are_exact() {
+        let m = material();
+        let tri = [
+            Node::new_2d(0.0, 0.0),
+            Node::new_2d(2.0, 0.0),
+            Node::new_2d(0.0, 3.0),
+        ]; // aire 3, épaisseur 0,5
+        let tri3 = Tri3::new([0, 1, 2], m, 0.5, PlaneState::Stress).unwrap();
+        check(
+            &Mesh::new(tri.to_vec(), vec![Element::Tri3(tri3)]).unwrap(),
+            3,
+            1.5,
+            false,
+        );
+        let tri6 = Tri6::new([0, 1, 2, 3, 4, 5], m, 0.5, PlaneState::Stress).unwrap();
+        check(
+            &Mesh::new(with_mids(&tri, &TRI6_EDGES), vec![Element::Tri6(tri6)]).unwrap(),
+            3,
+            1.5,
+            true,
+        );
+
+        let tet = [
+            Node::new(0.0, 0.0, 0.0),
+            Node::new(2.0, 0.0, 0.0),
+            Node::new(0.0, 3.0, 0.0),
+            Node::new(0.0, 0.0, 1.0),
+        ]; // volume 1
+        let tet4 = Element::Tet4(Tet4::new([0, 1, 2, 3], m));
+        check(&Mesh::new(tet.to_vec(), vec![tet4]).unwrap(), 4, 1.0, false);
+        let tet10 = Element::Tet10(Tet10::new(std::array::from_fn(|k| k), m));
+        check(
+            &Mesh::new(with_mids(&tet, &TET10_EDGES), vec![tet10]).unwrap(),
+            4,
+            1.0,
+            true,
+        );
+    }
 }

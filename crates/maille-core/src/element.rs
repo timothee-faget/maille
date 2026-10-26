@@ -284,6 +284,21 @@ pub fn conduction<const D: usize>(points: &[GaussData<D>], k: f64) -> Vec<Vec<f6
     ke
 }
 
+/// Matrice de capacité cohérente C = Σ_g w_g ρc N Nᵀ, un DOF (T) par Node. La règle de Gauss doit
+/// intégrer exactement N Nᵀ (degré 2 pour Tri3 et Tet4, 4 pour Tri6 et Tet10).
+pub fn capacity<const D: usize>(points: &[GaussData<D>], rho_c: f64) -> Vec<Vec<f64>> {
+    let m = points.first().map_or(0, |p| p.n.len());
+    let mut ce = vec![vec![0.0; m]; m];
+    for p in points {
+        for (row, ni) in ce.iter_mut().zip(&p.n) {
+            for (v, nj) in row.iter_mut().zip(&p.n) {
+                *v += p.weight * rho_c * ni * nj;
+            }
+        }
+    }
+    ce
+}
+
 /// Flux de chaleur q = −k ∇T aux points de Gauss ; `t_e` : températures des Nodes de l'Element.
 /// En 2D, z et qz sont nuls.
 pub fn heat_fluxes<const D: usize>(points: &[GaussData<D>], k: f64, t_e: &[f64]) -> Vec<HeatFlux> {

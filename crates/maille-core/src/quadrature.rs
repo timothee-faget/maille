@@ -137,6 +137,45 @@ pub const TETRA_4: [TetGaussPoint; 4] = [
     },
 ];
 
+/// 14 points (Walkington), tous les poids positifs : exacte pour les polynômes de degré ≤ 5. Sert à
+/// la capacité des Tet10 (N Nᵀ de degré 4). Deux groupes de 4 points (coordonnées barycentriques
+/// a, a, a, 1 − 3a) et un groupe de 6 (b, b, 1/2 − b, 1/2 − b), constantes résolues à l'arrondi près.
+pub const TETRA_14: [TetGaussPoint; 14] = {
+    const A1: f64 = 0.092_735_250_310_891_42;
+    const W1: f64 = 0.012_248_840_519_393_72;
+    const A2: f64 = 0.310_885_919_263_300_8;
+    const W2: f64 = 0.018_781_320_953_002_83;
+    const B: f64 = 0.045_503_704_125_648_51;
+    const W3: f64 = 0.007_091_003_462_846_74;
+    const C1: f64 = 1.0 - 3.0 * A1;
+    const C2: f64 = 1.0 - 3.0 * A2;
+    const D: f64 = 0.5 - B;
+    const fn p(xi: f64, eta: f64, zeta: f64, weight: f64) -> TetGaussPoint {
+        TetGaussPoint {
+            xi,
+            eta,
+            zeta,
+            weight,
+        }
+    }
+    [
+        p(A1, A1, A1, W1),
+        p(C1, A1, A1, W1),
+        p(A1, C1, A1, W1),
+        p(A1, A1, C1, W1),
+        p(A2, A2, A2, W2),
+        p(C2, A2, A2, W2),
+        p(A2, C2, A2, W2),
+        p(A2, A2, C2, W2),
+        p(B, B, D, W3),
+        p(B, D, B, W3),
+        p(D, B, B, W3),
+        p(D, D, B, W3),
+        p(D, B, D, W3),
+        p(B, D, D, W3),
+    ]
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,6 +252,23 @@ mod tests {
                 "ξ^{a} η^{b} ζ^{c}"
             );
         }
+    }
+
+    #[test]
+    fn fourteen_point_tet_rule_is_exact_up_to_degree_5() {
+        for d in 0..=5 {
+            for a in 0..=d {
+                for b in 0..=d - a {
+                    let c = d - a - b;
+                    assert!(
+                        (integrate_tet(&TETRA_14, a, b, c) - exact_tet(a, b, c)).abs() < 1e-15,
+                        "ξ^{a} η^{b} ζ^{c}"
+                    );
+                }
+            }
+        }
+        assert!((integrate_tet(&TETRA_14, 6, 0, 0) - exact_tet(6, 0, 0)).abs() > 1e-7);
+        assert!(TETRA_14.iter().all(|g| g.weight > 0.0));
     }
 
     #[test]

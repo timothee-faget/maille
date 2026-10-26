@@ -67,6 +67,14 @@ pub enum MailleError {
     MissingConductivity {
         element: usize,
     },
+    /// Une analyse thermique transitoire a besoin de ρ.
+    MissingDensity {
+        element: usize,
+    },
+    /// Une analyse thermique transitoire a besoin de c.
+    MissingSpecificHeat {
+        element: usize,
+    },
     /// Face inexistante (triangle : 0 à 2, tétraèdre : 0 à 3 ; aucune pour Bar et Beam).
     UnknownFace {
         element: usize,
@@ -207,6 +215,14 @@ impl fmt::Display for MailleError {
             Self::MissingConductivity { element } => write!(
                 f,
                 "le Material de l'Element {element} n'a pas de conductivité thermique, requise en thermique : le créer avec Material::conductive ou ajouter with_conductivity"
+            ),
+            Self::MissingDensity { element } => write!(
+                f,
+                "le Material de l'Element {element} n'a pas de masse volumique, requise en thermique transitoire : ajouter with_density"
+            ),
+            Self::MissingSpecificHeat { element } => write!(
+                f,
+                "le Material de l'Element {element} n'a pas de chaleur massique, requise en thermique transitoire : ajouter with_specific_heat"
             ),
             Self::UnknownFace { element, face } => write!(
                 f,
