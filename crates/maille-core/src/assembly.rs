@@ -468,30 +468,48 @@ impl FaceConvection {
     }
 }
 
-/// Convection de coefficient `film` vers la température `sink` sur la face `face` de l'Element `i`
-/// (numérotation de `Element::face_nodes`). `None` si la face n'existe pas. En 2D, la face est une
-/// arête et l'épaisseur t multiplie l'intégrale.
-pub fn face_convection(
-    mesh: &Mesh,
-    i: usize,
-    face: usize,
-    film: f64,
-    sink: f64,
-) -> Option<FaceConvection> {
+/// Intégration sur une face d'Element : Nodes de la face, points de Gauss et normale sortante.
+struct FaceRule {
+    /// Positions des Nodes de la face dans ceux de l'Element (`Element::face_positions`).
+    positions: Vec<usize>,
+    /// (poids w |dS|, valeurs N) aux points de Gauss de la face. En 2D, la face est une arête et
+    /// l'épaisseur t multiplie le poids.
+    points: Vec<(f64, Vec<f64>)>,
+    /// Normale unitaire sortante (z = 0 en 2D).
+    normal: [f64; 3],
+}
+
+/// Règle d'intégration de la face `face` de l'Element `i`, ou `None` si la face n'existe pas ou si
+/// l'Element est une Bar ou une Beam. La normale est orientée vers l'extérieur en la comparant à la
+/// direction du centre de l'Element vers celui de la face, sans dépendre du sens des faces.
+fn face_rule(mesh: &Mesh, i: usize, face: usize) -> Option<FaceRule> {
     let e = &mesh.elements[i];
     let positions = e.face_positions(face)?;
     let global: Vec<usize> = positions.iter().map(|&k| e.nodes()[k]).collect();
-    // (poids w |dS|, valeurs N) aux points de Gauss de la face
-    let points: Vec<(f64, Vec<f64>)> = match e {
+    let (points, normal) = match e {
         Element::Tri3(Tri3 { thickness, .. }) | Element::Tri6(Tri6 { thickness, .. }) => {
             let c = mesh.coords(&global);
-            let length = (c[1][0] - c[0][0]).hypot(c[1][1] - c[0][1]);
+            let (dx, dy) = (c[1][0] - c[0][0], c[1][1] - c[0][1]);
+            let length = dx.hypot(dy);
             let linear = global.len() == 2;
             let rule: &[LinePoint] = if linear { &LINE_2 } else { &LINE_3 };
             let shape = if linear { line2 } else { line3 };
-            rule.iter()
+            let points = rule
+                .iter()
                 .map(|p| (p.weight * length * thickness, shape(p.s)))
-                .collect()
+                .collect();
+            let corners = mesh.coords(&e.nodes()[..3]);
+            let outward = [
+                (c[0][0] + c[1][0]) / 2.0 - (corners[0][0] + corners[1][0] + corners[2][0]) / 3.0,
+                (c[0][1] + c[1][1]) / 2.0 - (corners[0][1] + corners[1][1] + corners[2][1]) / 3.0,
+            ];
+            let n = [dy / length, -dx / length];
+            let sign = if n[0] * outward[0] + n[1] * outward[1] < 0.0 {
+                -1.0
+            } else {
+                1.0
+            };
+            (points, [sign * n[0], sign * n[1], 0.0])
         }
         Element::Tet4(_) | Element::Tet10(_) => {
             let c = mesh.coords_3d(&global);
@@ -510,12 +528,41 @@ pub fn face_convection(
             } else {
                 (&TRIANGLE_6, tri6_vec)
             };
-            rule.iter()
+            let points = rule
+                .iter()
                 .map(|g| (g.weight * twice_area, shape(g.xi, g.eta).0))
-                .collect()
+                .collect();
+            let corners = mesh.coords_3d(&e.nodes()[..4]);
+            let outward: [f64; 3] = std::array::from_fn(|k| {
+                (c[0][k] + c[1][k] + c[2][k]) / 3.0
+                    - (corners[0][k] + corners[1][k] + corners[2][k] + corners[3][k]) / 4.0
+            });
+            let dot: f64 = cross.iter().zip(&outward).map(|(a, b)| a * b).sum();
+            let sign = if dot < 0.0 { -1.0 } else { 1.0 };
+            (points, cross.map(|x| sign * x / twice_area))
         }
         Element::Bar(_) | Element::Beam(_) => return None,
     };
+    Some(FaceRule {
+        positions,
+        points,
+        normal,
+    })
+}
+
+/// Convection de coefficient `film` vers la température `sink` sur la face `face` de l'Element `i`
+/// (numérotation de `Element::face_nodes`). `None` si la face n'existe pas. En 2D, la face est une
+/// arête et l'épaisseur t multiplie l'intégrale.
+pub fn face_convection(
+    mesh: &Mesh,
+    i: usize,
+    face: usize,
+    film: f64,
+    sink: f64,
+) -> Option<FaceConvection> {
+    let FaceRule {
+        positions, points, ..
+    } = face_rule(mesh, i, face)?;
     let m = positions.len();
     let mut matrix = vec![vec![0.0; m]; m];
     let mut load = vec![0.0; m];
@@ -531,6 +578,56 @@ pub fn face_convection(
         positions,
         matrix,
         load,
+    })
+}
+
+/// Forces nodales équivalentes à une pression sur une face : `forces` donne, pour chaque Node de
+/// la face (dans l'ordre de `positions`), ses `dim` composantes (x, y en 2D ; x, y, z en 3D).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FacePressure {
+    pub positions: Vec<usize>,
+    pub dim: usize,
+    pub forces: Vec<f64>,
+}
+
+impl FacePressure {
+    /// Ajoute les forces au second membre global `f` ; `dofs` : DOF globaux des Nodes de l'Element
+    /// (`dim` par Node, dans l'ordre de `element_dofs`).
+    pub fn add_load(&self, dofs: &[usize], f: &mut [f64]) {
+        for (k, &p) in self.positions.iter().enumerate() {
+            for c in 0..self.dim {
+                f[dofs[self.dim * p + c]] += self.forces[self.dim * k + c];
+            }
+        }
+    }
+}
+
+/// Pression `value` sur la face `face` de l'Element `i` : f_a = −p ∫ N_a n dS, n étant la normale
+/// sortante. Une pression positive comprime ; négative, elle tire. `None` si la face n'existe pas
+/// ou si l'Element est une Bar ou une Beam. En 2D, l'épaisseur t multiplie l'intégrale.
+pub fn face_pressure(mesh: &Mesh, i: usize, face: usize, value: f64) -> Option<FacePressure> {
+    let FaceRule {
+        positions,
+        points,
+        normal,
+    } = face_rule(mesh, i, face)?;
+    let dim = if matches!(mesh.elements[i], Element::Tet4(_) | Element::Tet10(_)) {
+        3
+    } else {
+        2
+    };
+    let mut forces = vec![0.0; dim * positions.len()];
+    for (w, n) in &points {
+        for (a, na) in n.iter().enumerate() {
+            for c in 0..dim {
+                forces[dim * a + c] -= value * w * na * normal[c];
+            }
+        }
+    }
+    Some(FacePressure {
+        positions,
+        dim,
+        forces,
     })
 }
 
@@ -779,5 +876,136 @@ mod response_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod pressure_tests {
+    use super::*;
+    use crate::mesh::Node;
+    use crate::shape::TET10_EDGES;
+
+    fn material() -> Material {
+        Material::with_poisson(1.0, 0.3).unwrap()
+    }
+
+    fn close(a: &[f64], b: &[f64]) {
+        assert_eq!(a.len(), b.len(), "{a:?} contre {b:?}");
+        for (x, y) in a.iter().zip(b) {
+            assert!((x - y).abs() < 1e-12, "{a:?} contre {b:?}");
+        }
+    }
+
+    /// Triangle rectangle de côté 2, d'épaisseur 3, sur le Mesh à un Element.
+    fn triangle(quadratic: bool) -> Mesh {
+        let mut nodes = vec![
+            Node::new_2d(0.0, 0.0),
+            Node::new_2d(2.0, 0.0),
+            Node::new_2d(0.0, 2.0),
+        ];
+        let element = if quadratic {
+            nodes.extend([
+                Node::new_2d(1.0, 0.0),
+                Node::new_2d(1.0, 1.0),
+                Node::new_2d(0.0, 1.0),
+            ]);
+            Element::Tri6(
+                Tri6::new([0, 1, 2, 3, 4, 5], material(), 3.0, PlaneState::Stress).unwrap(),
+            )
+        } else {
+            Element::Tri3(Tri3::new([0, 1, 2], material(), 3.0, PlaneState::Stress).unwrap())
+        };
+        Mesh::new(nodes, vec![element]).unwrap()
+    }
+
+    fn tetrahedron(quadratic: bool) -> Mesh {
+        let vertices = [[0., 0., 0.], [1., 0., 0.], [0., 1., 0.], [0., 0., 1.]];
+        let mut nodes: Vec<Node> = vertices
+            .iter()
+            .map(|p| Node::new(p[0], p[1], p[2]))
+            .collect();
+        let element = if quadratic {
+            for (a, b) in TET10_EDGES {
+                nodes.push(Node::new(
+                    (vertices[a][0] + vertices[b][0]) / 2.0,
+                    (vertices[a][1] + vertices[b][1]) / 2.0,
+                    (vertices[a][2] + vertices[b][2]) / 2.0,
+                ));
+            }
+            Element::Tet10(Tet10::new([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], material()))
+        } else {
+            Element::Tet4(Tet4::new([0, 1, 2, 3], material()))
+        };
+        Mesh::new(nodes, vec![element]).unwrap()
+    }
+
+    #[test]
+    fn tri3_edge_load_is_half_the_resultant_at_each_node() {
+        // arête du bas (face 0), L = 2, t = 3, p = 5 : la pression pousse vers le haut, 30 en tout
+        let f = face_pressure(&triangle(false), 0, 0, 5.0).unwrap();
+        assert_eq!((f.positions.clone(), f.dim), (vec![0, 1], 2));
+        close(&f.forces, &[0.0, 15.0, 0.0, 15.0]);
+    }
+
+    #[test]
+    fn tri6_edge_load_is_one_sixth_two_thirds_one_sixth() {
+        let f = face_pressure(&triangle(true), 0, 0, 5.0).unwrap();
+        close(&f.forces, &[0.0, 5.0, 0.0, 5.0, 0.0, 20.0]);
+    }
+
+    #[test]
+    fn the_normal_points_out_on_every_edge() {
+        // arête 1 (hypoténuse, normale (1, 1)/√2) : la force est −p L t n, L = 2√2, t = 3
+        let f = face_pressure(&triangle(false), 0, 1, 2.0).unwrap();
+        let half = -2.0 * 2.0 * 2.0_f64.sqrt() * 3.0 / 2.0 / 2.0_f64.sqrt();
+        close(&f.forces, &[half, half, half, half]);
+        // arête 2 (côté gauche, normale (−1, 0)) : poussée vers +x
+        let f = face_pressure(&triangle(false), 0, 2, 2.0).unwrap();
+        close(&f.forces, &[6.0, 0.0, 6.0, 0.0]);
+    }
+
+    #[test]
+    fn tet4_face_load_is_a_third_of_the_resultant_at_each_node() {
+        // face 0 (z = 0), A = 1/2, p = 6 : 3 vers +z, 1 par Node
+        let f = face_pressure(&tetrahedron(false), 0, 0, 6.0).unwrap();
+        assert_eq!(f.dim, 3);
+        close(&f.forces, &[0., 0., 1., 0., 0., 1., 0., 0., 1.]);
+    }
+
+    #[test]
+    fn tet10_face_load_goes_to_the_mid_nodes_only() {
+        // la fonction de forme d'un sommet de Tet10 s'intègre à 0 sur la face, un milieu à A/3
+        let f = face_pressure(&tetrahedron(true), 0, 0, 6.0).unwrap();
+        close(
+            &f.forces,
+            &[
+                0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 1., 0., 0., 1., 0., 0., 1.,
+            ],
+        );
+    }
+
+    #[test]
+    fn a_slanted_face_gets_the_outward_resultant() {
+        // face 2 (1-3-2, plan x + y + z = 1) : A = √3/2, n = (1, 1, 1)/√3, résultante −p A n = −3 (1, 1, 1)
+        let f = face_pressure(&tetrahedron(false), 0, 2, 6.0).unwrap();
+        let total: Vec<f64> = (0..3)
+            .map(|c| (0..3).map(|k| f.forces[3 * k + c]).sum())
+            .collect();
+        close(&total, &[-3.0, -3.0, -3.0]);
+    }
+
+    #[test]
+    fn missing_faces_and_one_dimensional_elements_give_none() {
+        assert!(face_pressure(&triangle(false), 0, 3, 1.0).is_none());
+        let bar = Mesh::new(
+            vec![Node::new_2d(0.0, 0.0), Node::new_2d(1.0, 0.0)],
+            vec![Element::Bar(crate::mesh::Bar {
+                nodes: [0, 1],
+                material: Material::new(1.0).unwrap(),
+                section: crate::material::Section::new(1.0).unwrap(),
+            })],
+        )
+        .unwrap();
+        assert!(face_pressure(&bar, 0, 0, 1.0).is_none());
     }
 }

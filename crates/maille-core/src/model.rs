@@ -4,7 +4,7 @@ use crate::assembly::{
     element_capacity, element_conduction, element_dofs, element_gauss_count,
     element_heat_flux_operator, element_heat_source, element_response, element_stiffness,
     element_stresses, element_thermal_load, element_thermal_strains, face_convection,
-    FaceConvection, FluxOperator,
+    face_pressure, FaceConvection, FluxOperator,
 };
 use crate::element::{bar_equivalent_load, beam_equivalent_load, ElementResponse};
 use crate::error::MailleError;
@@ -57,6 +57,17 @@ pub struct Convection {
     pub film: f64,
     /// Température du fluide T∞, quelconque mais finie. Nom Abaqus : *sink*.
     pub sink: f64,
+}
+
+/// Pression uniforme sur une face d'un Element (statique). Numérotation des faces : voir
+/// `Element::face_nodes`. Positive, elle comprime (elle agit contre la normale sortante, comme
+/// `*DLOAD P` d'Abaqus) ; négative, elle tire.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Pressure {
+    pub element: usize,
+    pub face: usize,
+    /// Une contrainte (ex. MPa), finie.
+    pub value: f64,
 }
 
 /// Physique résolue sur le Mesh.
@@ -199,6 +210,7 @@ pub struct Model {
     distributed: Vec<DistributedLoad>,
     heat_sources: Vec<HeatSource>,
     convection: Vec<Convection>,
+    pressures: Vec<Pressure>,
     /// Champ de températures aux Nodes et T_ref (statique), voir `with_temperatures`.
     temperatures: Option<(Vec<f64>, f64)>,
 }
@@ -260,6 +272,7 @@ impl Model {
             distributed: Vec::new(),
             heat_sources: Vec::new(),
             convection: Vec::new(),
+            pressures: Vec::new(),
             temperatures: None,
         })
     }
@@ -304,6 +317,35 @@ impl Model {
             }
         }
         self.convection = convection;
+        Ok(self)
+    }
+
+    /// Pressions sur des faces, en statique seulement : triangles (Tri3, Tri6) et tétraèdres (Tet4,
+    /// Tet10). Charge morte en petites déformations : elle ne suit pas la déformée. En quasi-statique,
+    /// elle suit l'Amplitude comme les Load. En 2D, l'épaisseur de l'Element multiplie l'intégrale.
+    pub fn with_pressures(mut self, pressures: Vec<Pressure>) -> Result<Self, MailleError> {
+        if self.analysis != Analysis::Static {
+            return Err(MailleError::PressureStaticOnly);
+        }
+        for p in &pressures {
+            let e = self.element(p.element)?;
+            if matches!(e, Element::Bar(_) | Element::Beam(_)) {
+                return Err(MailleError::UnsupportedPressureElement { element: p.element });
+            }
+            if e.face_positions(p.face).is_none() {
+                return Err(MailleError::UnknownFace {
+                    element: p.element,
+                    face: p.face,
+                });
+            }
+            if !p.value.is_finite() {
+                return Err(MailleError::NonFinite {
+                    name: "p (pression)",
+                    value: p.value,
+                });
+            }
+        }
+        self.pressures = pressures;
         Ok(self)
     }
 
@@ -674,6 +716,11 @@ impl Model {
             let equivalent = element_heat_source(mesh, s.element, s.value);
             for (&g, v) in dofs[s.element].iter().zip(equivalent) {
                 f[g] += v;
+            }
+        }
+        for p in &self.pressures {
+            if let Some(terms) = face_pressure(mesh, p.element, p.face, p.value) {
+                terms.add_load(&dofs[p.element], &mut f);
             }
         }
         for (terms, element_dofs) in faces.iter().zip(&dofs) {

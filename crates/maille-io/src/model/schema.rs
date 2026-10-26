@@ -15,6 +15,10 @@
 //! material = "acier"
 //! plane_state = "strain"          # "stress" ou "strain" (triangles, analyse statique)
 //!
+//! [[pressures]]                   # pression sur un bord : positive, elle comprime
+//! set = "interieur"
+//! value = 100.0
+//!
 //! [[bcs]]                         # Dirichlet sur un Set de Nodes
 //! set = "sym_y"
 //! dof = "ux"                      # ux, uy, uz (statique), t (thermique)
@@ -46,6 +50,8 @@ pub struct ModelFile {
     pub heat_sources: Vec<HeatSourceDef>,
     #[serde(default)]
     pub convections: Vec<ConvectionDef>,
+    #[serde(default)]
+    pub pressures: Vec<PressureDef>,
     /// Couplage thermo-mécanique : les températures d'un calcul thermique dilatent le modèle
     /// statique. Le CLI lit le fichier `from` et les passe à `build`.
     pub temperatures: Option<TemperaturesDef>,
@@ -124,6 +130,14 @@ pub struct ConvectionDef {
     pub set: String,
     pub film: f64,
     pub sink: f64,
+}
+
+/// Pression sur les faces d'un bord (statique) : positive, elle comprime ; négative, elle tire.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PressureDef {
+    pub set: String,
+    pub value: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]

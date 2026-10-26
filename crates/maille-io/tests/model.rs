@@ -637,3 +637,43 @@ fn step_keys_must_fit_the_kind() {
         IoError::Model(MailleError::InvalidAmplitude { point: 0 })
     ));
 }
+
+#[test]
+fn pressure_on_a_boundary_pulls_or_pushes() {
+    // traction −100 sur x = 4, déformations planes : σx = 100, εx = (1 − ν²) σ / E
+    let mesh = rectangle(4.0, 2.0, 0.7, true);
+    let toml = UNIAXIAL
+        .replace("plane_state = \"stress\"", "plane_state = \"strain\"")
+        .replace("thickness = 2.0\n", "")
+        .replace("value = 0.004", "value = 0.0")
+        .replace("[[bcs]]\nset = \"droite\"\ndof = \"ux\"\nvalue = 0.0\n", "")
+        + "\n[[pressures]]\nset = \"droite\"\nvalue = -100.0\n";
+    let field = load(&toml, &mesh).model.solve().unwrap();
+    let strain = (1.0 - 0.3 * 0.3) * 100.0 / 210e3;
+    for (i, p) in mesh.nodes.iter().enumerate() {
+        assert!(
+            (field.displacements[2 * i] - strain * p.x).abs() < 1e-12,
+            "x = {}",
+            p.x
+        );
+    }
+}
+
+#[test]
+fn pressure_needs_a_boundary_and_a_static_analysis() {
+    let mesh = plate();
+    let on_domain = format!("{UNIAXIAL}\n[[pressures]]\nset = \"domaine\"\nvalue = 1.0\n");
+    assert!(matches!(
+        error(&on_domain, &mesh),
+        IoError::WrongSetKind { .. }
+    ));
+    let unknown = format!("{UNIAXIAL}\n[[pressures]]\nset = \"dessus\"\nvalue = 1.0\n");
+    assert!(
+        matches!(&error(&unknown, &mesh), IoError::UnknownSet { key, .. } if key == "pressures[0]")
+    );
+    let thermal = format!("{THERMAL}\n[[pressures]]\nset = \"droite\"\nvalue = 1.0\n");
+    assert_eq!(
+        error(&thermal, &mesh),
+        IoError::Model(MailleError::PressureStaticOnly)
+    );
+}

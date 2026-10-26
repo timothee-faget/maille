@@ -1,0 +1,40 @@
+# Tube épais sous pression, déformations planes.
+#
+# Un quart de section (rayon intérieur 10 mm, extérieur 20 mm) : 100 MPa de pression à l'intérieur,
+# 20 MPa à l'extérieur. Solution de Lamé. Une pression positive comprime (elle agit contre la
+# normale sortante du bord) ; une valeur négative tire.
+#
+# Lancer : maille solve tube_pression.toml     puis : maille view tube_pression.pvd
+
+units = "N, mm, MPa"
+mesh = "tube.msh"
+analysis = "static"
+
+[materials.acier]
+young = 210e3
+poisson = 0.3
+
+[[sections]]
+set = "domaine"
+material = "acier"
+plane_state = "strain"
+
+# Symétries du quart de section, en appui glissant.
+[[bcs]]
+set = "sym_x"
+dof = "uy"
+value = 0.0
+
+[[bcs]]
+set = "sym_y"
+dof = "ux"
+value = 0.0
+
+# Pression sur les faces d'un bord (un Set de bord du maillage).
+[[pressures]]
+set = "interieur"
+value = 100.0
+
+[[pressures]]
+set = "exterieur"
+value = 20.0

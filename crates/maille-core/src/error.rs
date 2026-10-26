@@ -139,6 +139,12 @@ pub enum MailleError {
     },
     /// Donnée thermique (source, convection) ou Step transitoire sur un Model qui n'est pas thermique.
     ThermalOnly,
+    /// Pression demandée sur un Model thermique.
+    PressureStaticOnly,
+    /// Pression sur une Bar ou une Beam, qui n'ont pas de face.
+    UnsupportedPressureElement {
+        element: usize,
+    },
     /// Bar et Beam n'ont pas de version thermique.
     UnsupportedThermalElement {
         element: usize,
@@ -341,6 +347,14 @@ impl fmt::Display for MailleError {
             Self::UnknownFace { element, face } => write!(
                 f,
                 "l'Element {element} n'a pas de face {face} : un triangle a les faces 0 à 2 (arêtes 0-1, 1-2, 2-0), un tétraèdre les faces 0 à 3 (0-1-2, 0-3-1, 1-3-2, 2-3-0)"
+            ),
+            Self::PressureStaticOnly => write!(
+                f,
+                "la pression n'existe qu'en statique : en thermique, utiliser la convection ou une source de chaleur"
+            ),
+            Self::UnsupportedPressureElement { element } => write!(
+                f,
+                "l'Element {element} est une Bar ou une Beam, qui n'a pas de face : la pression s'applique aux triangles et aux tétraèdres (pour une Bar ou une Beam, utiliser une charge répartie)"
             ),
             Self::ThermalOnly => write!(
                 f,
