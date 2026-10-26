@@ -63,6 +63,14 @@ pub struct Field {
     pub heat_fluxes: Vec<Vec<HeatFlux>>,
 }
 
+/// Résultat d'un incrément d'une Step transitoire : le Field (thermique) au temps `time`, compté
+/// depuis le début de la Step.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Increment {
+    pub time: f64,
+    pub field: Field,
+}
+
 /// Extrapolation du Tri3 : son unique point de Gauss donne la valeur de ses 3 Nodes.
 const TRI3_EXTRAPOLATION: [&[f64]; 3] = [&[1.0]; 3];
 

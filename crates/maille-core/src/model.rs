@@ -1,12 +1,15 @@
+use std::ops::Deref;
+
 use crate::assembly::{
-    element_conduction, element_dofs, element_heat_fluxes, element_heat_source, element_stiffness,
-    element_stresses, face_convection, FaceConvection,
+    element_capacity, element_conduction, element_dofs, element_heat_flux_operator,
+    element_heat_source, element_stiffness, element_stresses, face_convection, FaceConvection,
+    FluxOperator,
 };
 use crate::element::{bar_equivalent_load, beam_equivalent_load};
 use crate::error::MailleError;
 use crate::material::positive;
 use crate::mesh::{Dof, Element, Mesh};
-use crate::results::Field;
+use crate::results::{Field, Increment};
 use crate::solve::{reverse_cuthill_mckee, Cholesky, SkylineMatrix};
 
 /// Condition aux limites de Dirichlet : valeur imposée à un DOF d'un Node.
@@ -59,8 +62,62 @@ pub struct Convection {
 pub enum Analysis {
     /// Statique linéaire : déplacements, contraintes.
     Static,
-    /// Thermique stationnaire : −∇·(k ∇T) = Q, un DOF `T` par Node.
+    /// Thermique, un DOF `T` par Node : stationnaire −∇·(k ∇T) = Q avec `Model::solve`, transitoire
+    /// ρc ∂T/∂t − ∇·(k ∇T) = Q avec `Model::solve_step`.
     Thermal,
+}
+
+/// Step transitoire : durée découpée en incréments égaux Δt, intégrée par la θ-méthode
+/// C (Tₙ₊₁ − Tₙ)/Δt + K (θ Tₙ₊₁ + (1 − θ) Tₙ) = F. Les BC, sources et convections du Model restent
+/// constantes pendant la Step. Voir `Model::solve_step`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Step {
+    time_period: f64,
+    increments: usize,
+    theta: f64,
+}
+
+impl Step {
+    /// Durée `time_period` (finie, strictement positive, dans l'unité de temps du modèle) en
+    /// `increments` pas égaux, en Euler implicite (θ = 1).
+    pub fn transient(time_period: f64, increments: usize) -> Result<Self, MailleError> {
+        let time_period = positive("durée de la Step", time_period)?;
+        if increments == 0 {
+            return Err(MailleError::NoIncrements);
+        }
+        Ok(Self {
+            time_period,
+            increments,
+            theta: 1.0,
+        })
+    }
+
+    /// θ entre ½ et 1, stable quel que soit Δt. 1 : Euler implicite, d'ordre 1, qui amortit tout ;
+    /// à préférer après un départ discontinu (une trempe). ½ : Crank-Nicolson, d'ordre 2, mais qui
+    /// oscille après un départ discontinu si Δt est grand.
+    pub fn with_theta(self, theta: f64) -> Result<Self, MailleError> {
+        if !(0.5..=1.0).contains(&theta) {
+            return Err(MailleError::ThetaOutOfRange { theta });
+        }
+        Ok(Self { theta, ..self })
+    }
+
+    pub fn time_period(&self) -> f64 {
+        self.time_period
+    }
+
+    pub fn increments(&self) -> usize {
+        self.increments
+    }
+
+    pub fn theta(&self) -> f64 {
+        self.theta
+    }
+
+    /// Pas de temps Δt.
+    pub fn increment(&self) -> f64 {
+        self.time_period / self.increments as f64
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -195,6 +252,121 @@ impl Model {
     /// assemblée en ligne de ciel, les réactions sont recalculées Element par Element.
     pub fn solve(&self) -> Result<Field, MailleError> {
         let mesh = &self.mesh;
+        let a = self.assemble()?;
+        let matrix = |i: usize| match self.analysis {
+            Analysis::Static => element_stiffness(mesh, i),
+            Analysis::Thermal => thermal_matrix(mesh, &a.faces, i),
+        };
+        let mut u = a.imposed.clone();
+        FreeSystem::new(&a.dofs, &matrix, &a.fixed, &u)?.solve(&a.f, &mut u);
+
+        let mut reactions = product(&a.dofs, &matrix, &u, &a.fixed);
+        for (g, r) in reactions
+            .iter_mut()
+            .enumerate()
+            .filter(|(g, _)| a.fixed[*g])
+        {
+            *r -= a.f[g];
+        }
+        Ok(match self.analysis {
+            Analysis::Static => Field {
+                stresses: (0..mesh.elements.len())
+                    .map(|i| element_stresses(mesh, i, &u))
+                    .collect(),
+                displacements: u,
+                reactions,
+                temperatures: Vec::new(),
+                heat_fluxes: Vec::new(),
+            },
+            Analysis::Thermal => thermal_field(&flux_operators(mesh), u, reactions),
+        })
+    }
+
+    /// Thermique transitoire : intègre la Step depuis `initial`, une température par Node (par
+    /// exemple `vec![T0; nombre de Nodes]`, ou les `temperatures` d'un Field stationnaire). Les BC
+    /// s'appliquent dès t = 0 : elles remplacent la condition initiale à leurs Nodes. Renvoie
+    /// l'incrément t = 0, puis un par pas.
+    ///
+    /// À chaque pas, (C/Δt + θK) Tₙ₊₁ = (C/Δt − (1 − θ)K) Tₙ + F, K comprenant la convection. Δt est
+    /// fixe : la matrice de gauche est factorisée une seule fois. Réactions sur les Nodes imposés :
+    /// R = C (Tₙ₊₁ − Tₙ)/Δt + K (θ Tₙ₊₁ + (1 − θ) Tₙ) − F, puissance moyenne fournie pendant le pas
+    /// (Σ R Δt est exactement la chaleur apportée par les BC).
+    pub fn solve_step(&self, step: &Step, initial: &[f64]) -> Result<Vec<Increment>, MailleError> {
+        self.require_thermal()?;
+        let mesh = &self.mesh;
+        let n = mesh.nodes.len();
+        if initial.len() != n {
+            return Err(MailleError::InitialTemperatureCount {
+                expected: n,
+                got: initial.len(),
+            });
+        }
+        if let Some(node) = initial.iter().position(|t| !t.is_finite()) {
+            return Err(MailleError::NonFiniteInitialTemperature { node });
+        }
+        for (i, e) in mesh.elements.iter().enumerate() {
+            if e.material().density.is_none() {
+                return Err(MailleError::MissingDensity { element: i });
+            }
+            if e.material().specific_heat.is_none() {
+                return Err(MailleError::MissingSpecificHeat { element: i });
+            }
+        }
+
+        let a = self.assemble()?;
+        let (dt, theta) = (step.increment(), step.theta());
+        // matrices de chaque Element : à gauche C/Δt + θK, à droite C/Δt − (1 − θ)K
+        let (left, right): (Vec<_>, Vec<_>) = (0..mesh.elements.len())
+            .map(|i| {
+                let (c, k) = (element_capacity(mesh, i), thermal_matrix(mesh, &a.faces, i));
+                let combine = |s: f64| -> Vec<Vec<f64>> {
+                    c.iter()
+                        .zip(&k)
+                        .map(|(cr, kr)| cr.iter().zip(kr).map(|(c, k)| c / dt + s * k).collect())
+                        .collect()
+                };
+                (combine(theta), combine(theta - 1.0))
+            })
+            .unzip();
+        let (left, right) = (
+            |i: usize| left[i].as_slice(),
+            |i: usize| right[i].as_slice(),
+        );
+
+        let mut t = initial.to_vec();
+        for (g, _) in a.fixed.iter().enumerate().filter(|(_, &c)| c) {
+            t[g] = a.imposed[g];
+        }
+        let system = FreeSystem::new(&a.dofs, &left, &a.fixed, &t)?;
+        let all = vec![true; n];
+        let fluxes = flux_operators(mesh);
+        let mut history = vec![Increment {
+            time: 0.0,
+            field: thermal_field(&fluxes, t.clone(), vec![0.0; n]),
+        }];
+        for s in 1..=step.increments() {
+            let carried = product(&a.dofs, &right, &t, &all);
+            let rhs: Vec<f64> = carried.iter().zip(&a.f).map(|(c, f)| c + f).collect();
+            system.solve(&rhs, &mut t);
+            let mut reactions = product(&a.dofs, &left, &t, &a.fixed);
+            for (g, r) in reactions
+                .iter_mut()
+                .enumerate()
+                .filter(|(g, _)| a.fixed[*g])
+            {
+                *r -= rhs[g];
+            }
+            history.push(Increment {
+                time: s as f64 * dt,
+                field: thermal_field(&fluxes, t.clone(), reactions),
+            });
+        }
+        Ok(history)
+    }
+
+    /// Ce que les résolutions partagent : DOF des Elements, convection, F et valeurs imposées.
+    fn assemble(&self) -> Result<Assembly, MailleError> {
+        let mesh = &self.mesh;
         let n = mesh.nodes.len() * dofs_per_node(mesh, self.analysis);
         let dofs: Vec<Vec<usize>> = mesh
             .elements
@@ -211,16 +383,6 @@ impl Model {
                 faces[c.element].push(terms);
             }
         }
-        let matrix = |i: usize| match self.analysis {
-            Analysis::Static => element_stiffness(mesh, i),
-            Analysis::Thermal => {
-                let mut k = element_conduction(mesh, i);
-                for face in &faces[i] {
-                    face.add_matrix(&mut k);
-                }
-                k
-            }
-        };
 
         let mut f = vec![0.0; n];
         for l in &self.loads {
@@ -250,46 +412,81 @@ impl Model {
                 face.add_load(element_dofs, &mut f);
             }
         }
-        let mut u = vec![0.0; n];
+        let mut imposed = vec![0.0; n];
         let mut fixed = vec![false; n];
         for bc in &self.bcs {
             let i = dof_index(mesh, self.analysis, bc.node, bc.dof)?;
-            u[i] = bc.value;
+            imposed[i] = bc.value;
             fixed[i] = true;
         }
-
-        FreeSystem::new(&dofs, &matrix, &fixed, &u)?.solve(&f, &mut u);
-
-        let mut reactions = vec![0.0; n];
-        for (i, dofs) in dofs.iter().enumerate() {
-            if !dofs.iter().any(|&g| fixed[g]) {
-                continue;
-            }
-            for (row, &g) in matrix(i).iter().zip(dofs).filter(|(_, &g)| fixed[g]) {
-                reactions[g] += row.iter().zip(dofs).map(|(k, &h)| k * u[h]).sum::<f64>();
-            }
-        }
-        for i in (0..n).filter(|&i| fixed[i]) {
-            reactions[i] -= f[i];
-        }
-        let elements = 0..mesh.elements.len();
-        Ok(match self.analysis {
-            Analysis::Static => Field {
-                stresses: elements.map(|i| element_stresses(mesh, i, &u)).collect(),
-                displacements: u,
-                reactions,
-                temperatures: Vec::new(),
-                heat_fluxes: Vec::new(),
-            },
-            Analysis::Thermal => Field {
-                heat_fluxes: elements.map(|i| element_heat_fluxes(mesh, i, &u)).collect(),
-                temperatures: u,
-                reactions,
-                displacements: Vec::new(),
-                stresses: Vec::new(),
-            },
+        Ok(Assembly {
+            dofs,
+            faces,
+            f,
+            imposed,
+            fixed,
         })
     }
+}
+
+/// Données communes à `Model::solve` et `Model::solve_step`.
+struct Assembly {
+    /// DOF globaux de chaque Element, dans l'ordre de sa matrice
+    dofs: Vec<Vec<usize>>,
+    /// termes de convection de chaque Element
+    faces: Vec<Vec<FaceConvection>>,
+    f: Vec<f64>,
+    /// valeur imposée aux DOF `fixed`, zéro ailleurs
+    imposed: Vec<f64>,
+    fixed: Vec<bool>,
+}
+
+/// Matrice thermique de l'Element `i` : conduction plus convection sur ses faces.
+fn thermal_matrix(mesh: &Mesh, faces: &[Vec<FaceConvection>], i: usize) -> Vec<Vec<f64>> {
+    let mut k = element_conduction(mesh, i);
+    for face in &faces[i] {
+        face.add_matrix(&mut k);
+    }
+    k
+}
+
+/// Opérateurs de flux de chaque Element, voir `element_heat_flux_operator`.
+fn flux_operators(mesh: &Mesh) -> Vec<FluxOperator> {
+    (0..mesh.elements.len())
+        .map(|i| element_heat_flux_operator(mesh, i))
+        .collect()
+}
+
+/// Field thermique : températures, réactions et flux aux points de Gauss (`fluxes` : un opérateur
+/// par Element).
+fn thermal_field(fluxes: &[FluxOperator], temperatures: Vec<f64>, reactions: Vec<f64>) -> Field {
+    Field {
+        heat_fluxes: fluxes.iter().map(|flux| flux(&temperatures)).collect(),
+        temperatures,
+        reactions,
+        displacements: Vec::new(),
+        stresses: Vec::new(),
+    }
+}
+
+/// (Σ_e M_e x_e) sur les DOF `rows`, zéro ailleurs ; `matrix(i)` : matrice M_e de l'Element i, DOF
+/// `dofs[i]`. Les Elements sans DOF dans `rows` sont sautés.
+fn product<M: Deref<Target = [Vec<f64>]>>(
+    dofs: &[Vec<usize>],
+    matrix: &impl Fn(usize) -> M,
+    x: &[f64],
+    rows: &[bool],
+) -> Vec<f64> {
+    let mut y = vec![0.0; rows.len()];
+    for (i, dofs) in dofs.iter().enumerate() {
+        if !dofs.iter().any(|&g| rows[g]) {
+            continue;
+        }
+        for (row, &g) in matrix(i).iter().zip(dofs).filter(|(_, &g)| rows[g]) {
+            y[g] += row.iter().zip(dofs).map(|(k, &h)| k * x[h]).sum::<f64>();
+        }
+    }
+    y
 }
 
 /// 1 DOF (T) par Node en thermique, sinon selon la famille d'Elements.
@@ -326,9 +523,9 @@ impl FreeSystem {
     /// `dofs[i]` : DOF globaux de l'Element i, `matrix(i)` : sa matrice, `u` : valeurs imposées
     /// aux DOF `fixed`. Les DOF libres sont renumérotés par Cuthill-McKee inverse (graphe : deux DOF
     /// sont voisins s'ils partagent un Element) avant l'assemblage en ligne de ciel.
-    fn new(
+    fn new<M: Deref<Target = [Vec<f64>]>>(
         dofs: &[Vec<usize>],
-        matrix: &impl Fn(usize) -> Vec<Vec<f64>>,
+        matrix: &impl Fn(usize) -> M,
         fixed: &[bool],
         u: &[f64],
     ) -> Result<Self, MailleError> {

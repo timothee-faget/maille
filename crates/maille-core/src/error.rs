@@ -75,12 +75,27 @@ pub enum MailleError {
     MissingSpecificHeat {
         element: usize,
     },
+    /// Step transitoire sans aucun incrément.
+    NoIncrements,
+    /// θ hors de [½, 1] : en dessous de ½, le schéma n'est stable que pour de petits Δt.
+    ThetaOutOfRange {
+        theta: f64,
+    },
+    /// Condition initiale qui n'a pas une température par Node.
+    InitialTemperatureCount {
+        expected: usize,
+        got: usize,
+    },
+    /// Température initiale non finie (NaN ou infinie) au Node `node`.
+    NonFiniteInitialTemperature {
+        node: usize,
+    },
     /// Face inexistante (triangle : 0 à 2, tétraèdre : 0 à 3 ; aucune pour Bar et Beam).
     UnknownFace {
         element: usize,
         face: usize,
     },
-    /// Donnée thermique (source, convection) sur un Model qui n'est pas thermique.
+    /// Donnée thermique (source, convection) ou Step transitoire sur un Model qui n'est pas thermique.
     ThermalOnly,
     /// Bar et Beam n'ont pas de version thermique.
     UnsupportedThermalElement {
@@ -224,13 +239,29 @@ impl fmt::Display for MailleError {
                 f,
                 "le Material de l'Element {element} n'a pas de chaleur massique, requise en thermique transitoire : ajouter with_specific_heat"
             ),
+            Self::NoIncrements => write!(
+                f,
+                "la Step n'a aucun incrément : en demander au moins un"
+            ),
+            Self::ThetaOutOfRange { theta } => write!(
+                f,
+                "θ = {theta} : doit être entre 0,5 (Crank-Nicolson) et 1 (Euler implicite) ; en dessous de 0,5, le calcul diverge si Δt est trop grand"
+            ),
+            Self::InitialTemperatureCount { expected, got } => write!(
+                f,
+                "la condition initiale a {got} températures pour {expected} Nodes : en donner une par Node, par exemple vec![T0; nombre de Nodes] ou les temperatures d'un Field stationnaire"
+            ),
+            Self::NonFiniteInitialTemperature { node } => write!(
+                f,
+                "la température initiale du Node {node} n'est pas finie (NaN ou infinie)"
+            ),
             Self::UnknownFace { element, face } => write!(
                 f,
                 "l'Element {element} n'a pas de face {face} : un triangle a les faces 0 à 2 (arêtes 0-1, 1-2, 2-0), un tétraèdre les faces 0 à 3 (0-1-2, 0-3-1, 1-3-2, 2-3-0)"
             ),
             Self::ThermalOnly => write!(
                 f,
-                "les sources de chaleur et la convection n'existent qu'en thermique : créer le Model avec Model::with_analysis(mesh, Analysis::Thermal, ...)"
+                "les sources de chaleur, la convection et le calcul transitoire n'existent qu'en thermique : créer le Model avec Model::with_analysis(mesh, Analysis::Thermal, ...)"
             ),
             Self::UnsupportedThermalElement { element } => write!(
                 f,

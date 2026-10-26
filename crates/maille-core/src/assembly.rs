@@ -269,16 +269,36 @@ pub fn element_capacity(mesh: &Mesh, i: usize) -> Vec<Vec<f64>> {
 /// Flux de chaleur aux points de Gauss de l'Element `i`, à partir des températures `t` des Nodes.
 /// Vide pour les Bar et Beam.
 pub fn element_heat_fluxes(mesh: &Mesh, i: usize, t: &[f64]) -> Vec<HeatFlux> {
+    element_heat_flux_operator(mesh, i)(t)
+}
+
+/// Flux de chaleur aux points de Gauss d'un Element en fonction des températures globales des Nodes.
+pub type FluxOperator = Box<dyn Fn(&[f64]) -> Vec<HeatFlux>>;
+
+/// Comme `element_heat_fluxes`, mais les points de Gauss sont calculés une seule fois : l'opérateur
+/// renvoyé s'applique à autant de champs de températures `t` qu'on veut (un par incrément en
+/// transitoire).
+pub fn element_heat_flux_operator(mesh: &Mesh, i: usize) -> FluxOperator {
     let e = &mesh.elements[i];
-    let t_e: Vec<f64> = e.nodes().iter().map(|&n| t[n]).collect();
-    let k = conductivity(e.material());
+    let (nodes, k) = (e.nodes().to_vec(), conductivity(e.material()));
     match e {
-        Element::Tri3(tri) => heat_fluxes(&PlaneKernel::tri3(tri).gauss(mesh), k, &t_e),
-        Element::Tri6(tri) => heat_fluxes(&PlaneKernel::tri6(tri).gauss(mesh), k, &t_e),
-        Element::Tet4(tet) => heat_fluxes(&SolidKernel::tet4(tet).gauss(mesh), k, &t_e),
-        Element::Tet10(tet) => heat_fluxes(&SolidKernel::tet10(tet).gauss(mesh), k, &t_e),
-        Element::Bar(_) | Element::Beam(_) => Vec::new(),
+        Element::Tri3(tri) => flux_operator(PlaneKernel::tri3(tri).gauss(mesh), nodes, k),
+        Element::Tri6(tri) => flux_operator(PlaneKernel::tri6(tri).gauss(mesh), nodes, k),
+        Element::Tet4(tet) => flux_operator(SolidKernel::tet4(tet).gauss(mesh), nodes, k),
+        Element::Tet10(tet) => flux_operator(SolidKernel::tet10(tet).gauss(mesh), nodes, k),
+        Element::Bar(_) | Element::Beam(_) => Box::new(|_| Vec::new()),
     }
+}
+
+fn flux_operator<const D: usize>(
+    points: Vec<GaussData<D>>,
+    nodes: Vec<usize>,
+    k: f64,
+) -> FluxOperator {
+    Box::new(move |t| {
+        let t_e: Vec<f64> = nodes.iter().map(|&n| t[n]).collect();
+        heat_fluxes(&points, k, &t_e)
+    })
 }
 
 /// Puissances nodales équivalentes ∫ N Q dV d'une source uniforme `q` dans l'Element `i`.

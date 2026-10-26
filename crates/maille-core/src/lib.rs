@@ -4,7 +4,9 @@
 //! un système d'unités cohérent. Exemples :
 //! - mécanique : N, mm, MPa ;
 //! - thermique : W, mm, K (ou °C), d'où k en W/(mm·K), source Q en W/mm³, coefficient
-//!   d'échange h en W/(mm²·K).
+//!   d'échange h en W/(mm²·K) ;
+//! - thermique transitoire : en plus, le temps en s, donc ρ en kg/mm³ et c en J/(kg·K) (acier :
+//!   ρ = 7,85·10⁻⁶ kg/mm³, c = 460 J/(kg·K)).
 //!
 //! Un même Material sert aux deux analyses (E, ν et k) : N et mm donnent des énergies en mJ, donc
 //! des puissances en mW si le temps est en s. Mélanger MPa et W/(mm·K) reste cohérent tant que
