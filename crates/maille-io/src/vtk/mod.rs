@@ -10,7 +10,7 @@ mod reader;
 mod writer;
 
 pub use fields::result_arrays;
-pub use reader::{read_point_data, read_pvd};
+pub use reader::{read_point_data, read_pvd, read_results};
 pub use writer::{write_pvd, write_vtu};
 
 /// Grandeur aux Nodes : `components` valeurs par Node, Node après Node.
@@ -19,6 +19,17 @@ pub struct PointArray {
     pub name: String,
     pub components: usize,
     pub values: Vec<f64>,
+}
+
+/// Un `.vtu` relu en entier : maillage (numérotation de Maille, comme `MshFile`) et grandeurs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VtuResults {
+    pub nodes: Vec<maille_core::mesh::Node>,
+    pub kind: crate::msh::CellKind,
+    pub cells: Vec<Vec<usize>>,
+    pub arrays: Vec<PointArray>,
+    /// Le commentaire `units` écrit par `write_vtu`, s'il y est.
+    pub units: Option<String>,
 }
 
 /// Un `.vtu` d'un `.pvd` : le temps de l'Increment et le nom du fichier.

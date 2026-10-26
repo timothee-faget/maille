@@ -1,5 +1,11 @@
-//! Cas d'exemple comparés à la solution analytique :
-//! - `console` (par défaut) : console en acier chargée en bout ;
+//! Le binaire `maille` :
+//! - `maille solve modele.toml` résout un modèle (fichiers `.msh` et `.toml`) et écrit les
+//!   résultats (`.vtu` et `.pvd`), voir `files.rs` ;
+//! - `maille view resultats.pvd` affiche des résultats, voir `files.rs` ;
+//! - les cas d'exemple ci-dessous, comparés à la solution analytique.
+//!
+//! Cas d'exemple :
+//! - `console` : console en acier chargée en bout ;
 //! - `kirsch` : plaque trouée de Kirsch, voir `kirsch.rs` ;
 //! - `cylindre` : conduction dans un cylindre creux, voir `cylinder.rs` ;
 //! - `trempe` : trempe d'une plaque, thermique transitoire, voir `quench.rs` ;
@@ -10,6 +16,7 @@
 //! le cœur ne convertit rien.
 
 mod cylinder;
+mod files;
 mod kirsch;
 mod plastic_tube;
 mod quench;
@@ -30,16 +37,42 @@ const LENGTH: f64 = 1000.0; // mm
 const TIP_LOAD: f64 = 100.0; // N
 const ELEMENTS: usize = 4;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    match std::env::args().nth(1).as_deref() {
-        None | Some("console") => console(),
+const USAGE: &str = "maille : calcul par éléments finis, mécanique et thermique
+
+Usage :
+  maille solve <modele.toml> [-o <préfixe>]   résout un modèle, écrit <préfixe>.pvd et les .vtu
+  maille view <resultats.pvd|.vtu> [indice]   affiche un incrément (le dernier par défaut)
+
+Cas d'exemple, comparés à la solution analytique :
+  maille console | kirsch | cylindre | trempe | cylindre-thermo | cylindre-plastique
+
+Sans -o, les résultats sont écrits à côté du modèle, sous son nom. Les chemins du modèle
+(`mesh`, `from`) sont relatifs à son dossier.";
+
+fn main() {
+    if let Err(e) = run() {
+        eprintln!("erreur : {e}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        None | Some("help" | "--help" | "-h") => {
+            println!("{USAGE}");
+            Ok(())
+        }
+        Some("solve") => files::solve(&args[1..]),
+        Some("view") => files::view(&args[1..]),
+        Some("console") => console(),
         Some("kirsch") => kirsch::run(),
         Some("cylindre") => cylinder::run(),
         Some("trempe") => quench::run(),
         Some("cylindre-thermo") => thermal_stress::run(),
         Some("cylindre-plastique") => plastic_tube::run(),
         Some(other) => Err(format!(
-            "cas inconnu « {other} » : choisir console, kirsch, cylindre, trempe, cylindre-thermo ou cylindre-plastique"
+            "commande inconnue « {other} » : choisir solve, view, console, kirsch, cylindre, trempe, cylindre-thermo ou cylindre-plastique (maille help pour le détail)"
         )
         .into()),
     }

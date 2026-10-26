@@ -1,0 +1,28 @@
+# Tube épais chauffé de l'intérieur : étape 1, le calcul thermique.
+#
+# Un quart de section (rayon intérieur 10 mm, extérieur 20 mm) : 120 °C à l'intérieur, 20 °C à
+# l'extérieur. Le profil de température est en ln(r). Les résultats servent d'entrée à
+# tube_contraintes.toml : lancer ce calcul d'abord.
+#
+# Lancer : maille solve tube_thermique.toml
+
+units = "W, mm, K"
+mesh = "tube.msh"
+analysis = "thermal"
+
+[materials.acier]
+conductivity = 0.05
+
+[[sections]]
+set = "domaine"
+material = "acier"
+
+[[bcs]]
+set = "interieur"
+dof = "t"
+value = 120.0
+
+[[bcs]]
+set = "exterieur"
+dof = "t"
+value = 20.0

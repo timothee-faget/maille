@@ -875,6 +875,7 @@ name = "maille-cli"
 version = "0.1.0"
 dependencies = [
  "maille-core",
+ "maille-io",
  "maille-viewer",
 ]
 

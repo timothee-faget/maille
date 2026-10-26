@@ -5,6 +5,11 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[[bin]]
+name = "maille"
+path = "src/main.rs"
+
 [dependencies]
 maille-core = { path = "../maille-core" }
+maille-io = { path = "../maille-io" }
 maille-viewer = { path = "../maille-viewer" }
