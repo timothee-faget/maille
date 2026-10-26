@@ -1,0 +1,18 @@
+# Licences acceptées dans l'arbre de dépendances (audit et raisons : vault, 28.31 Stack).
+# Maille est sous MIT OR Apache-2.0 : on n'accepte que des licences permissives compatibles.
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.9
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
