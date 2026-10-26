@@ -6,7 +6,6 @@
 //! Unités cohérentes (N, mm, MPa en mécanique ; W, mm, K en thermique) : le cœur ne convertit rien.
 
 mod cylinder;
-mod grid;
 mod kirsch;
 
 use maille_core::material::Material;

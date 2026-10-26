@@ -8,6 +8,7 @@ use common::{rect_grid, to_quadratic};
 use maille_core::element::plane_d;
 use maille_core::material::Material;
 use maille_core::mesh::{Dof, Element, Mesh, Node, PlaneState, Tri3, Tri6};
+use maille_core::mesher::{triangulate, Curve, Geometry, MeshOptions};
 use maille_core::model::{Bc, Model};
 use maille_core::results::{nodal_stresses, Field};
 
@@ -293,4 +294,115 @@ fn nodal_smoothing_brings_the_hole_peak_closer_to_three_sigma() {
         "écart lissé / 3σ : {}",
         nodal_gap / (3.0 * SIGMA)
     );
+}
+
+/// Quart de plaque maillé par le mailleur : taille `hole` au trou, `outer` ailleurs. Déplacements
+/// de Kirsch imposés sur le bord extérieur, symétries sur les axes.
+fn solve_kirsch_meshed(hole: f64, outer: f64, quadratic: bool) -> Solved {
+    let g = Geometry {
+        outer: vec![
+            Curve::line([A, 0.0], outer, "sym_y"),
+            Curve::arc([R, 0.0], [0.0, 0.0], false, outer, "exterieur"),
+            Curve::line([0.0, R], outer, "sym_x"),
+            Curve::arc([0.0, A], [0.0, 0.0], true, hole, "trou"),
+        ],
+        holes: vec![],
+    };
+    let t3 = triangulate(&g, &MeshOptions::default()).unwrap();
+    let material = Material::with_poisson(E, NU).unwrap();
+    let (nodes, elements, sets): (Vec<Node>, Vec<Element>, [Vec<usize>; 3]) = {
+        let names = ["exterieur", "sym_x", "sym_y"];
+        if quadratic {
+            let t = t3.to_quadratic();
+            let sets = names.map(|n| t.boundary(n).unwrap().nodes.clone());
+            let elements = t
+                .triangles
+                .iter()
+                .map(|&n| Element::Tri6(Tri6::new(n, material, 1.0, PlaneState::Stress).unwrap()))
+                .collect();
+            (t.nodes, elements, sets)
+        } else {
+            let sets = names.map(|n| t3.boundary(n).unwrap().nodes.clone());
+            let elements = t3
+                .triangles
+                .iter()
+                .map(|&n| Element::Tri3(Tri3::new(n, material, 1.0, PlaneState::Stress).unwrap()))
+                .collect();
+            (t3.nodes, elements, sets)
+        }
+    };
+    let [outer_nodes, sym_x, sym_y] = sets;
+    let mut bcs = Vec::new();
+    for &n in &outer_nodes {
+        let (u, v) = kirsch_displacement(nodes[n].x, nodes[n].y);
+        bcs.push(Bc {
+            node: n,
+            dof: Dof::Ux,
+            value: u,
+        });
+        bcs.push(Bc {
+            node: n,
+            dof: Dof::Uy,
+            value: v,
+        });
+    }
+    // symétries, sauf aux deux coins déjà imposés par le bord extérieur
+    for (set, dof) in [(&sym_x, Dof::Ux), (&sym_y, Dof::Uy)] {
+        for &n in set.iter().filter(|n| !outer_nodes.contains(n)) {
+            bcs.push(Bc {
+                node: n,
+                dof,
+                value: 0.0,
+            });
+        }
+    }
+    let mesh = Mesh::new(nodes, elements).unwrap();
+    let field = Model::new(mesh.clone(), bcs, vec![])
+        .unwrap()
+        .solve()
+        .unwrap();
+    let dofs = field.displacements.len();
+    Solved { mesh, field, dofs }
+}
+
+#[test]
+fn generated_mesh_converges_like_the_polar_grid() {
+    // Tailles divisées par 2 à chaque étape (la gradation reste 0,3). Mêmes seuils que sur la grille
+    // polaire : rapport > 1,4 pour le Tri3 (ordre > 0,5), > 2 pour le Tri6 (ordre > 1).
+    for (name, quadratic, first, min_ratio) in [("Tri3", false, 0.1, 1.4), ("Tri6", true, 0.2, 2.0)]
+    {
+        let e: Vec<f64> = (0..3)
+            .map(|k| {
+                let f = 0.5f64.powi(k);
+                stress_errors(&solve_kirsch_meshed(first * f, 5.0 * first * f, quadratic)).0
+            })
+            .collect();
+        for w in e.windows(2) {
+            assert!(w[0] / w[1] > min_ratio, "{name} : erreurs RMS {e:?}");
+        }
+    }
+}
+
+#[test]
+fn generated_tri6_mesh_beats_the_polar_grid_with_fewer_dofs() {
+    // fin au trou (h = 0,1), grossier au bord extérieur (h = 0,5) : moins de DOF que la grille
+    // polaire 16 × 16, déjà resserrée au trou, pour une erreur au plus égale
+    let meshed = solve_kirsch_meshed(0.1, 0.5, true);
+    let polar = solve_kirsch(16, 16, true);
+    let (rms, max) = stress_errors(&meshed);
+    assert!(
+        meshed.dofs < polar.dofs,
+        "{} DOF contre {}",
+        meshed.dofs,
+        polar.dofs
+    );
+    assert!(rms < stress_errors(&polar).0, "RMS {rms}");
+    assert!(rms < 0.01 && max < 0.01, "RMS {rms}, max / 3σ {max}");
+    // pic au bord du trou, lissé aux Nodes, à 1 % de Kt σ = 3σ
+    let nodal = nodal_stresses(&meshed.mesh, &meshed.field).unwrap();
+    let at_hole = nodal
+        .iter()
+        .find(|p| p.x.abs() < 1e-9 && (p.y - A).abs() < 1e-9)
+        .unwrap();
+    assert!((at_hole.sigma_xx - 3.0 * SIGMA).abs() < 0.01 * 3.0 * SIGMA);
 }

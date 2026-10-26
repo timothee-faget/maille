@@ -1,18 +1,17 @@
 //! Cas d'exemple : plaque trouée de Kirsch, traction uniaxiale σ selon x, trou de rayon a,
-//! contraintes planes, Tri6. On modélise un quart de plaque (symétries) et on impose sur le bord
-//! extérieur r = R les déplacements exacts de Kirsch : la plaque finie n'introduit aucune erreur de modèle.
+//! contraintes planes, Tri6. On modélise un quart de plaque (symétries), maillé par le mailleur
+//! (fin au trou, grossier au bord), et on impose sur le bord extérieur r = R les déplacements
+//! exacts de Kirsch : la plaque finie n'introduit aucune erreur de modèle.
 //!
 //! Unités cohérentes (N, mm, MPa) : le cœur ne convertit rien.
 
-use std::f64::consts::FRAC_PI_2;
-
 use maille_core::material::Material;
-use maille_core::mesh::{Dof, Element, Mesh, Node, PlaneState, Tri6};
+use maille_core::mesh::{Dof, Element, Mesh, PlaneState, Tri6};
+use maille_core::mesher::{triangulate, Curve, Geometry, MeshOptions};
 use maille_core::model::{Bc, Model};
 use maille_core::results::{nodal_stresses, Field};
 use maille_core::MailleError;
 
-use crate::grid::{rect_grid, to_quadratic};
 use crate::report;
 
 const YOUNG: f64 = 210e3; // MPa
@@ -21,7 +20,8 @@ const SIGMA: f64 = 100.0; // MPa
 const HOLE: f64 = 10.0; // mm, rayon a
 const OUTER: f64 = 40.0; // mm, rayon R
 const THICKNESS: f64 = 1.0; // mm
-const DIVISIONS: usize = 16; // en rayon et en angle
+const SIZE_HOLE: f64 = 1.0; // mm, taille des triangles au trou
+const SIZE_OUTER: f64 = 5.0; // mm, ailleurs
 
 /// Déplacements de Kirsch (ux, uy) en contraintes planes, κ = (3 − ν)/(1 + ν).
 fn kirsch_displacement(x: f64, y: f64) -> (f64, f64) {
@@ -38,69 +38,66 @@ fn kirsch_displacement(x: f64, y: f64) -> (f64, f64) {
     (ur * t.cos() - ut * t.sin(), ur * t.sin() + ut * t.cos())
 }
 
-/// Indice du sommet (i, j) de la grille polaire : i en rayon (0 au trou), j en angle (0 sur l'axe x).
-fn idx(i: usize, j: usize) -> usize {
-    i + j * (DIVISIONS + 1)
-}
-
-/// Quart de plaque : grille polaire, rayons en progression géométrique de a à R (plus fins au trou).
+/// Quart de plaque maillé : bords nommés pour les BC.
 pub fn solve() -> Result<(Mesh, Field), MailleError> {
-    let (grid, tris) = rect_grid(DIVISIONS, DIVISIONS, 1.0, 1.0);
-    let corners: Vec<Node> = grid
-        .iter()
-        .map(|g| {
-            let (r, t) = (HOLE * (OUTER / HOLE).powf(g.x), FRAC_PI_2 * g.y);
-            Node::new_2d(r * t.cos(), r * t.sin())
-        })
-        .collect();
-    let q = to_quadratic(&corners, &tris);
+    let geometry = Geometry {
+        outer: vec![
+            Curve::line([HOLE, 0.0], SIZE_OUTER, "sym_y"),
+            Curve::arc([OUTER, 0.0], [0.0, 0.0], false, SIZE_OUTER, "exterieur"),
+            Curve::line([0.0, OUTER], SIZE_OUTER, "sym_x"),
+            Curve::arc([0.0, HOLE], [0.0, 0.0], true, SIZE_HOLE, "trou"),
+        ],
+        holes: vec![],
+    };
+    let t = triangulate(&geometry, &MeshOptions::default())?.to_quadratic();
     let material = Material::with_poisson(YOUNG, POISSON)?;
-    let elements = q
-        .elements
+    let elements = t
+        .triangles
         .iter()
         .map(|&n| Tri6::new(n, material, THICKNESS, PlaneState::Stress).map(Element::Tri6))
         .collect::<Result<_, _>>()?;
 
-    // bord extérieur : sommets i = DIVISIONS et milieux de leurs arêtes
-    let mut outer: Vec<usize> = (0..=DIVISIONS).map(|j| idx(DIVISIONS, j)).collect();
-    outer.extend((0..DIVISIONS).map(|j| q.mid(idx(DIVISIONS, j), idx(DIVISIONS, j + 1))));
-    outer.sort_unstable();
-
+    let outer = &t.boundary("exterieur")?.nodes;
     let mut bcs = Vec::new();
-    for (n, p) in q.nodes.iter().enumerate() {
-        if outer.binary_search(&n).is_ok() {
-            let (u, v) = kirsch_displacement(p.x, p.y);
+    for &n in outer {
+        let (u, v) = kirsch_displacement(t.nodes[n].x, t.nodes[n].y);
+        bcs.push(Bc {
+            node: n,
+            dof: Dof::Ux,
+            value: u,
+        });
+        bcs.push(Bc {
+            node: n,
+            dof: Dof::Uy,
+            value: v,
+        });
+    }
+    // symétries : Ux = 0 sur l'axe y, Uy = 0 sur l'axe x, sauf aux coins déjà imposés
+    for (name, dof) in [("sym_x", Dof::Ux), ("sym_y", Dof::Uy)] {
+        for &n in t
+            .boundary(name)?
+            .nodes
+            .iter()
+            .filter(|n| !outer.contains(n))
+        {
             bcs.push(Bc {
                 node: n,
-                dof: Dof::Ux,
-                value: u,
+                dof,
+                value: 0.0,
             });
-            bcs.push(Bc {
-                node: n,
-                dof: Dof::Uy,
-                value: v,
-            });
-        } else {
-            // symétries : Ux = 0 sur l'axe y, Uy = 0 sur l'axe x
-            if p.x.abs() < 1e-9 * OUTER {
-                bcs.push(Bc {
-                    node: n,
-                    dof: Dof::Ux,
-                    value: 0.0,
-                });
-            }
-            if p.y.abs() < 1e-9 * OUTER {
-                bcs.push(Bc {
-                    node: n,
-                    dof: Dof::Uy,
-                    value: 0.0,
-                });
-            }
         }
     }
-    let mesh = Mesh::new(q.nodes, elements)?;
+    let mesh = Mesh::new(t.nodes, elements)?;
     let field = Model::new(mesh.clone(), bcs, vec![])?.solve()?;
     Ok((mesh, field))
+}
+
+/// Indice du Node posé en (x, y) : les débuts de Curves sont toujours des Nodes du maillage.
+fn node_at(mesh: &Mesh, x: f64, y: f64) -> Result<usize, String> {
+    mesh.nodes
+        .iter()
+        .position(|p| (p.x - x).hypot(p.y - y) < 1e-9 * OUTER)
+        .ok_or_else(|| format!("aucun Node en ({x}, {y})"))
 }
 
 /// Affiche le rapport face à Kirsch, puis ouvre le viewer.
@@ -112,7 +109,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         "Plaque trouée de Kirsch : a = {HOLE} mm, R = {OUTER} mm, σ = {SIGMA} MPa, E = {YOUNG} MPa, ν = {POISSON}"
     );
     println!(
-        "Quart de plaque, {} Tri6, {} Nodes, {} DOF, contraintes lissées aux Nodes",
+        "Quart de plaque maillé (h = {SIZE_HOLE} mm au trou, {SIZE_OUTER} mm ailleurs), {} Tri6, {} Nodes, {} DOF, contraintes lissées aux Nodes",
         mesh.elements.len(),
         mesh.nodes.len(),
         field.displacements.len()
@@ -124,9 +121,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // au bord du trou : σθ = σ (1 − 2 cos 2θ), soit 3σ en θ = π/2 (σxx) et −σ en θ = 0 (σyy)
     report(
         "σxx en (0, a) (MPa)",
-        nodal[idx(0, DIVISIONS)].sigma_xx,
+        nodal[node_at(&mesh, 0.0, HOLE)?].sigma_xx,
         3.0 * SIGMA,
     );
-    report("σyy en (a, 0) (MPa)", nodal[idx(0, 0)].sigma_yy, -SIGMA);
+    report(
+        "σyy en (a, 0) (MPa)",
+        nodal[node_at(&mesh, HOLE, 0.0)?].sigma_yy,
+        -SIGMA,
+    );
     maille_viewer::show(&mesh, &field)
 }

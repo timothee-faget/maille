@@ -5,6 +5,7 @@ mod common;
 use common::{box_grid, rect_grid, to_quadratic, to_quadratic_tet};
 use maille_core::material::{Material, Section};
 use maille_core::mesh::{Bar, Dof, Element, Mesh, Node, PlaneState, Tet10, Tet4, Tri3, Tri6};
+use maille_core::mesher::{triangulate, Curve, Geometry, MeshOptions};
 use maille_core::model::{Analysis, Bc, Convection, HeatSource, Load, Model};
 use maille_core::results::{nodal_stresses, Field};
 use maille_core::MailleError;
@@ -607,6 +608,89 @@ fn hollow_cylinder(n: usize, quadratic: bool) -> (f64, f64) {
     let power = std::f64::consts::FRAC_PI_2 * K * T * (ti - to) / (ro / ri).ln();
     let entering: f64 = inner.iter().map(|&n| field.reactions[n]).sum();
     (error / (ti - to), entering / power)
+}
+
+/// Même cylindre creux, maillé par le mailleur avec la taille `h` partout. Renvoie les mêmes
+/// grandeurs que `hollow_cylinder`.
+fn hollow_cylinder_meshed(h: f64, quadratic: bool) -> (f64, f64) {
+    let (ri, ro, ti, to) = (10.0, 40.0, 200.0, 20.0);
+    let exact = |p: &Node| ti + (to - ti) * (p.x.hypot(p.y) / ri).ln() / (ro / ri).ln();
+    let g = Geometry {
+        outer: vec![
+            Curve::line([ri, 0.0], h, "sym"),
+            Curve::arc([ro, 0.0], [0.0, 0.0], false, h, "exterieur"),
+            Curve::line([0.0, ro], h, "sym"),
+            Curve::arc([0.0, ri], [0.0, 0.0], true, h, "interieur"),
+        ],
+        holes: vec![],
+    };
+    let t3 = triangulate(&g, &MeshOptions::default()).unwrap();
+    let (nodes, elements, inner, outer): (Vec<Node>, Vec<Element>, Vec<usize>, Vec<usize>) =
+        if quadratic {
+            let t = t3.to_quadratic();
+            let elements = t
+                .triangles
+                .iter()
+                .map(|&e| Element::Tri6(Tri6::new(e, material(), T, PlaneState::Stress).unwrap()))
+                .collect();
+            let (i, o) = (
+                t.boundary("interieur").unwrap(),
+                t.boundary("exterieur").unwrap(),
+            );
+            (t.nodes.clone(), elements, i.nodes.clone(), o.nodes.clone())
+        } else {
+            let elements = t3
+                .triangles
+                .iter()
+                .map(|&e| Element::Tri3(Tri3::new(e, material(), T, PlaneState::Stress).unwrap()))
+                .collect();
+            let (i, o) = (
+                t3.boundary("interieur").unwrap(),
+                t3.boundary("exterieur").unwrap(),
+            );
+            (t3.nodes.clone(), elements, i.nodes.clone(), o.nodes.clone())
+        };
+    let bcs = inner
+        .iter()
+        .chain(&outer)
+        .map(|&node| Bc {
+            node,
+            dof: Dof::T,
+            value: exact(&nodes[node]),
+        })
+        .collect();
+    let mesh = Mesh::new(nodes, elements).unwrap();
+    let field = solve(&mesh, bcs, Vec::new());
+    let error = mesh
+        .nodes
+        .iter()
+        .zip(&field.temperatures)
+        .map(|(p, t)| (t - exact(p)).abs())
+        .fold(0.0, f64::max);
+    let power = std::f64::consts::FRAC_PI_2 * K * T * (ti - to) / (ro / ri).ln();
+    let entering: f64 = inner.iter().map(|&n| field.reactions[n]).sum();
+    (error / (ti - to), entering / power)
+}
+
+#[test]
+fn hollow_cylinder_on_generated_mesh() {
+    // Maillage non structuré : l'erreur ne baisse pas régulièrement d'un maillage au suivant, on
+    // mesure donc l'ordre sur un facteur 4 en h. Tri3 : rapport > 4 (ordre > 1, ~2 attendu) ;
+    // Tri6 : rapport > 16 (ordre > 2).
+    for (name, quadratic, min_ratio) in [("Tri3", false, 4.0), ("Tri6", true, 16.0)] {
+        let (coarse, _) = hollow_cylinder_meshed(4.0, quadratic);
+        let (fine, _) = hollow_cylinder_meshed(1.0, quadratic);
+        assert!(
+            coarse / fine > min_ratio,
+            "{name} : {coarse:.2e} puis {fine:.2e}"
+        );
+    }
+    // Tri6, h = 2 : au moins aussi près que la grille polaire 8 × 8
+    let (error, power) = hollow_cylinder_meshed(2.0, true);
+    assert!(
+        error < 2e-4 && (power - 1.0).abs() < 1e-4,
+        "Tri6 : {error:.2e}, puissance {power:.6}"
+    );
 }
 
 #[test]
