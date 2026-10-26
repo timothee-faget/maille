@@ -101,6 +101,10 @@ pub enum IoError {
     Dxf {
         message: String,
     },
+    /// Fichier STL illisible ou surface inutilisable (le message dit où et quoi corriger).
+    Stl {
+        message: String,
+    },
     /// `MshFile` incohérent à l'écriture (indice hors limites, Set mélangé…).
     Invalid {
         problem: String,
@@ -192,6 +196,7 @@ impl fmt::Display for IoError {
             ),
             Self::InvalidModel { problem } => write!(f, "{problem}"),
             Self::Dxf { message } => write!(f, "DXF : {message}"),
+            Self::Stl { message } => write!(f, "STL : {message}"),
             Self::Vtk { problem } => write!(f, "résultats VTK : {problem}"),
             Self::Invalid { problem } => write!(f, "MshFile invalide : {problem}"),
         }
