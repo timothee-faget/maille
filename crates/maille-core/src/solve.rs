@@ -78,7 +78,7 @@ impl SkylineMatrix {
                 // Σ_k L_ik L_jk sur les colonnes communes aux deux profils
                 let k0 = fi.max(self.first[j]);
                 let (ri, rj) = (self.start[i] - fi, self.start[j] - self.first[j]);
-                let s: f64 = (k0..j).map(|k| self.data[ri + k] * self.data[rj + k]).sum();
+                let s = dot(&self.data[ri + k0..ri + j], &self.data[rj + k0..rj + j]);
                 let a = self.data[ri + j] - s;
                 if i == j {
                     if a.is_nan() || a <= tol {
@@ -92,6 +92,21 @@ impl SkylineMatrix {
         }
         Ok(Cholesky(self))
     }
+}
+
+/// Produit scalaire de deux tranches de même longueur. Quatre sommes partielles indépendantes
+/// : le Cholesky passe l'essentiel de son temps ici, et une seule somme force chaque addition à
+/// attendre la précédente.
+fn dot(a: &[f64], b: &[f64]) -> f64 {
+    let ((a4, a_tail), (b4, b_tail)) = (a.as_chunks::<8>(), b.as_chunks::<8>());
+    let tail: f64 = a_tail.iter().zip(b_tail).map(|(x, y)| x * y).sum();
+    let mut s = [0.0; 8];
+    for (x, y) in a4.iter().zip(b4) {
+        for k in 0..8 {
+            s[k] += x[k] * y[k];
+        }
+    }
+    ((s[0] + s[1]) + (s[2] + s[3])) + ((s[4] + s[5]) + (s[6] + s[7])) + tail
 }
 
 /// Facteur L de Cholesky, dans le profil de la matrice factorisée.
@@ -266,6 +281,19 @@ mod tests {
                 assert!((ax - bi).abs() < 1e-14);
             }
             assert!(x.iter().zip(&direct).all(|(a, b)| (a - b).abs() < 1e-15));
+        }
+    }
+
+    #[test]
+    fn dot_matches_the_plain_sum_for_every_length_around_the_chunk_size() {
+        for n in 0..40 {
+            let a: Vec<f64> = (0..n).map(|k| 0.5 + k as f64).collect();
+            let b: Vec<f64> = (0..n).map(|k| 2.0 - 0.25 * k as f64).collect();
+            let plain: f64 = a.iter().zip(&b).map(|(x, y)| x * y).sum();
+            assert!(
+                (dot(&a, &b) - plain).abs() <= 1e-12 * (1.0 + plain.abs()),
+                "n = {n}"
+            );
         }
     }
 
