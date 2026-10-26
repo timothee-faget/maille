@@ -10,7 +10,7 @@ Les lire avant toute décision d'architecture. Ce fichier ne les duplique pas.
 
 ## État du projet
 
-M0 à M5 terminés : FEM 1D barre + poutre ; élasticité plane Tri3/Tri6 (dont Kirsch) ; viewer wgpu avec contraintes lissées aux Nodes ; 3D Tet4/Tet10 ; thermique stationnaire (conduction, source, convection) sur triangles et tétraèdres ; solveur creux maison (ligne de ciel + Cuthill-McKee inverse) ; mailleur 2D maison (`maille_core::mesher` : Delaunay contraint, raffinement de Ruppert, segments et arcs, tailles h par bord avec gradation, bords nommés pour les BC) ; thermique transitoire (`Step` à pas fixe, θ-méthode de Euler implicite à Crank-Nicolson, capacité cohérente avec ρ et c du Material, un `Increment` par pas) ; couplage thermo-mécanique séquentiel (champ de températures d'un calcul thermique donné au calcul statique, dilatation α sur Bar, triangles et tétraèdres). Tout est validé contre l'analytique. Prochain jalon : M6, non-linéarités. Workspace Cargo : `crates/maille-core` (lib pure, zéro dépendance), `crates/maille-viewer` (client 2D : wgpu, winit, glyphon) et `crates/maille-cli` (client : `maille-cli kirsch`, `maille-cli cylindre`, `maille-cli trempe` et `maille-cli cylindre-thermo` maillent leur géométrie puis ouvrent le viewer).
+M0 à M6 terminés : FEM 1D barre + poutre ; élasticité plane Tri3/Tri6 (dont Kirsch) ; viewer wgpu avec contraintes lissées aux Nodes ; 3D Tet4/Tet10 ; thermique stationnaire (conduction, source, convection) sur triangles et tétraèdres ; solveur creux maison (ligne de ciel + Cuthill-McKee inverse) ; mailleur 2D maison (`maille_core::mesher` : Delaunay contraint, raffinement de Ruppert, segments et arcs, tailles h par bord avec gradation, bords nommés pour les BC) ; thermique transitoire (`Step` à pas fixe, θ-méthode de Euler implicite à Crank-Nicolson, capacité cohérente avec ρ et c du Material, un `Increment` par pas) ; couplage thermo-mécanique séquentiel (champ de températures d'un calcul thermique donné au calcul statique, dilatation α sur Bar, triangles et tétraèdres) ; élasto-plasticité de von Mises en petites déformations (écrouissage isotrope linéaire, retour radial et tangente cohérente, Newton-Raphson par incrément, triangles en déformations planes et tétraèdres). Tout est validé contre l'analytique. Suite de M6 (autres non-linéarités) à décider dans la roadmap (28.41). Workspace Cargo : `crates/maille-core` (lib pure, zéro dépendance), `crates/maille-viewer` (client 2D : wgpu, winit, glyphon) et `crates/maille-cli` (client : `maille-cli kirsch`, `maille-cli cylindre`, `maille-cli trempe`, `maille-cli cylindre-thermo` et `maille-cli cylindre-plastique` maillent leur géométrie puis ouvrent le viewer).
 
 Commandes :
 - `cargo build`
@@ -20,7 +20,8 @@ Commandes :
 
 ## Périmètre
 
-- Dedans : mécanique statique linéaire, thermique (stationnaire puis transitoire), puis couplage thermo-mécanique.
+- Dedans : mécanique statique linéaire, thermique (stationnaire puis transitoire), couplage thermo-mécanique, plasticité
+  de von Mises en petites déformations (M6).
 - Dehors, sauf demande explicite : fluides, électromagnétisme, contact général, grandes déformations,
   calcul parallèle/GPU, import CAO (STEP).
 - Ne pas élargir le périmètre de ta propre initiative. En cas de doute, demander.
@@ -60,6 +61,11 @@ Couplage (M5) : séquentiel, comme Abaqus : le **champ de températures** d'un F
 Mailleur (M4) : **Geometry** (domaine : contour extérieur + trous), **Curve** (morceau de bord, segment ou arc, avec sa
 taille h et son nom), **Triangulation** (sortie du mailleur : Nodes, triangles, bords nommés ; ce n'est pas un Mesh),
 **BoundarySet** (Nodes et faces d'un bord nommé).
+Plasticité (M6) : **Plasticity** (σy0 et H du Material, `with_plasticity`), **VonMises** (la loi au point de Gauss),
+**PlasticState** (εp et p d'un point de Gauss), **p** (déformation plastique cumulée, `equivalent_plastic_strains` du
+Field ; « εp » désigne le tenseur), **Amplitude** (λ(t) linéaire par morceaux qui multiplie les Load et les valeurs des BC).
+Le calcul **quasi-statique** (`Step::quasi_static`, `Model::solve_quasi_static`) résout un équilibre par Newton-Raphson
+à chaque Increment ; ses `residuals` sont les résidus relatifs des itérations. La Step reste le temps seul.
 
 ## Workflow
 

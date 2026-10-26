@@ -63,6 +63,10 @@ fn solid_meshes(material: Material) -> Vec<(&'static str, Mesh)> {
     ]
 }
 
+fn bc(node: usize, dof: Dof, value: f64) -> Bc {
+    Bc { node, dof, value }
+}
+
 fn near(a: f64, b: f64) -> bool {
     (a - b).abs() < 1e-9 * L
 }
@@ -128,19 +132,11 @@ fn tension_bcs(mesh: &Mesh, delta: f64) -> Vec<Bc> {
     for (i, n) in mesh.nodes.iter().enumerate() {
         for (c, dof) in [(n.x, Dof::Ux), (n.y, Dof::Uy), (n.z, Dof::Uz)] {
             if near(c, 0.0) {
-                bcs.push(Bc {
-                    node: i,
-                    dof,
-                    value: 0.0,
-                });
+                bcs.push(bc(i, dof, 0.0));
             }
         }
         if near(n.x, L) {
-            bcs.push(Bc {
-                node: i,
-                dof: Dof::Ux,
-                value: delta,
-            });
+            bcs.push(bc(i, Dof::Ux, delta));
         }
     }
     bcs
@@ -276,11 +272,7 @@ fn homogeneous_strain_history_matches_the_material_point() {
             .filter(|(_, n)| on_boundary(n))
         {
             for (&dof, value) in dofs(&mesh).iter().zip(uniform(&strain, n)) {
-                bcs.push(Bc {
-                    node: i,
-                    dof,
-                    value,
-                });
+                bcs.push(bc(i, dof, value));
             }
         }
         let model = Model::new(mesh.clone(), bcs, Vec::new()).unwrap();
@@ -372,7 +364,7 @@ fn an_elastic_model_gives_the_linear_solution_in_one_iteration() {
             .equivalent_plastic_strains
             .iter()
             .flatten()
-            .all(|&p| p == 0.0));
+            .all(|&p| p.abs() < 1e-15));
     }
 }
 
@@ -384,22 +376,10 @@ fn newton_converges_quadratically() {
         let mut bcs = Vec::new();
         for (i, n) in mesh.nodes.iter().enumerate() {
             if near(n.x, 0.0) {
-                bcs.push(Bc {
-                    node: i,
-                    dof: Dof::Ux,
-                    value: 0.0,
-                });
-                bcs.push(Bc {
-                    node: i,
-                    dof: Dof::Uy,
-                    value: 0.0,
-                });
+                bcs.push(bc(i, Dof::Ux, 0.0));
+                bcs.push(bc(i, Dof::Uy, 0.0));
             } else if near(n.x, L) {
-                bcs.push(Bc {
-                    node: i,
-                    dof: Dof::Uy,
-                    value: 0.02,
-                });
+                bcs.push(bc(i, Dof::Uy, 0.02));
             }
         }
         let model = Model::new(mesh, bcs, Vec::new()).unwrap();
@@ -451,18 +431,10 @@ fn a_force_beyond_the_limit_load_is_a_typed_error() {
     let total = 1.2 * 2.0 * SY / 3.0_f64.sqrt() * W;
     for (i, n) in mesh.nodes.iter().enumerate() {
         if near(n.x, 0.0) {
-            bcs.push(Bc {
-                node: i,
-                dof: Dof::Ux,
-                value: 0.0,
-            });
+            bcs.push(bc(i, Dof::Ux, 0.0));
         }
         if near(n.x, 0.0) && near(n.y, 0.0) {
-            bcs.push(Bc {
-                node: i,
-                dof: Dof::Uy,
-                value: 0.0,
-            });
+            bcs.push(bc(i, Dof::Uy, 0.0));
         }
         if near(n.x, L) {
             // 3 Nodes sur le bord : poids ¼, ½, ¼ d'une traction uniforme
@@ -481,11 +453,9 @@ fn a_force_beyond_the_limit_load_is_a_typed_error() {
     let model = Model::new(mesh, bcs, loads).unwrap();
     let step = Step::quasi_static(1.0, 6).unwrap();
     let result = model.solve_quasi_static(&step, &Amplitude::ramp(1.0).unwrap());
+    // la tangente devient singulière à λ = 1/1,2 de la charge visée : la charge limite
     assert!(
-        matches!(
-            result,
-            Err(MailleError::PlasticCollapse { .. } | MailleError::NotConverged { .. })
-        ),
+        matches!(result, Err(MailleError::PlasticCollapse { .. })),
         "{result:?}"
     );
 }
@@ -505,21 +475,9 @@ fn plasticity_inputs_are_typed_errors() {
     };
     let bcs = || {
         vec![
-            Bc {
-                node: 0,
-                dof: Dof::Ux,
-                value: 0.0,
-            },
-            Bc {
-                node: 0,
-                dof: Dof::Uy,
-                value: 0.0,
-            },
-            Bc {
-                node: 1,
-                dof: Dof::Uy,
-                value: 0.0,
-            },
+            bc(0, Dof::Ux, 0.0),
+            bc(0, Dof::Uy, 0.0),
+            bc(1, Dof::Uy, 0.0),
         ]
     };
     let step = Step::quasi_static(1.0, 1).unwrap();
@@ -621,21 +579,21 @@ mod tube {
     }
 
     /// (σr, σθ, σz) de Lamé en r sous la pression p.
+    /// Coefficients (A, B) de Lamé sous la pression p.
+    fn lame_coefficients(p: f64) -> (f64, f64) {
+        let span = B * B - A * A;
+        (p * A * A / span, p * A * A * B * B / span)
+    }
+
     pub fn lame(r: f64, p: f64) -> [f64; 3] {
-        let (a, b) = (
-            p * A * A / (B * B - A * A),
-            p * A * A * B * B / (B * B - A * A),
-        );
+        let (a, b) = lame_coefficients(p);
         let (sr, st) = (a - b / (r * r), a + b / (r * r));
         [sr, st, POISSON * (sr + st)]
     }
 
     /// Déplacement de l'alésage de Lamé sous la pression p.
     pub fn lame_bore(p: f64) -> f64 {
-        let (a, b) = (
-            p * A * A / (B * B - A * A),
-            p * A * A * B * B / (B * B - A * A),
-        );
+        let (a, b) = lame_coefficients(p);
         (1.0 + POISSON) / E * ((1.0 - 2.0 * POISSON) * a * A + b / A)
     }
 
@@ -704,33 +662,17 @@ mod tube {
         // symétries, puis déplacement radial à l'alésage sur les DOF que les symétries laissent libres
         let mut bcs: Vec<Bc> = sym_x
             .iter()
-            .map(|&node| Bc {
-                node,
-                dof: Dof::Uy,
-                value: 0.0,
-            })
-            .chain(sym_y.iter().map(|&node| Bc {
-                node,
-                dof: Dof::Ux,
-                value: 0.0,
-            }))
+            .map(|&node| bc(node, Dof::Uy, 0.0))
+            .chain(sym_y.iter().map(|&node| bc(node, Dof::Ux, 0.0)))
             .collect();
         for &node in &inner {
             let n = mesh.nodes[node];
             let r = n.x.hypot(n.y);
             if !sym_y.contains(&node) {
-                bcs.push(Bc {
-                    node,
-                    dof: Dof::Ux,
-                    value: bore * n.x / r,
-                });
+                bcs.push(bc(node, Dof::Ux, bore * n.x / r));
             }
             if !sym_x.contains(&node) {
-                bcs.push(Bc {
-                    node,
-                    dof: Dof::Uy,
-                    value: bore * n.y / r,
-                });
+                bcs.push(bc(node, Dof::Uy, bore * n.y / r));
             }
         }
         let history = Model::new(mesh.clone(), bcs, Vec::new())

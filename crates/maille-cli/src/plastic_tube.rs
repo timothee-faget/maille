@@ -16,16 +16,13 @@
 //!
 //! Unités cohérentes : N, mm, MPa. Le cœur ne convertit rien.
 
-use std::f64::consts::FRAC_PI_4;
-
 use maille_core::material::Material;
 use maille_core::mesh::{Dof, Element, Mesh, PlaneState, Tri6};
-use maille_core::mesher::{triangulate, Curve, Geometry, MeshOptions};
 use maille_core::model::{Amplitude, Bc, Model, Step};
-use maille_core::results::{Increment, Stress};
+use maille_core::results::Increment;
 use maille_core::MailleError;
 
-use crate::report;
+use crate::{nearest, polar, quarter_tube, report};
 
 const YOUNG: f64 = 210e3; // MPa
 const POISSON: f64 = 0.49;
@@ -87,29 +84,10 @@ fn final_bore() -> f64 {
     1.5 * k() * PLASTIC_RADIUS * PLASTIC_RADIUS / (YOUNG * INNER)
 }
 
-/// (σr, σθ) d'un point de Gauss.
-fn polar(s: &Stress) -> [f64; 2] {
-    let r = s.x.hypot(s.y);
-    let (c, sn) = (s.x / r, s.y / r);
-    [
-        s.sigma_xx * c * c + s.sigma_yy * sn * sn + 2.0 * s.tau_xy * c * sn,
-        s.sigma_xx * sn * sn + s.sigma_yy * c * c - 2.0 * s.tau_xy * c * sn,
-    ]
-}
-
 /// Quart de tube maillé, chargé par un déplacement radial de l'alésage en `INCREMENTS` pas. Renvoie
 /// le Mesh, les Increments et les Nodes du plan de symétrie y = 0 (pour lire la pression).
 pub fn solve() -> Result<(Mesh, Vec<Increment>, Vec<usize>), MailleError> {
-    let geometry = Geometry {
-        outer: vec![
-            Curve::line([INNER, 0.0], SIZE, "sym_x"),
-            Curve::arc([OUTER, 0.0], [0.0, 0.0], false, SIZE, "exterieur"),
-            Curve::line([0.0, OUTER], SIZE, "sym_y"),
-            Curve::arc([0.0, INNER], [0.0, 0.0], true, SIZE, "interieur"),
-        ],
-        holes: vec![],
-    };
-    let t = triangulate(&geometry, &MeshOptions::default())?.to_quadratic();
+    let t = quarter_tube(INNER, OUTER, SIZE)?;
     let material = Material::with_poisson(YOUNG, POISSON)?.with_plasticity(YIELD, 0.0)?;
     let elements = t
         .triangles
@@ -229,24 +207,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     );
     report("rayon plastique (mm)", plastic_front(last), PLASTIC_RADIUS);
     // points de Gauss les plus proches de θ = 45° près de rᵢ, dans la zone plastique et près de rₑ
-    let points: Vec<&Stress> = last.field.stresses.iter().flatten().collect();
-    let nearest = |r: f64| {
-        let target = [r * FRAC_PI_4.cos(), r * FRAC_PI_4.sin()];
-        points
-            .iter()
-            .min_by(|a, b| {
-                let d = |s: &Stress| (s.x - target[0]).hypot(s.y - target[1]);
-                d(a).total_cmp(&d(b))
-            })
-            .copied()
-    };
     for (label, r, k) in [
         ("σr près de rᵢ (MPa)", INNER, 0),
         ("σθ près de rᵢ (MPa)", INNER, 1),
         ("σθ en zone plastique (MPa)", 12.5, 1),
         ("σθ près de rₑ (MPa)", OUTER, 1),
     ] {
-        let s = nearest(r).ok_or("aucun point de Gauss")?;
+        let s = nearest(&last.field.stresses, r).ok_or("aucun point de Gauss")?;
         report(label, polar(s)[k], hill(s.x.hypot(s.y), PLASTIC_RADIUS)[k]);
     }
     maille_viewer::show(&mesh, &last.field)

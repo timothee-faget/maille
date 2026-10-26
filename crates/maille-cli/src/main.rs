@@ -15,9 +15,14 @@ mod plastic_tube;
 mod quench;
 mod thermal_stress;
 
+use std::f64::consts::FRAC_PI_4;
+
 use maille_core::material::Material;
 use maille_core::mesh::{Beam, Dof, Element, Mesh, Node};
+use maille_core::mesher::{triangulate, Curve, Geometry, MeshOptions, Triangulation};
 use maille_core::model::{Bc, Load, Model};
+use maille_core::results::Stress;
+use maille_core::MailleError;
 
 const YOUNG: f64 = 210e3; // MPa
 const INERTIA: f64 = 8.0e4; // mm⁴
@@ -88,6 +93,42 @@ fn console() -> Result<(), Box<dyn std::error::Error>> {
         -TIP_LOAD * LENGTH,
     );
     Ok(())
+}
+
+/// Quart de tube rᵢ < r < rₑ maillé en Tri6 (taille h), bords nommés sym_x (y = 0), exterieur,
+/// sym_y (x = 0) et interieur.
+fn quarter_tube(inner: f64, outer: f64, size: f64) -> Result<Triangulation<6>, MailleError> {
+    let geometry = Geometry {
+        outer: vec![
+            Curve::line([inner, 0.0], size, "sym_x"),
+            Curve::arc([outer, 0.0], [0.0, 0.0], false, size, "exterieur"),
+            Curve::line([0.0, outer], size, "sym_y"),
+            Curve::arc([0.0, inner], [0.0, 0.0], true, size, "interieur"),
+        ],
+        holes: vec![],
+    };
+    Ok(triangulate(&geometry, &MeshOptions::default())?.to_quadratic())
+}
+
+/// (σr, σθ, σz) d'un point de Gauss.
+fn polar(s: &Stress) -> [f64; 3] {
+    let r = s.x.hypot(s.y);
+    let (c, sn) = (s.x / r, s.y / r);
+    [
+        s.sigma_xx * c * c + s.sigma_yy * sn * sn + 2.0 * s.tau_xy * c * sn,
+        s.sigma_xx * sn * sn + s.sigma_yy * c * c - 2.0 * s.tau_xy * c * sn,
+        s.sigma_zz,
+    ]
+}
+
+/// Point de Gauss le plus proche du point de rayon r à θ = 45°.
+fn nearest(stresses: &[Vec<Stress>], r: f64) -> Option<&Stress> {
+    let target = [r * FRAC_PI_4.cos(), r * FRAC_PI_4.sin()];
+    let d = |s: &Stress| (s.x - target[0]).hypot(s.y - target[1]);
+    stresses
+        .iter()
+        .flatten()
+        .min_by(|a, b| d(a).total_cmp(&d(b)))
 }
 
 fn report(label: &str, computed: f64, exact: f64) {

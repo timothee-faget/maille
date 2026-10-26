@@ -13,16 +13,13 @@
 //! Unités cohérentes, une par calcul : W, mm, K en thermique ; N, mm, MPa en mécanique, α en 1/K.
 //! Le cœur ne convertit rien.
 
-use std::f64::consts::FRAC_PI_4;
-
 use maille_core::material::Material;
 use maille_core::mesh::{Dof, Element, Mesh, PlaneState, Tri6};
-use maille_core::mesher::{triangulate, Curve, Geometry, MeshOptions};
 use maille_core::model::{Analysis, Bc, Model};
-use maille_core::results::{Field, Stress};
+use maille_core::results::Field;
 use maille_core::MailleError;
 
-use crate::report;
+use crate::{nearest, polar, quarter_tube, report};
 
 const YOUNG: f64 = 210e3; // MPa
 const POISSON: f64 = 0.3;
@@ -60,30 +57,10 @@ fn exact(r: f64) -> [f64; 3] {
     [sr, st, POISSON * (sr + st) - YOUNG * EXPANSION * delta(r)]
 }
 
-/// (σr, σθ, σz) d'un point de Gauss.
-fn polar(s: &Stress) -> [f64; 3] {
-    let r = s.x.hypot(s.y);
-    let (c, sn) = (s.x / r, s.y / r);
-    [
-        s.sigma_xx * c * c + s.sigma_yy * sn * sn + 2.0 * s.tau_xy * c * sn,
-        s.sigma_xx * sn * sn + s.sigma_yy * c * c - 2.0 * s.tau_xy * c * sn,
-        s.sigma_zz,
-    ]
-}
-
 /// Quart de tube maillé : calcul thermique, puis statique sur le même Mesh. Renvoie le Mesh et le
 /// Field mécanique.
 pub fn solve() -> Result<(Mesh, Field), MailleError> {
-    let geometry = Geometry {
-        outer: vec![
-            Curve::line([INNER, 0.0], SIZE, "sym_x"),
-            Curve::arc([OUTER, 0.0], [0.0, 0.0], false, SIZE, "exterieur"),
-            Curve::line([0.0, OUTER], SIZE, "sym_y"),
-            Curve::arc([0.0, INNER], [0.0, 0.0], true, SIZE, "interieur"),
-        ],
-        holes: vec![],
-    };
-    let t = triangulate(&geometry, &MeshOptions::default())?.to_quadratic();
+    let t = quarter_tube(INNER, OUTER, SIZE)?;
     let material = Material::with_poisson(YOUNG, POISSON)?
         .with_expansion(EXPANSION)?
         .with_conductivity(CONDUCTIVITY)?;
@@ -141,24 +118,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         "", "calcul", "analytique", "écart rel."
     );
     // points de Gauss les plus proches de θ = 45° près de rᵢ, au milieu et près de rₑ
-    let points: Vec<&Stress> = mechanical.stresses.iter().flatten().collect();
-    let nearest = |r: f64| {
-        let target = [r * FRAC_PI_4.cos(), r * FRAC_PI_4.sin()];
-        points
-            .iter()
-            .min_by(|a, b| {
-                let d = |s: &Stress| (s.x - target[0]).hypot(s.y - target[1]);
-                d(a).total_cmp(&d(b))
-            })
-            .copied()
-    };
     for (label, r, k) in [
         ("σθ près de rᵢ (MPa)", INNER, 1),
         ("σz près de rᵢ (MPa)", INNER, 2),
         ("σr au milieu (MPa)", (INNER + OUTER) / 2.0, 0),
         ("σθ près de rₑ (MPa)", OUTER, 1),
     ] {
-        let s = nearest(r).ok_or("aucun point de Gauss")?;
+        let s = nearest(&mechanical.stresses, r).ok_or("aucun point de Gauss")?;
         report(label, polar(s)[k], exact(s.x.hypot(s.y))[k]);
     }
     maille_viewer::show(&mesh, &mechanical)
