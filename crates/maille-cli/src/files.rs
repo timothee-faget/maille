@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 
 use maille_core::results::{Field, Stress};
 use maille_io::model::{self, Run};
-use maille_io::msh::{self, CellKind};
+use maille_io::msh;
 use maille_io::vtk::{self, Entry, VtuResults};
-use maille_viewer::NodalResults;
+use maille_viewer::{NodalResults, Shot};
 
 pub(crate) type Failure = Box<dyn Error>;
 
@@ -125,22 +125,83 @@ fn solve_file(model_path: &Path, output: Option<&Path>) -> Result<Vec<PathBuf>, 
     Ok(written)
 }
 
-/// `maille view <resultats.pvd|.vtu> [indice]`.
+/// `maille view <resultats.pvd|.vtu> [indice] [--png image.png ...]`.
 pub fn view(args: &[String]) -> Result<(), Failure> {
-    let usage = "usage : maille view <resultats.pvd|resultats.vtu> [indice]";
-    let [path, rest @ ..] = args else {
-        return Err(usage.into());
+    let usage = "usage : maille view <resultats.pvd|resultats.vtu> [indice]\n        maille view <resultats.pvd|resultats.vtu> [indice] --png <image.png> [--size LxH] [--angles lacet,tangage] [--field k] [--deformed] [--cut x|y|z=position]";
+    let (mut path, mut index, mut png) = (None, None, None);
+    let mut shot = Shot::default();
+    let mut it = args.iter();
+    let number = |text: &str, what: &str| {
+        text.parse::<f64>()
+            .map_err(|_| format!("{what} : un nombre est attendu, trouvé « {text} »"))
     };
-    let index = match rest {
-        [] => None,
-        [i] => Some(
-            i.parse::<usize>()
-                .map_err(|_| format!("indice « {i} » : écrire un entier, depuis 0 ({usage})"))?,
-        ),
-        _ => return Err(usage.into()),
-    };
-    let results = open_results(Path::new(path), index)?;
-    maille_viewer::show_nodal(&to_nodal(&results)?)
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--png" => png = Some(PathBuf::from(it.next().ok_or(usage)?)),
+            "--size" => {
+                let text = it.next().ok_or(usage)?;
+                let (w, h) = text.split_once('x').ok_or_else(|| {
+                    format!("--size attend largeurxhauteur, par exemple 900x650, trouvé « {text} »")
+                })?;
+                let pixels = |t: &str| {
+                    t.parse::<u32>()
+                        .ok()
+                        .filter(|&n| (1..=8192).contains(&n))
+                        .ok_or_else(|| {
+                            format!("--size : « {t} » n'est pas une taille de 1 à 8192 pixels")
+                        })
+                };
+                (shot.width, shot.height) = (pixels(w)?, pixels(h)?);
+            }
+            "--angles" => {
+                let text = it.next().ok_or(usage)?;
+                let (yaw, pitch) = text.split_once(',').ok_or_else(|| {
+                    format!("--angles attend lacet,tangage en degrés, par exemple 30,20, trouvé « {text} »")
+                })?;
+                (shot.yaw, shot.pitch) = (number(yaw, "--angles")?, number(pitch, "--angles")?);
+            }
+            "--field" => {
+                let text = it.next().ok_or(usage)?;
+                shot.quantity = text
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|k| k.checked_sub(1))
+                    .ok_or_else(|| {
+                        format!("--field attend le numéro de la touche (1, 2…), trouvé « {text} »")
+                    })?;
+            }
+            "--deformed" => shot.deformed = true,
+            "--cut" => {
+                let text = it.next().ok_or(usage)?;
+                let (axis, position) = text.split_once('=').ok_or_else(|| {
+                    format!("--cut attend axe=position, par exemple x=0.5 (position de 0 à 1 dans la boîte), trouvé « {text} »")
+                })?;
+                let axis = ["x", "y", "z"]
+                    .iter()
+                    .position(|a| *a == axis)
+                    .ok_or_else(|| format!("--cut : axe « {axis} » inconnu, choisir x, y ou z"))?;
+                shot.cut = Some((axis, number(position, "--cut")?));
+            }
+            _ if path.is_none() => path = Some(arg.clone()),
+            _ if index.is_none() => {
+                index = Some(arg.parse::<usize>().map_err(|_| {
+                    format!("indice « {arg} » : écrire un entier, depuis 0 ({usage})")
+                })?)
+            }
+            _ => return Err(usage.into()),
+        }
+    }
+    let path = path.ok_or(usage)?;
+    let results = to_nodal(&open_results(Path::new(&path), index)?)?;
+    match png {
+        None => maille_viewer::show_nodal(&results),
+        Some(file) => {
+            fs::write(&file, maille_viewer::screenshot_nodal(&results, &shot)?)
+                .map_err(|e| format!("impossible d'écrire {} : {e}", file.display()))?;
+            println!("{}", file.display());
+            Ok(())
+        }
+    }
 }
 
 /// Le `.vtu` demandé : directement, ou l'Increment `index` d'un `.pvd` (le dernier par défaut).
@@ -165,15 +226,8 @@ fn open_results(path: &Path, index: Option<usize>) -> Result<VtuResults, Failure
     Ok(vtk::read_results(&read(&vtu)?)?)
 }
 
-/// Résultats relus → ce que le viewer affiche. Le viewer est 2D : un maillage de tétraèdres est
-/// refusé, avec le conseil d'ouvrir le fichier dans ParaView.
+/// Résultats relus → ce que le viewer affiche (triangles et tétraèdres).
 fn to_nodal(r: &VtuResults) -> Result<NodalResults, Failure> {
-    if !matches!(r.kind, CellKind::Tri3 | CellKind::Tri6) {
-        return Err(
-            "le viewer de Maille n'affiche que le 2D pour l'instant : ouvrir ce fichier dans ParaView"
-                .into(),
-        );
-    }
     let array = |name: &str, components: usize| {
         r.arrays
             .iter()
@@ -199,8 +253,8 @@ fn to_nodal(r: &VtuResults) -> Result<NodalResults, Failure> {
                 .collect()
         })
         .unwrap_or_default();
-    let displacements: Vec<[f64; 2]> = array("displacement", 3)
-        .map(|d| d.chunks(3).map(|u| [u[0], u[1]]).collect())
+    let displacements: Vec<[f64; 3]> = array("displacement", 3)
+        .map(|d| d.chunks(3).map(|u| [u[0], u[1], u[2]]).collect())
         .unwrap_or_default();
     if temperatures.is_empty() && (stresses.is_empty() || displacements.is_empty()) {
         return Err(
@@ -209,7 +263,7 @@ fn to_nodal(r: &VtuResults) -> Result<NodalResults, Failure> {
         );
     }
     Ok(NodalResults {
-        nodes: r.nodes.iter().map(|p| [p.x, p.y]).collect(),
+        nodes: r.nodes.iter().map(|p| [p.x, p.y, p.z]).collect(),
         cells: r.cells.clone(),
         displacements,
         stresses,
@@ -221,6 +275,7 @@ fn to_nodal(r: &VtuResults) -> Result<NodalResults, Failure> {
 #[cfg(test)]
 mod tests {
     use maille_core::mesh::Node;
+    use maille_io::msh::CellKind;
     use maille_io::vtk::PointArray;
 
     use super::*;
@@ -255,7 +310,10 @@ mod tests {
             vec![array("displacement", 3), array("stress", 6)],
         );
         let n = to_nodal(&r).unwrap();
-        assert_eq!(n.displacements, [[0.0, 1.0], [3.0, 4.0], [6.0, 7.0]]);
+        assert_eq!(
+            n.displacements,
+            [[0.0, 1.0, 2.0], [3.0, 4.0, 5.0], [6.0, 7.0, 8.0]]
+        );
         assert_eq!(n.stresses[1].sigma_xx, 6.0);
         assert_eq!((n.stresses[1].x, n.stresses[2].y), (1.0, 1.0));
         assert!(n.temperatures.is_empty() && n.plastic_strains.is_empty());
@@ -268,9 +326,9 @@ mod tests {
     }
 
     #[test]
-    fn solids_and_empty_files_are_refused() {
-        let solid = to_nodal(&results(CellKind::Tet4, vec![array("temperature", 1)]));
-        assert!(solid.unwrap_err().to_string().contains("ParaView"));
+    fn tetrahedra_are_shown_and_empty_files_are_refused() {
+        let solid = to_nodal(&results(CellKind::Tet4, vec![array("temperature", 1)])).unwrap();
+        assert_eq!(solid.temperatures.len(), 3);
         let empty = to_nodal(&results(CellKind::Tri3, vec![array("stress", 6)]));
         assert!(empty.unwrap_err().to_string().contains("rien à afficher"));
     }

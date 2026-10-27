@@ -1,23 +1,21 @@
-//! Viewer de Maille : affiche un Mesh 2D et ses Fields (statiques ou thermiques) dans une fenêtre
-//! (wgpu + winit).
+//! Viewer de Maille : affiche un Mesh 2D ou de tétraèdres et ses Fields (statiques ou thermiques)
+//! dans une fenêtre (wgpu + winit), ou dans une image PNG (`screenshot_nodal`).
 //!
 //! Client du cœur : aucun calcul ici, seulement de l'affichage.
 
 mod app;
-#[cfg_attr(not(test), allow(dead_code))] // servira au viewer 3D
 mod camera;
 mod colormap;
-#[cfg_attr(not(test), allow(dead_code))] // servira au viewer 3D
 mod cut;
+mod display;
 mod legend;
+mod png;
 mod render;
 mod scene;
-#[cfg_attr(not(test), allow(dead_code))] // servira au viewer 3D
 mod solid;
 #[cfg(test)]
 mod testmesh;
 mod vec3;
-mod view;
 
 pub use scene::NodalResults;
 
@@ -25,7 +23,8 @@ use maille_core::mesh::Mesh;
 use maille_core::results::Field;
 
 /// Ouvre une fenêtre sur le Mesh et son Field ; rend la main quand la fenêtre est fermée.
-/// Erreur si le Mesh n'est pas fait de triangles ou si aucune carte graphique n'est utilisable.
+/// Erreur si le Mesh n'est pas fait de triangles ou de tétraèdres, ou si aucune carte graphique n'est
+/// utilisable.
 pub fn show(mesh: &Mesh, field: &Field) -> Result<(), Box<dyn std::error::Error>> {
     let title = format!(
         "Maille — {} Elements, {} Nodes, {} DOF",
@@ -38,7 +37,7 @@ pub fn show(mesh: &Mesh, field: &Field) -> Result<(), Box<dyn std::error::Error>
 }
 
 /// Ouvre une fenêtre sur un résultat déjà lissé aux Nodes (relu d'un `.vtu`). Mêmes erreurs que
-/// `show` : maillage qui n'est pas fait de triangles, champs de tailles incohérentes.
+/// `show` : maillage qui n'est ni de triangles ni de tétraèdres, champs de tailles incohérentes.
 pub fn show_nodal(results: &NodalResults) -> Result<(), Box<dyn std::error::Error>> {
     let title = format!(
         "Maille — {} Elements, {} Nodes",
@@ -54,4 +53,213 @@ fn run(title: String, scene: scene::Scene) -> Result<(), Box<dyn std::error::Err
     let mut app = app::App::new(title, scene);
     event_loop.run_app(&mut app)?;
     app.into_result()
+}
+
+/// Réglages d'une capture d'écran (`screenshot_nodal`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Shot {
+    /// Taille de l'image, en pixels.
+    pub width: u32,
+    pub height: u32,
+    /// Direction de vue, en degrés : lacet autour de y et tangage ; (0, 0) regarde vers −z.
+    pub yaw: f64,
+    pub pitch: f64,
+    /// Rang du champ dans la liste des touches 1 à 9 (0 : le premier).
+    pub quantity: usize,
+    pub deformed: bool,
+    /// Plan de coupe : axe (0 = x, 1 = y, 2 = z) et position dans la boîte du Mesh, de 0 à 1.
+    pub cut: Option<(usize, f64)>,
+}
+
+impl Default for Shot {
+    fn default() -> Self {
+        Self {
+            width: 900,
+            height: 650,
+            yaw: 0.0,
+            pitch: 0.0,
+            quantity: 0,
+            deformed: false,
+            cut: None,
+        }
+    }
+}
+
+/// Dessine le résultat hors écran et rend le PNG de l'image, sans ouvrir de fenêtre. Mêmes erreurs
+/// que `show_nodal`, plus un rang de champ inexistant et l'absence de carte graphique.
+pub fn screenshot_nodal(
+    results: &NodalResults,
+    shot: &Shot,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let pixels = render_shot(results, shot)?;
+    Ok(png::encode(shot.width.max(1), shot.height.max(1), &pixels))
+}
+
+/// Pixels RGBA de la capture, ligne par ligne du haut vers le bas.
+fn render_shot(results: &NodalResults, shot: &Shot) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut display = display::Display::new(scene::Scene::from_nodal(results)?);
+    let quantities = display.scene.quantities();
+    display.quantity = *quantities.get(shot.quantity).ok_or_else(|| {
+        format!(
+            "champ {} : ce résultat en propose {}, numérotés depuis 0",
+            shot.quantity,
+            quantities.len()
+        )
+    })?;
+    display.deformed = shot.deformed && display.scene.has_displacements();
+    display.cut = shot
+        .cut
+        .filter(|_| display.scene.is_solid())
+        .map(|(axis, fraction)| display::Cut {
+            axis,
+            fraction: fraction.clamp(0.0, 1.0),
+            flipped: false,
+        });
+    display.camera.yaw = shot.yaw.to_radians();
+    display.camera.pitch = shot.pitch.to_radians();
+    let mut renderer = render::Renderer::new_offscreen(shot.width, shot.height, display.colormap)?;
+    display.refit(&renderer);
+    display.refresh(&mut renderer);
+    renderer.render_pixels()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::colormap::Colormap;
+    use maille_core::results::Stress;
+
+    /// Résultat sans GPU : on saute le test sur une machine qui n'en a pas.
+    fn render(results: &NodalResults, shot: &Shot) -> Option<Vec<u8>> {
+        match render_shot(results, shot) {
+            Ok(pixels) => Some(pixels),
+            Err(e) if e.to_string().contains("aucune carte graphique") => {
+                eprintln!("test sauté : {e}");
+                None
+            }
+            Err(e) => panic!("{e}"),
+        }
+    }
+
+    fn pixel(pixels: &[u8], shot: &Shot, x: u32, y: u32) -> [u8; 3] {
+        let k = ((y * shot.width + x) * 4) as usize;
+        [pixels[k], pixels[k + 1], pixels[k + 2]]
+    }
+
+    /// Le pixel est la couleur `expected` de la colormap, à 3 niveaux près.
+    fn assert_color(got: [u8; 3], expected: [u8; 4], what: &str) {
+        assert!(
+            (0..3).all(|k| got[k].abs_diff(expected[k]) <= 3),
+            "{what} : {got:?} au lieu de {expected:?}"
+        );
+    }
+
+    /// Centre de la partie de l'image que la légende laisse libre.
+    fn center(shot: &Shot) -> (u32, u32) {
+        let reserved = legend::reserved_width(1.0);
+        (
+            (shot.width as f64 / 2.0 + reserved / 2.0) as u32,
+            shot.height / 2,
+        )
+    }
+
+    fn stress(p: [f64; 3]) -> Stress {
+        Stress {
+            x: p[0],
+            y: p[1],
+            z: p[2],
+            sigma_xx: 0.0,
+            sigma_yy: 0.0,
+            sigma_zz: 0.0,
+            tau_xy: 0.0,
+            tau_yz: 0.0,
+            tau_xz: 0.0,
+        }
+    }
+
+    /// Cube de côté 2 centré, déplacement (0,001 (x + 1), 0, 0) : |u| = 0,001 (x + 1), linéaire,
+    /// de 0 sur la face x = −1 à 0,002 sur la face x = +1.
+    fn cube_results() -> NodalResults {
+        let (nodes, cells) = crate::testmesh::cube();
+        NodalResults {
+            displacements: nodes
+                .iter()
+                .map(|p| [0.001 * (p[0] + 1.0), 0.0, 0.0])
+                .collect(),
+            stresses: nodes.iter().map(|&p| stress(p)).collect(),
+            nodes,
+            cells,
+            ..NodalResults::default()
+        }
+    }
+
+    #[test]
+    fn a_flat_mesh_is_drawn_in_the_exact_color_of_its_field_on_the_background() {
+        // un triangle à champ de température constant : toute la colormap tombe sur son bas
+        let results = NodalResults {
+            nodes: vec![[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 2.0, 0.0]],
+            cells: vec![vec![0, 1, 2]],
+            temperatures: vec![5.0; 3],
+            ..NodalResults::default()
+        };
+        let shot = Shot::default();
+        let Some(pixels) = render(&results, &shot) else {
+            return;
+        };
+        let (cx, cy) = center(&shot);
+        // le centre de l'image libre est dans le triangle (son centre de boîte est (1, 1), sur l'hypoténuse :
+        // un peu plus bas et à gauche)
+        let inside = pixel(&pixels, &shot, cx - 30, cy + 30);
+        assert_color(inside, Colormap::Rainbow.lut()[0], "triangle");
+        // coin bas droit : fond gris clair, sRGB de 0,95 linéaire
+        assert_color(
+            pixel(&pixels, &shot, shot.width - 1, shot.height - 1),
+            [249, 249, 249, 255],
+            "fond",
+        );
+    }
+
+    #[test]
+    fn a_cut_shows_the_field_inside_instead_of_the_face_behind_it() {
+        let shot = Shot {
+            yaw: 90.0, // regard depuis +x, vers le centre
+            quantity: 7,
+            ..Shot::default()
+        };
+        let lut = Colormap::Rainbow.lut();
+        let (cx, cy) = center(&shot);
+        // sans coupe : la face x = +1, où |u| est maximal
+        let Some(plain) = render(&cube_results(), &shot) else {
+            return;
+        };
+        assert_color(
+            pixel(&plain, &shot, cx, cy),
+            *lut.last().unwrap(),
+            "face x = 1",
+        );
+        // coupe au quart de la boîte (x = −0,5) : la face coupée montre |u| = 0,001 · 0,5 à l'intérieur, soit
+        // le quart du champ, et passe devant la face x = −1 restée derrière
+        let cut = Shot {
+            cut: Some((0, 0.25)),
+            ..shot.clone()
+        };
+        let Some(sliced) = render(&cube_results(), &cut) else {
+            return;
+        };
+        let band = (0.25 * lut.len() as f64) as usize;
+        assert_color(pixel(&sliced, &cut, cx, cy), lut[band], "coupe x = -0,5");
+        assert_ne!(lut[band], lut[0]);
+    }
+
+    #[test]
+    fn the_field_rank_is_checked() {
+        let shot = Shot {
+            quantity: 20,
+            ..Shot::default()
+        };
+        let e = screenshot_nodal(&cube_results(), &shot)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("champ 20"), "{e}");
+    }
 }

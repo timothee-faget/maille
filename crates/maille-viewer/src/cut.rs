@@ -3,7 +3,7 @@
 //! `clip_segments` coupent la peau et son contour au même plan. Tout est calculé sur le CPU, sans
 //! GPU, et recalculé quand le plan bouge.
 
-use crate::vec3::{dot, lerp, sub, V3};
+use crate::vec3::{dot, lerp, V3};
 
 /// Plan de normale `normal` (unitaire) passant par les points tels que n · p = `offset`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -129,14 +129,18 @@ pub fn clip_segments(positions: &[V3], edges: &[[u32; 2]], plane: Plane) -> Vec<
         .collect()
 }
 
-/// Aire d'un ensemble de triangles (utile aux tests et au rapport de la légende).
+/// Aire d'un ensemble de triangles.
+#[cfg(test)]
 pub fn area(patch: &Patch) -> f64 {
     patch
         .triangles
         .iter()
         .map(|t| {
             let [a, b, c] = t.map(|i| patch.positions[i as usize]);
-            0.5 * crate::vec3::norm(crate::vec3::cross(sub(b, a), sub(c, a)))
+            0.5 * crate::vec3::norm(crate::vec3::cross(
+                crate::vec3::sub(b, a),
+                crate::vec3::sub(c, a),
+            ))
         })
         .sum()
 }
