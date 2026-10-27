@@ -5,7 +5,10 @@ use crate::colormap::{Colormap, RAINBOW_BANDS};
 
 /// Dimensions en pixels logiques, multipliées par le facteur d'échelle de l'écran (2 en Retina).
 const MARGIN: f64 = 16.0;
+/// Hauteur réservée au titre : une ou deux lignes (champ, puis déformée).
 const TITLE_HEIGHT: f64 = 52.0;
+/// Hauteur d'une ligne de titre de plus (coupe).
+const TITLE_LINE: f64 = 20.0;
 const BAR_WIDTH: f64 = 22.0;
 const BAR_MAX_HEIGHT: f64 = 360.0;
 const TICK_LENGTH: f64 = 5.0;
@@ -42,10 +45,18 @@ pub fn reserved_width(scale: f64) -> f64 {
     scale * (2.0 * MARGIN + BAR_WIDTH + TICK_LENGTH + LABEL_GAP + LABEL_WIDTH)
 }
 
-/// Légende d'un champ de (min, max) = `range` dans une fenêtre de `size` pixels.
-pub fn layout(size: [f64; 2], range: (f64, f64), colormap: Colormap, scale: f64) -> Layout {
+/// Légende d'un champ de (min, max) = `range` dans une fenêtre de `size` pixels, sous un titre de
+/// `title_lines` lignes.
+pub fn layout(
+    size: [f64; 2],
+    range: (f64, f64),
+    colormap: Colormap,
+    scale: f64,
+    title_lines: usize,
+) -> Layout {
     let left = scale * MARGIN;
-    let top = scale * (MARGIN + TITLE_HEIGHT);
+    let extra = title_lines.saturating_sub(2) as f64;
+    let top = scale * (MARGIN + TITLE_HEIGHT + extra * TITLE_LINE);
     let height = (scale * BAR_MAX_HEIGHT).min(size[1] - top - scale * MARGIN);
     let bar = [left, top, left + scale * BAR_WIDTH, top + height.max(0.0)];
     let intervals = match colormap {
@@ -98,7 +109,7 @@ mod tests {
 
     #[test]
     fn rainbow_has_one_tick_per_band_limit_from_min_at_the_bottom_to_max_at_the_top() {
-        let l = layout([800.0, 900.0], (-10.0, 230.0), Colormap::Rainbow, 1.0);
+        let l = layout([800.0, 900.0], (-10.0, 230.0), Colormap::Rainbow, 1.0, 1);
         assert_eq!(l.ticks.len(), RAINBOW_BANDS + 1);
         assert_eq!(l.ticks[0].label, format_value(-10.0));
         assert!((l.ticks[0].y - l.bar[3]).abs() < 1e-9);
@@ -111,7 +122,7 @@ mod tests {
 
     #[test]
     fn viridis_has_six_ticks() {
-        let l = layout([800.0, 900.0], (0.0, 1.0), Colormap::Viridis, 1.0);
+        let l = layout([800.0, 900.0], (0.0, 1.0), Colormap::Viridis, 1.0, 1);
         let labels: Vec<&str> = l.ticks.iter().map(|t| t.label.as_str()).collect();
         assert_eq!(
             labels,
@@ -127,15 +138,22 @@ mod tests {
     }
 
     #[test]
+    fn a_third_title_line_pushes_the_bar_down() {
+        let at = |lines| layout([800.0, 900.0], (0.0, 1.0), Colormap::Rainbow, 1.0, lines).bar[1];
+        assert_eq!(at(1), at(2));
+        assert!((at(3) - at(2) - TITLE_LINE).abs() < 1e-9);
+    }
+
+    #[test]
     fn the_legend_scales_with_the_screen_and_shrinks_in_a_short_window() {
-        let normal = layout([800.0, 900.0], (0.0, 1.0), Colormap::Rainbow, 1.0);
-        let retina = layout([1600.0, 1800.0], (0.0, 1.0), Colormap::Rainbow, 2.0);
+        let normal = layout([800.0, 900.0], (0.0, 1.0), Colormap::Rainbow, 1.0, 1);
+        let retina = layout([1600.0, 1800.0], (0.0, 1.0), Colormap::Rainbow, 2.0, 1);
         for k in 0..4 {
             assert!((retina.bar[k] - 2.0 * normal.bar[k]).abs() < 1e-9);
         }
         assert!((reserved_width(2.0) - 2.0 * reserved_width(1.0)).abs() < 1e-9);
         // fenêtre basse : la barre tient dans la fenêtre, marge du bas comprise
-        let short = layout([800.0, 300.0], (0.0, 1.0), Colormap::Rainbow, 1.0);
+        let short = layout([800.0, 300.0], (0.0, 1.0), Colormap::Rainbow, 1.0, 1);
         assert!((short.bar[3] - (300.0 - MARGIN)).abs() < 1e-9);
         // tout le texte tient dans la largeur réservée
         assert!(normal.label_x + LABEL_WIDTH <= reserved_width(1.0));

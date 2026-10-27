@@ -17,7 +17,7 @@ Depuis ce dossier :
 
 ```sh
 maille solve traction.toml        # écrit traction.pvd et traction.vtu
-maille view traction.pvd          # ouvre le viewer (2D) ; dernier incrément par défaut
+maille view traction.pvd          # ouvre le viewer (2D ou 3D) ; dernier incrément par défaut
 maille view trempe.pvd 50         # un incrément précis, depuis 0
 ```
 
@@ -27,7 +27,21 @@ maille view trempe.pvd 50         # un incrément précis, depuis 0
 | `trempe` | thermique transitoire, 200 incréments | série de Fourier |
 | `tube_thermique` puis `tube_contraintes` | couplage thermo-mécanique (lancer dans cet ordre) | Timoshenko et Goodier |
 | `tube_pression` | pression sur un bord, déformations planes | Lamé |
-| `cube` | 3D, Tet4 (ouvrir dans ParaView) | champ linéaire |
+| `cube` | 3D, Tet4 (viewer 3D ou ParaView) | champ linéaire |
+
+**Viewer 3D.** Un maillage de tétraèdres s'affiche par sa peau, colorée par le champ (touches 1 à 8 :
+von Mises, σxx, σyy, σzz, τxy, τyz, τxz, |u| ; 9 pour p en plasticité). Glisser tourne, Maj + glisser (ou
+clic droit) déplace, la molette zoome, `D` montre la déformée, `R` recadre. **Plan de coupe** : `X`, `Y`
+ou `Z` coupent selon l'axe (la même touche retire la coupe), `↑` et `↓` déplacent le plan, `F` change
+de côté ; la face coupée montre le champ à l'intérieur (interpolé sur les sommets des tétraèdres).
+Les mêmes réglages donnent une image sans ouvrir de fenêtre :
+
+```sh
+maille view cube.pvd --png cube.png --field 8 --deformed --cut x=0.5 --angles 35,25
+```
+
+(`--size LxH`, `--angles lacet,tangage` en degrés, `--field k` pour la touche k, `--cut axe=position` avec
+la position de 0 à 1 dans la boîte du maillage.) Il faut une carte graphique, même sans fenêtre.
 
 Les tests lancent chaque exemple et le comparent à sa solution exacte : ils restent justes.
 

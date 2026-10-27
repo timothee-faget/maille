@@ -1,5 +1,6 @@
 //! Ce qu'on dessine, calculé sans GPU : triangles et arêtes à tracer, valeur de chaque champ aux
-//! Nodes, positions déformées.
+//! Nodes, positions déformées. Un Mesh 2D est dans le plan z = 0 ; un Mesh de tétraèdres est
+//! dessiné par sa peau (voir `solid`), et ses cellules servent au plan de coupe.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -7,6 +8,8 @@ use std::fmt;
 use maille_core::mesh::{Element, Mesh};
 use maille_core::results::{nodal_equivalent_plastic_strains, nodal_stresses, Field, Stress};
 use maille_core::MailleError;
+
+use crate::solid::skin;
 
 /// Part de la taille du Mesh occupée par le plus grand déplacement, dans la déformée amplifiée.
 const DEFORMATION_RATIO: f64 = 0.1;
@@ -17,7 +20,10 @@ pub enum Quantity {
     VonMises,
     SigmaXx,
     SigmaYy,
+    SigmaZz,
     TauXy,
+    TauYz,
+    TauXz,
     /// Norme du déplacement |u|.
     Displacement,
     Temperature,
@@ -26,8 +32,8 @@ pub enum Quantity {
 }
 
 impl Quantity {
-    /// Champs d'un Field élasto-plastique, dans l'ordre des touches 1 à 6 : les champs mécaniques,
-    /// puis p.
+    /// Champs d'un Field 2D élasto-plastique, dans l'ordre des touches 1 à 6 : les champs
+    /// mécaniques, puis p.
     pub const PLASTIC: [Self; 6] = [
         Self::VonMises,
         Self::SigmaXx,
@@ -37,15 +43,33 @@ impl Quantity {
         Self::PlasticStrain,
     ];
 
-    /// Champs d'un Field statique (touches 1 à 5) : ceux d'un Field élasto-plastique sans p.
+    /// Champs d'un Field 2D statique (touches 1 à 5) : ceux d'un Field élasto-plastique sans p.
     pub const MECHANICAL: &'static [Self] = Self::PLASTIC.split_at(5).0;
+
+    /// Champs d'un Field statique de tétraèdres (touches 1 à 8), puis p (touche 9) si plastique.
+    pub const SOLID_PLASTIC: [Self; 9] = [
+        Self::VonMises,
+        Self::SigmaXx,
+        Self::SigmaYy,
+        Self::SigmaZz,
+        Self::TauXy,
+        Self::TauYz,
+        Self::TauXz,
+        Self::Displacement,
+        Self::PlasticStrain,
+    ];
+
+    pub const SOLID: &'static [Self] = Self::SOLID_PLASTIC.split_at(8).0;
 
     pub fn label(self) -> &'static str {
         match self {
             Self::VonMises => "von Mises",
             Self::SigmaXx => "σxx",
             Self::SigmaYy => "σyy",
+            Self::SigmaZz => "σzz",
             Self::TauXy => "τxy",
+            Self::TauYz => "τyz",
+            Self::TauXz => "τxz",
             Self::Displacement => "|u|",
             Self::Temperature => "T",
             Self::PlasticStrain => "p (déformation plastique cumulée)",
@@ -54,20 +78,23 @@ impl Quantity {
 }
 
 pub struct Scene {
-    nodes: Vec<[f64; 2]>,
-    /// (ux, uy) par Node.
-    displacements: Vec<[f64; 2]>,
+    nodes: Vec<[f64; 3]>,
+    /// (ux, uy, uz) par Node.
+    displacements: Vec<[f64; 3]>,
     /// Vide pour un Field thermique.
     stresses: Vec<Stress>,
     /// Vide pour un Field statique.
     temperatures: Vec<f64>,
     /// Déformation plastique cumulée p aux Nodes, vide hors calcul élasto-plastique.
     plastic_strains: Vec<f64>,
-    /// Triangles à remplir (indices de Nodes, antihoraires) : 1 par Tri3, 4 par Tri6.
+    /// Triangles à remplir (indices de Nodes) : 1 par Tri3, 4 par Tri6 (antihoraires) ; pour des
+    /// tétraèdres, la peau, normales sortantes.
     pub triangles: Vec<[u32; 3]>,
-    /// Segments du contour des Elements, sans doublon : les arêtes internes des Tri6 découpés
-    /// n'y sont pas, on voit le vrai Mesh.
+    /// Segments du contour des Elements (ou de la peau), sans doublon : les arêtes internes des
+    /// Tri6 et des faces de Tet10 découpés n'y sont pas, on voit le vrai Mesh.
     pub edges: Vec<[u32; 2]>,
+    /// Cellules des tétraèdres (4 ou 10 Nodes), pour le plan de coupe ; vide en 2D.
+    pub solids: Vec<Vec<usize>>,
 }
 
 /// Résultat lissé aux Nodes, tel que le relit un `.vtu` : une valeur par Node, pas de points de
@@ -75,11 +102,13 @@ pub struct Scene {
 /// `temperatures` ; `plastic_strains` reste vide hors calcul élasto-plastique.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct NodalResults {
-    /// Positions (x, y).
-    pub nodes: Vec<[f64; 2]>,
-    /// Triangles : 3 Nodes (Tri3) ou 6 (Tri6, sommets puis milieux 0-1, 1-2, 2-0).
+    /// Positions (x, y, z) ; z = 0 pour un Mesh 2D.
+    pub nodes: Vec<[f64; 3]>,
+    /// Cellules : triangles de 3 Nodes (Tri3) ou 6 (Tri6, sommets puis milieux 0-1, 1-2, 2-0),
+    /// tétraèdres de 4 (Tet4) ou 10 (Tet10).
     pub cells: Vec<Vec<usize>>,
-    pub displacements: Vec<[f64; 2]>,
+    /// (ux, uy, uz) ; uz = 0 pour un Mesh 2D.
+    pub displacements: Vec<[f64; 3]>,
     pub stresses: Vec<Stress>,
     pub temperatures: Vec<f64>,
     pub plastic_strains: Vec<f64>,
@@ -106,22 +135,69 @@ fn add_cell(triangles: &mut Vec<[u32; 3]>, edges: &mut HashSet<[u32; 2]>, n: &[u
     true
 }
 
+/// Triangles, contour et cellules de tétraèdres de `cells` (3 ou 6 Nodes : triangles ; 4 ou 10 :
+/// tétraèdres). Erreur si une cellule est d'une autre taille ou si les deux sortes se mélangent.
+fn geometry(cells: &[Vec<usize>]) -> Result<Geometry, SceneError> {
+    let is_triangle = |c: &Vec<usize>| matches!(c.len(), 3 | 6);
+    let is_solid = |c: &Vec<usize>| matches!(c.len(), 4 | 10);
+    if let Some(c) = cells.iter().find(|c| !is_triangle(c) && !is_solid(c)) {
+        return Err(SceneError::UnsupportedCell(c.len()));
+    }
+    if cells.iter().any(is_triangle) && cells.iter().any(is_solid) {
+        return Err(SceneError::Mixed);
+    }
+    if cells.iter().any(is_solid) {
+        let skin = skin(cells).ok_or(SceneError::UnsupportedCell(0))?;
+        return Ok(Geometry {
+            triangles: skin.triangles,
+            edges: skin.edges,
+            solids: cells.to_vec(),
+        });
+    }
+    let mut triangles = Vec::new();
+    let mut edges = HashSet::new();
+    for cell in cells {
+        let ids: Vec<u32> = cell.iter().map(|&i| i as u32).collect();
+        add_cell(&mut triangles, &mut edges, &ids);
+    }
+    let mut edges: Vec<[u32; 2]> = edges.into_iter().collect();
+    edges.sort_unstable();
+    Ok(Geometry {
+        triangles,
+        edges,
+        solids: Vec::new(),
+    })
+}
+
+struct Geometry {
+    triangles: Vec<[u32; 3]>,
+    edges: Vec<[u32; 2]>,
+    solids: Vec<Vec<usize>>,
+}
+
 /// Raison pour laquelle un Mesh ne peut pas être affiché.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SceneError {
     /// Refus du cœur : Mesh de Bar ou de Beam, ou Field d'un autre Mesh.
     Core(MailleError),
-    /// Mesh de tétraèdres : le viewer n'affiche que des triangles pour l'instant.
-    Solid,
+    /// Cellule de ce nombre de Nodes : le viewer affiche des triangles (3 ou 6 Nodes) et des
+    /// tétraèdres (4 ou 10).
+    UnsupportedCell(usize),
+    /// Triangles et tétraèdres dans le même Mesh.
+    Mixed,
 }
 
 impl fmt::Display for SceneError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Core(e) => e.fmt(f),
-            Self::Solid => write!(
+            Self::UnsupportedCell(n) => write!(
                 f,
-                "le viewer n'affiche que des Mesh 2D (Tri3, Tri6) pour l'instant : lire les résultats des tétraèdres dans le Field"
+                "le viewer affiche des triangles (3 ou 6 Nodes) et des tétraèdres (4 ou 10), pas des cellules de {n} Nodes"
+            ),
+            Self::Mixed => write!(
+                f,
+                "le viewer n'affiche pas un Mesh qui mélange triangles et tétraèdres"
             ),
         }
     }
@@ -136,7 +212,8 @@ impl From<MailleError> for SceneError {
 }
 
 impl Scene {
-    /// Erreur si le Mesh n'est pas fait de triangles (Bar, Beam, tétraèdres) ou si le Field vient d'un autre Mesh.
+    /// Erreur si le Mesh n'est pas fait de triangles ou de tétraèdres (Bar, Beam, mélange) ou si le
+    /// Field vient d'un autre Mesh.
     pub fn new(mesh: &Mesh, field: &Field) -> Result<Self, SceneError> {
         let thermal = !field.temperatures.is_empty();
         if thermal && field.temperatures.len() != mesh.nodes.len() {
@@ -147,27 +224,37 @@ impl Scene {
         } else {
             nodal_stresses(mesh, field)?
         };
-        let mut triangles = Vec::new();
-        let mut edges = HashSet::new();
-        for e in &mesh.elements {
-            let n: Vec<u32> = e.nodes().iter().map(|&i| i as u32).collect();
-            match e {
+        let cells: Vec<Vec<usize>> = mesh
+            .elements
+            .iter()
+            .map(|e| match e {
                 // déjà refusé par `nodal_stresses`
-                Element::Bar(_) | Element::Beam(_) => return Err(MailleError::NoStresses.into()),
-                Element::Tet4(_) | Element::Tet10(_) => return Err(SceneError::Solid),
-                Element::Tri3(_) | Element::Tri6(_) => {}
-            }
-            add_cell(&mut triangles, &mut edges, &n);
-        }
-        let mut edges: Vec<[u32; 2]> = edges.into_iter().collect();
-        edges.sort_unstable();
+                Element::Bar(_) | Element::Beam(_) => Err(MailleError::NoStresses.into()),
+                _ => Ok(e.nodes().to_vec()),
+            })
+            .collect::<Result<_, SceneError>>()?;
+        let Geometry {
+            triangles,
+            edges,
+            solids,
+        } = geometry(&cells)?;
+        let n = mesh.nodes.len();
+        let displacements = if thermal {
+            vec![[0.0; 3]; n]
+        } else if solids.is_empty() {
+            field
+                .displacements
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|u| [u[0], u[1], 0.0])
+                .collect()
+        } else {
+            field.displacements.as_chunks::<3>().0.to_vec()
+        };
         Ok(Self {
-            nodes: mesh.nodes.iter().map(|p| [p.x, p.y]).collect(),
-            displacements: if thermal {
-                vec![[0.0; 2]; mesh.nodes.len()]
-            } else {
-                field.displacements.as_chunks::<2>().0.to_vec()
-            },
+            nodes: mesh.nodes.iter().map(|p| [p.x, p.y, p.z]).collect(),
+            displacements,
             stresses,
             temperatures: field.temperatures.clone(),
             plastic_strains: if field.equivalent_plastic_strains.is_empty() {
@@ -177,11 +264,12 @@ impl Scene {
             },
             triangles,
             edges,
+            solids,
         })
     }
 
-    /// Scène d'un résultat déjà lissé aux Nodes (relu d'un `.vtu`). Erreur si une cellule n'est pas
-    /// un triangle ou si un champ n'a pas une valeur par Node.
+    /// Scène d'un résultat déjà lissé aux Nodes (relu d'un `.vtu`). Erreur si une cellule n'est ni
+    /// un triangle ni un tétraèdre ou si un champ n'a pas une valeur par Node.
     pub fn from_nodal(r: &NodalResults) -> Result<Self, SceneError> {
         let n = r.nodes.len();
         let thermal = !r.temperatures.is_empty();
@@ -189,26 +277,19 @@ impl Scene {
         if (thermal && r.temperatures.len() != n)
             || (!thermal && (r.stresses.len() != n || r.displacements.len() != n))
             || !sized(r.plastic_strains.len(), n)
+            || r.cells.iter().flatten().any(|&i| i >= n)
         {
             return Err(MailleError::FieldMeshMismatch.into());
         }
-        let mut triangles = Vec::new();
-        let mut edges = HashSet::new();
-        for cell in &r.cells {
-            let ids: Vec<u32> = cell.iter().map(|&i| i as u32).collect();
-            if ids.iter().any(|&i| i as usize >= n) {
-                return Err(MailleError::FieldMeshMismatch.into());
-            }
-            if !add_cell(&mut triangles, &mut edges, &ids) {
-                return Err(SceneError::Solid);
-            }
-        }
-        let mut edges: Vec<[u32; 2]> = edges.into_iter().collect();
-        edges.sort_unstable();
+        let Geometry {
+            triangles,
+            edges,
+            solids,
+        } = geometry(&r.cells)?;
         Ok(Self {
             nodes: r.nodes.clone(),
             displacements: if thermal {
-                vec![[0.0; 2]; n]
+                vec![[0.0; 3]; n]
             } else {
                 r.displacements.clone()
             },
@@ -217,18 +298,28 @@ impl Scene {
             plastic_strains: r.plastic_strains.clone(),
             triangles,
             edges,
+            solids,
         })
+    }
+
+    /// Vrai pour un Mesh de tétraèdres.
+    pub fn is_solid(&self) -> bool {
+        !self.solids.is_empty()
     }
 
     /// Champs affichables : la température pour un Field thermique, sinon les champs mécaniques,
     /// plus p pour un Field élasto-plastique.
     pub fn quantities(&self) -> &'static [Quantity] {
-        if !self.temperatures.is_empty() {
-            &[Quantity::Temperature]
-        } else if !self.plastic_strains.is_empty() {
-            &Quantity::PLASTIC
-        } else {
-            Quantity::MECHANICAL
+        match (
+            !self.temperatures.is_empty(),
+            self.is_solid(),
+            !self.plastic_strains.is_empty(),
+        ) {
+            (true, ..) => &[Quantity::Temperature],
+            (_, false, true) => &Quantity::PLASTIC,
+            (_, false, false) => Quantity::MECHANICAL,
+            (_, true, true) => &Quantity::SOLID_PLASTIC,
+            (_, true, false) => Quantity::SOLID,
         }
     }
 
@@ -244,11 +335,14 @@ impl Scene {
             Quantity::VonMises => stress(Stress::von_mises),
             Quantity::SigmaXx => stress(|s| s.sigma_xx),
             Quantity::SigmaYy => stress(|s| s.sigma_yy),
+            Quantity::SigmaZz => stress(|s| s.sigma_zz),
             Quantity::TauXy => stress(|s| s.tau_xy),
+            Quantity::TauYz => stress(|s| s.tau_yz),
+            Quantity::TauXz => stress(|s| s.tau_xz),
             Quantity::Displacement => self
                 .displacements
                 .iter()
-                .map(|u| u[0].hypot(u[1]))
+                .map(|u| crate::vec3::norm(*u))
                 .collect(),
             Quantity::Temperature => self.temperatures.clone(),
             Quantity::PlasticStrain => self.plastic_strains.clone(),
@@ -256,13 +350,13 @@ impl Scene {
     }
 
     /// Coins (min, max) de la boîte englobante des positions x + scale·u (scale = 0 : non déformé).
-    pub fn bounds(&self, scale: f64) -> ([f64; 2], [f64; 2]) {
+    pub fn bounds(&self, scale: f64) -> ([f64; 3], [f64; 3]) {
         self.positions(scale).iter().fold(
-            ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]),
+            ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]),
             |(lo, hi), p| {
                 (
-                    [lo[0].min(p[0]), lo[1].min(p[1])],
-                    [hi[0].max(p[0]), hi[1].max(p[1])],
+                    std::array::from_fn(|k| lo[k].min(p[k])),
+                    std::array::from_fn(|k| hi[k].max(p[k])),
                 )
             },
         )
@@ -272,7 +366,7 @@ impl Scene {
     /// Nul si rien ne bouge.
     pub fn deformation_scale(&self) -> f64 {
         let (lo, hi) = self.bounds(0.0);
-        let size = (hi[0] - lo[0]).max(hi[1] - lo[1]);
+        let size = (0..3).map(|k| hi[k] - lo[k]).fold(0.0, f64::max);
         let max_u = self
             .values(Quantity::Displacement)
             .into_iter()
@@ -285,11 +379,11 @@ impl Scene {
     }
 
     /// Positions x + scale·u des Nodes (scale = 0 : Mesh non déformé).
-    pub fn positions(&self, scale: f64) -> Vec<[f64; 2]> {
+    pub fn positions(&self, scale: f64) -> Vec<[f64; 3]> {
         self.nodes
             .iter()
             .zip(&self.displacements)
-            .map(|(p, u)| [p[0] + scale * u[0], p[1] + scale * u[1]])
+            .map(|(p, u)| std::array::from_fn(|k| p[k] + scale * u[k]))
             .collect()
     }
 }
@@ -368,7 +462,7 @@ mod tests {
         Mesh::new(nodes, vec![Element::Tri6(tri6)]).unwrap()
     }
 
-    fn signed_area(p: &[[f64; 2]], t: [u32; 3]) -> f64 {
+    fn signed_area(p: &[[f64; 3]], t: [u32; 3]) -> f64 {
         let [a, b, c] = t.map(|i| p[i as usize]);
         ((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])) / 2.0
     }
@@ -460,7 +554,9 @@ mod tests {
         assert!((moved - 0.1).abs() < 1e-12, "{moved}");
         let (lo, hi) = scene.bounds(0.0);
         assert!(lo.iter().all(|c| c.abs() < 1e-12));
-        assert!(hi.iter().all(|c| (c - 1.0).abs() < 1e-12));
+        assert!(hi[..2].iter().all(|c| (c - 1.0).abs() < 1e-12));
+        // un Mesh 2D est dans le plan z = 0
+        assert_eq!((lo[2], hi[2]), (0.0, 0.0));
         // la boîte de la déformée englobe le Node 2 déplacé de 0,1 (u ∝ (2, −1))
         let (lo, hi) = scene.bounds(scale);
         let moved = [1.0 + 0.2 / 5_f64.sqrt(), 1.0 - 0.1 / 5_f64.sqrt()];
@@ -533,7 +629,7 @@ mod tests {
     }
 
     #[test]
-    fn tetrahedra_cannot_be_shown() {
+    fn a_tetrahedron_shows_its_four_faces_and_six_edges() {
         let nodes = vec![
             Node::new(0.0, 0.0, 0.0),
             Node::new(1.0, 0.0, 0.0),
@@ -542,8 +638,34 @@ mod tests {
         ];
         let tet = Tet4::new([0, 1, 2, 3], material());
         let mesh = Mesh::new(nodes, vec![Element::Tet4(tet)]).unwrap();
-        let field = field(&mesh, [0.0; 3], vec![0.0; 12]);
-        assert_eq!(Scene::new(&mesh, &field).err(), Some(SceneError::Solid));
+        // contrainte uniforme σzz = 7 et déplacement (0, 0, 2) partout
+        let mut f = field(&mesh, [0.0; 3], vec![0.0; 12]);
+        f.stresses[0][0].sigma_zz = 7.0;
+        for u in f.displacements.chunks_mut(3) {
+            u[2] = 2.0;
+        }
+        let scene = Scene::new(&mesh, &f).unwrap();
+        assert!(scene.is_solid());
+        assert_eq!(scene.triangles.len(), 4);
+        assert_eq!(scene.edges.len(), 6);
+        assert_eq!(scene.quantities(), Quantity::SOLID);
+        assert!(scene
+            .values(Quantity::SigmaZz)
+            .iter()
+            .all(|v| (v - 7.0).abs() < 1e-9));
+        assert!(scene
+            .values(Quantity::Displacement)
+            .iter()
+            .all(|v| (v - 2.0).abs() < 1e-12));
+        let (lo, hi) = scene.bounds(0.0);
+        assert_eq!((lo, hi), ([0.0; 3], [1.0; 3]));
+    }
+
+    #[test]
+    fn triangles_and_tetrahedra_do_not_mix() {
+        let mut mixed = nodal_triangle();
+        mixed.cells = vec![vec![0, 1, 2], vec![0, 1, 2, 3]];
+        assert_eq!(Scene::from_nodal(&mixed).err(), Some(SceneError::Mixed));
     }
 
     /// Un Tri6 à champ de contrainte uniforme, comme `Scene::new` le voit et comme un `.vtu` le donne.
@@ -561,15 +683,15 @@ mod tests {
         };
         NodalResults {
             nodes: vec![
-                [0.0, 0.0],
-                [2.0, 0.0],
-                [0.0, 2.0],
-                [1.0, 0.0],
-                [1.0, 1.0],
-                [0.0, 1.0],
+                [0.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+                [0.0, 2.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
             ],
             cells: vec![vec![0, 1, 2, 3, 4, 5]],
-            displacements: vec![[0.5, 0.0]; 6],
+            displacements: vec![[0.5, 0.0, 0.0]; 6],
             stresses: vec![stress; 6],
             ..NodalResults::default()
         }
@@ -603,10 +725,13 @@ mod tests {
     }
 
     #[test]
-    fn nodal_results_refuse_solids_and_wrong_sizes() {
-        let mut solid = nodal_triangle();
-        solid.cells = vec![vec![0, 1, 2, 3]];
-        assert_eq!(Scene::from_nodal(&solid).err(), Some(SceneError::Solid));
+    fn nodal_results_refuse_unknown_cells_and_wrong_sizes() {
+        let mut odd = nodal_triangle();
+        odd.cells = vec![vec![0, 1, 2, 3, 4]];
+        assert_eq!(
+            Scene::from_nodal(&odd).err(),
+            Some(SceneError::UnsupportedCell(5))
+        );
 
         let mut short = nodal_triangle();
         short.stresses.pop();

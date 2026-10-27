@@ -45,6 +45,8 @@ const USAGE: &str = "maille : calcul par éléments finis, mécanique et thermiq
 Usage :
   maille solve <modele.toml> [-o <préfixe>]   résout un modèle, écrit <préfixe>.pvd et les .vtu
   maille view <resultats.pvd|.vtu> [indice]   affiche un incrément (le dernier par défaut)
+  maille view <résultats> --png <image.png>   écrit une image au lieu d'ouvrir une fenêtre
+                                              (--size LxH, --angles lacet,tangage, --field k, --deformed, --cut x=0.5)
   maille mesh <dessin.dxf> --size <h> [--quadratic] [-o <maillage.msh>]
                                               maille un dessin DXF 2D (calque = nom de bord)
   maille mesh <piece.stl> [--feature-angle <degrés>] [--quadratic] [-o <maillage.msh>]

@@ -233,6 +233,85 @@ fn stl_surface_meshed_by_the_cli_follows_the_analytic_field() {
     }
 }
 
+/// `maille view --png` écrit une image PNG d'un résultat 3D, avec coupe et déformée. Sans carte
+/// graphique (machine d'intégration continue), le test est sauté.
+#[test]
+fn view_writes_a_png_of_a_3d_result() {
+    let w = Workdir::new("png");
+    let out = w.maille(&["mesh", "cube.stl", "-o", "piece.msh"]);
+    assert!(out.status.success());
+    let model = fs::read_to_string(w.0.join("cube.toml")).unwrap();
+    fs::write(
+        w.0.join("piece.toml"),
+        model.replace("cube.msh", "piece.msh"),
+    )
+    .unwrap();
+    w.solve("piece.toml");
+    let out = w.maille(&[
+        "view",
+        "piece.pvd",
+        "--png",
+        "vue.png",
+        "--size",
+        "300x200",
+        "--angles",
+        "30,20",
+        "--field",
+        "8",
+        "--deformed",
+        "--cut",
+        "x=0.5",
+    ]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if stderr.contains("aucune carte graphique") {
+        eprintln!("test sauté : {stderr}");
+        return;
+    }
+    assert!(out.status.success(), "{stderr}");
+    let png = fs::read(w.0.join("vue.png")).unwrap();
+    assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+    // IHDR : largeur et hauteur demandées
+    assert_eq!(u32::from_be_bytes(png[16..20].try_into().unwrap()), 300);
+    assert_eq!(u32::from_be_bytes(png[20..24].try_into().unwrap()), 200);
+}
+
+#[test]
+fn view_command_reports_errors() {
+    let w = Workdir::new("view-erreurs");
+    let fail = |args: &[&str], expected: &str| {
+        let out = w.maille(args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{args:?}");
+        assert!(stderr.contains(expected), "{args:?} : {stderr}");
+    };
+    fail(&["view"], "usage");
+    // les options sont lues avant d'ouvrir le fichier
+    fail(
+        &["view", "a.pvd", "--png", "x.png", "--size", "grand"],
+        "largeurxhauteur",
+    );
+    fail(
+        &["view", "a.pvd", "--png", "x.png", "--size", "0x10"],
+        "1 à 8192",
+    );
+    fail(
+        &["view", "a.pvd", "--png", "x.png", "--angles", "30"],
+        "lacet,tangage",
+    );
+    fail(
+        &["view", "a.pvd", "--png", "x.png", "--field", "0"],
+        "numéro de la touche",
+    );
+    fail(
+        &["view", "a.pvd", "--png", "x.png", "--cut", "w=0.5"],
+        "axe « w » inconnu",
+    );
+    fail(
+        &["view", "a.pvd", "--png", "x.png", "--cut", "x"],
+        "axe=position",
+    );
+}
+
 #[test]
 fn stl_mesh_command_reports_errors() {
     let w = Workdir::new("stl-erreurs");
@@ -441,9 +520,8 @@ fn commands_report_errors_and_usage() {
     fail(&["view"], "usage");
     fail(&["view", "cube.toml"], ".pvd ou .vtu");
     fail(&["inconnu"], "commande inconnue");
-    // un résultat 3D ne s'affiche pas dans le viewer 2D
+    // le cube n'a qu'un incrément
     w.solve("cube.toml");
-    fail(&["view", "cube.pvd"], "ParaView");
     fail(&["view", "cube.pvd", "5"], "incrément 5");
     // une clé mal écrite dans le modèle
     let text = fs::read_to_string(w.0.join("cube.toml")).unwrap();

@@ -2,11 +2,12 @@
 // couleur dans la LUT. Interpoler la valeur (et non la couleur) fait suivre aux bandes les isovaleurs.
 
 struct Uniforms {
-    // clip = scale * position + offset
-    scale: vec2<f32>,
-    offset: vec2<f32>,
+    // clip = view_proj * position (caméra orthographique, profondeur dans [0, 1])
+    view_proj: mat4x4<f32>,
     // (min, max) du champ affiché
     range: vec2<f32>,
+    // direction de l'œil : de la cible vers l'observateur (xyz)
+    eye: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -16,13 +17,25 @@ struct Uniforms {
 struct VertexOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) value: f32,
+    @location(1) world: vec3<f32>,
 }
 
 @vertex
-fn vs_main(@location(0) position: vec2<f32>, @location(1) value: f32) -> VertexOut {
+fn vs_main(@location(0) position: vec3<f32>, @location(1) value: f32) -> VertexOut {
     var out: VertexOut;
-    out.clip = vec4<f32>(position * u.scale + u.offset, 0.0, 1.0);
+    out.clip = u.view_proj * vec4<f32>(position, 1.0);
     out.value = value;
+    out.world = position;
+    return out;
+}
+
+// Segments du contour : position seule.
+@vertex
+fn vs_line(@location(0) position: vec3<f32>) -> VertexOut {
+    var out: VertexOut;
+    out.clip = u.view_proj * vec4<f32>(position, 1.0);
+    out.value = 0.0;
+    out.world = position;
     return out;
 }
 
@@ -32,15 +45,34 @@ fn vs_screen(@location(0) position: vec2<f32>, @location(1) value: f32) -> Verte
     var out: VertexOut;
     out.clip = vec4<f32>(position, 0.0, 1.0);
     out.value = value;
+    out.world = vec3<f32>(0.0);
     return out;
+}
+
+fn field_color(value: f32) -> vec4<f32> {
+    // champ constant : intervalle nul, on évite la division par zéro
+    let span = max(u.range.y - u.range.x, 1e-30);
+    let t = clamp((value - u.range.x) / span, 0.0, 1.0);
+    return textureSample(lut, lut_sampler, t);
 }
 
 @fragment
 fn fs_fill(in: VertexOut) -> @location(0) vec4<f32> {
-    // champ constant : intervalle nul, on évite la division par zéro
-    let span = max(u.range.y - u.range.x, 1e-30);
-    let t = clamp((in.value - u.range.x) / span, 0.0, 1.0);
-    return textureSample(lut, lut_sampler, t);
+    return field_color(in.value);
+}
+
+// Mesh : même couleur, assombrie quand la face est vue de biais. La normale vient des dérivées de
+// la position, sans buffer de normales. Une face vue de face (tout le 2D) garde sa couleur exacte.
+@fragment
+fn fs_shaded(in: VertexOut) -> @location(0) vec4<f32> {
+    let color = field_color(in.value);
+    let n = cross(dpdx(in.world), dpdy(in.world));
+    let len = length(n);
+    var shade = 1.0;
+    if (len > 0.0) {
+        shade = 0.55 + 0.45 * abs(dot(n / len, u.eye.xyz));
+    }
+    return vec4<f32>(color.rgb * shade, color.a);
 }
 
 @fragment
