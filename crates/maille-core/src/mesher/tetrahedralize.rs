@@ -174,7 +174,7 @@ pub fn tetrahedralize(surface: &Surface) -> Result<Tetrahedralization<4>, Maille
 }
 
 /// Contrôle minimal de la surface ; renvoie le patch de chaque triangle.
-fn check(surface: &Surface) -> Result<Vec<usize>, MailleError> {
+pub(super) fn check(surface: &Surface) -> Result<Vec<usize>, MailleError> {
     let invalid = |problem: &str| MailleError::InvalidSurface {
         problem: problem.to_string(),
     };
