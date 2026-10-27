@@ -14,7 +14,7 @@ use super::surface::Surface;
 use super::{BoundarySet, MAX_NODES};
 use crate::error::MailleError;
 use crate::mesh::Node;
-use crate::shape::TET_FACES;
+use crate::shape::{TET10_EDGES, TET_FACES};
 
 /// Passes de récupération au plus, et points ajoutés au plus par sommet de la surface : au-delà,
 /// la récupération diverge (triangles très effilés, angles très aigus).
@@ -47,6 +47,55 @@ impl<const N: usize> Tetrahedralization<N> {
                 name: name.to_string(),
                 known: self.boundaries.keys().cloned().collect(),
             })
+    }
+}
+
+impl Tetrahedralization<4> {
+    /// Maillage quadratique (Tet10) : un Node au milieu de chaque arête, partagé entre voisins,
+    /// dans l'ordre de `Tet10::nodes` (arêtes 0-1, 1-2, 2-0, 0-3, 1-3, 2-3). Les milieux sont au
+    /// milieu de la corde : le Tet10 n'accepte que des côtés droits. Les faces de bord gardent
+    /// leurs numéros ; leurs Nodes milieux rejoignent les Nodes du bord.
+    pub fn to_quadratic(self) -> Tetrahedralization<10> {
+        let mut nodes = self.nodes;
+        let mut mids: HashMap<(usize, usize), usize> = HashMap::new();
+        let mut tetrahedra = Vec::with_capacity(self.tetrahedra.len());
+        for t in &self.tetrahedra {
+            let mut cell = [0; 10];
+            cell[..4].copy_from_slice(t);
+            for (k, &(a, b)) in TET10_EDGES.iter().enumerate() {
+                let (a, b) = (t[a], t[b]);
+                cell[4 + k] = *mids.entry(edge(a, b)).or_insert_with(|| {
+                    let (p, q) = (nodes[a], nodes[b]);
+                    nodes.push(Node::new(
+                        (p.x + q.x) / 2.0,
+                        (p.y + q.y) / 2.0,
+                        (p.z + q.z) / 2.0,
+                    ));
+                    nodes.len() - 1
+                });
+            }
+            tetrahedra.push(cell);
+        }
+        let mut boundaries = self.boundaries;
+        for set in boundaries.values_mut() {
+            for &(e, f) in &set.faces {
+                let [a, b, c] = TET_FACES[f];
+                for (x, y) in [(a, b), (b, c), (c, a)] {
+                    let k = TET10_EDGES
+                        .iter()
+                        .position(|&e| e == (x, y) || e == (y, x))
+                        .unwrap_or(0);
+                    set.nodes.push(tetrahedra[e][4 + k]);
+                }
+            }
+            set.nodes.sort_unstable();
+            set.nodes.dedup();
+        }
+        Tetrahedralization {
+            nodes,
+            tetrahedra,
+            boundaries,
+        }
     }
 }
 

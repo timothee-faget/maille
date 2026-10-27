@@ -105,7 +105,7 @@ impl Workdir {
             let path = entry.unwrap().path();
             if matches!(
                 path.extension().and_then(|e| e.to_str()),
-                Some("toml" | "msh" | "dxf")
+                Some("toml" | "msh" | "dxf" | "stl")
             ) {
                 fs::copy(&path, dir.join(path.file_name().unwrap())).unwrap();
             }
@@ -196,6 +196,75 @@ fn dxf_drawing_meshed_by_the_cli_follows_the_analytic_field() {
         assert!((u[3 * i] - 0.001 * p.x).abs() < 1e-9);
         assert!((s[6 * i] - 210.0).abs() < 1e-6, "σx = {}", s[6 * i]);
     }
+}
+
+/// `cube.stl` (6 solids nommés comme les Sets de `cube.toml`) meshé par la CLI : l'élasticité linéaire
+/// retrouve exactement le champ affine, en Tet4 comme en Tet10.
+#[test]
+fn stl_surface_meshed_by_the_cli_follows_the_analytic_field() {
+    let w = Workdir::new("stl");
+    for (quadratic, kind) in [(false, CellKind::Tet4), (true, CellKind::Tet10)] {
+        let mut args = vec!["mesh", "cube.stl", "-o", "piece.msh"];
+        if quadratic {
+            args.push("--quadratic");
+        }
+        let out = w.maille(&args);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(String::from_utf8_lossy(&out.stdout).contains("bords x0, x1, y0, y1, z0, z1"));
+        let model = fs::read_to_string(w.0.join("cube.toml")).unwrap();
+        fs::write(
+            w.0.join("piece.toml"),
+            model.replace("cube.msh", "piece.msh"),
+        )
+        .unwrap();
+        w.solve("piece.toml");
+        let (_, r) = w.results("piece.pvd", None);
+        assert_eq!(r.kind, kind);
+        let u = array(&r, "displacement");
+        for (i, p) in r.nodes.iter().enumerate() {
+            assert!((u[3 * i] - 0.01 * p.x).abs() < 1e-10, "ux en {p:?}");
+            assert!((u[3 * i + 1] + 0.25 * 0.01 * p.y).abs() < 1e-10);
+            assert!((u[3 * i + 2] + 0.25 * 0.01 * p.z).abs() < 1e-10);
+        }
+    }
+}
+
+#[test]
+fn stl_mesh_command_reports_errors() {
+    let w = Workdir::new("stl-erreurs");
+    let fail = |args: &[&str], expected: &str| {
+        let out = w.maille(args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{args:?}");
+        assert!(stderr.contains(expected), "{args:?} : {stderr}");
+    };
+    fail(
+        &["mesh", "cube.stl", "--size", "1"],
+        "pas encore pour un STL",
+    );
+    fail(
+        &["mesh", "plaque.dxf", "--size", "1", "--feature-angle", "20"],
+        "ne sert qu'aux fichiers STL",
+    );
+    fail(
+        &["mesh", "cube.stl", "--feature-angle", "beaucoup"],
+        "attend un nombre",
+    );
+    fail(&["mesh", "cube.stl", "--feature-angle", "0"], "angle vif");
+    fail(
+        &["mesh", "cube.toml"],
+        "extension « .toml » non prise en charge",
+    );
+    fail(&["mesh", "absent.stl"], "absent.stl");
+    // une face manque : surface ouverte
+    let text = fs::read_to_string(w.0.join("cube.stl")).unwrap();
+    let open = text.replacen("facet normal", "facette normal", 1);
+    fs::write(w.0.join("casse.stl"), open).unwrap();
+    fail(&["mesh", "casse.stl"], "STL");
 }
 
 #[test]

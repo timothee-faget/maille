@@ -20,6 +20,10 @@ pub(crate) fn read(path: &Path) -> Result<String, Failure> {
         .map_err(|e| format!("impossible de lire {} : {e}", path.display()).into())
 }
 
+pub(crate) fn read_bytes(path: &Path) -> Result<Vec<u8>, Failure> {
+    fs::read(path).map_err(|e| format!("impossible de lire {} : {e}", path.display()).into())
+}
+
 pub(crate) fn write(path: &Path, text: &str) -> Result<(), Failure> {
     fs::write(path, text)
         .map_err(|e| format!("impossible d'écrire {} : {e}", path.display()).into())

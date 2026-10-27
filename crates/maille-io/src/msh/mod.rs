@@ -12,7 +12,7 @@ mod writer;
 use std::collections::BTreeMap;
 
 use maille_core::mesh::Node;
-use maille_core::mesher::Triangulation;
+use maille_core::mesher::{BoundarySet, Tetrahedralization, Triangulation};
 
 use crate::IoError;
 
@@ -109,32 +109,6 @@ impl MshFile {
     /// Fichier d'une `Triangulation` : un Set par bord nommé, plus `DOMAIN_SET` pour tous les
     /// triangles. `DuplicateSetName` si un bord s'appelle déjà `domaine`.
     pub fn from_triangulation<const N: usize>(t: &Triangulation<N>) -> Result<Self, IoError> {
-        let mut sets = BTreeMap::new();
-        for name in t.boundary_names() {
-            if name == DOMAIN_SET {
-                return Err(IoError::DuplicateSetName {
-                    name: name.to_string(),
-                });
-            }
-            // le nom vient de boundary_names : `boundary` ne peut pas échouer
-            if let Ok(b) = t.boundary(name) {
-                sets.insert(
-                    name.to_string(),
-                    Set {
-                        nodes: b.nodes.clone(),
-                        faces: b.faces.clone(),
-                        elements: Vec::new(),
-                    },
-                );
-            }
-        }
-        sets.insert(
-            DOMAIN_SET.to_string(),
-            Set {
-                elements: (0..t.triangles.len()).collect(),
-                ..Set::default()
-            },
-        );
         Ok(Self {
             nodes: t.nodes.clone(),
             kind: if N == 3 {
@@ -143,7 +117,68 @@ impl MshFile {
                 CellKind::Tri6
             },
             cells: t.triangles.iter().map(|c| c.to_vec()).collect(),
-            sets,
+            sets: mesher_sets(
+                t.boundary_names(),
+                |n| t.boundary(n).ok(),
+                t.triangles.len(),
+            )?,
         })
     }
+
+    /// Fichier d'une `Tetrahedralization` : un Set par bord nommé (un patch de la surface), plus
+    /// `DOMAIN_SET` pour tous les tétraèdres. `DuplicateSetName` si un bord s'appelle déjà
+    /// `domaine`.
+    pub fn from_tetrahedralization<const N: usize>(
+        t: &Tetrahedralization<N>,
+    ) -> Result<Self, IoError> {
+        Ok(Self {
+            nodes: t.nodes.clone(),
+            kind: if N == 4 {
+                CellKind::Tet4
+            } else {
+                CellKind::Tet10
+            },
+            cells: t.tetrahedra.iter().map(|c| c.to_vec()).collect(),
+            sets: mesher_sets(
+                t.boundary_names(),
+                |n| t.boundary(n).ok(),
+                t.tetrahedra.len(),
+            )?,
+        })
+    }
+}
+
+/// Sets d'un mailleur : un par bord nommé, plus `DOMAIN_SET` pour les `count` Elements.
+fn mesher_sets<'a>(
+    names: impl Iterator<Item = &'a str>,
+    boundary: impl Fn(&str) -> Option<&'a BoundarySet>,
+    count: usize,
+) -> Result<BTreeMap<String, Set>, IoError> {
+    let mut sets = BTreeMap::new();
+    for name in names {
+        if name == DOMAIN_SET {
+            return Err(IoError::DuplicateSetName {
+                name: name.to_string(),
+            });
+        }
+        // le nom vient de boundary_names : `boundary` ne peut pas échouer
+        if let Some(b) = boundary(name) {
+            sets.insert(
+                name.to_string(),
+                Set {
+                    nodes: b.nodes.clone(),
+                    faces: b.faces.clone(),
+                    elements: Vec::new(),
+                },
+            );
+        }
+    }
+    sets.insert(
+        DOMAIN_SET.to_string(),
+        Set {
+            elements: (0..count).collect(),
+            ..Set::default()
+        },
+    );
+    Ok(sets)
 }

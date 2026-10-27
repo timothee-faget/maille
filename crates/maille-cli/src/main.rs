@@ -2,7 +2,8 @@
 //! - `maille solve modele.toml` résout un modèle (fichiers `.msh` et `.toml`) et écrit les
 //!   résultats (`.vtu` et `.pvd`), voir `files.rs` ;
 //! - `maille view resultats.pvd` affiche des résultats, voir `files.rs` ;
-//! - `maille mesh dessin.dxf --size h` maille un dessin DXF 2D, voir `mesh.rs` ;
+//! - `maille mesh dessin.dxf --size h` maille un dessin DXF 2D, `maille mesh piece.stl` une surface
+//!   STL 3D, voir `mesh.rs` ;
 //! - les cas d'exemple ci-dessous, comparés à la solution analytique.
 //!
 //! Cas d'exemple :
@@ -46,6 +47,8 @@ Usage :
   maille view <resultats.pvd|.vtu> [indice]   affiche un incrément (le dernier par défaut)
   maille mesh <dessin.dxf> --size <h> [--quadratic] [-o <maillage.msh>]
                                               maille un dessin DXF 2D (calque = nom de bord)
+  maille mesh <piece.stl> [--feature-angle <degrés>] [--quadratic] [-o <maillage.msh>]
+                                              maille une surface STL 3D (solid = nom de bord)
 
 Cas d'exemple, comparés à la solution analytique :
   maille console | kirsch | cylindre | trempe | cylindre-thermo | cylindre-plastique
