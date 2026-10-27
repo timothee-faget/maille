@@ -11,6 +11,8 @@
 
 mod delaunay;
 mod delaunay3;
+#[cfg_attr(not(test), allow(dead_code))] // servira au remaillage de la surface (M10b)
+mod facet;
 mod geometry;
 mod predicates;
 mod refine;
