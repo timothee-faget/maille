@@ -11,12 +11,15 @@
 
 mod delaunay;
 mod delaunay3;
-#[cfg_attr(not(test), allow(dead_code))] // servira au remaillage de la surface (M10b)
 mod facet;
 mod geometry;
 mod predicates;
 mod refine;
+#[cfg_attr(not(test), allow(dead_code))] // servira au mailleur 3D à taille h (M10b, PR 3)
+mod remesh;
 mod surface;
+#[cfg(test)]
+mod testsurface;
 mod tetrahedralize;
 
 use std::collections::{BTreeMap, HashMap};

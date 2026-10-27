@@ -316,6 +316,40 @@ impl Geometry {
     }
 }
 
+impl Boundary {
+    /// Contours polygonaux déjà découpés et orientés (domaine à gauche), pour le remaillage d'une
+    /// facette en 3D : chaque côté devient une Piece droite, sans redécoupage ni contrôle des angles.
+    /// Chaque sommet porte la taille h du côté qui en part.
+    pub(crate) fn polygons(loops: &[Vec<([f64; 2], f64)>], name: &str) -> Self {
+        let mut b = Self::default();
+        for (l, ring) in loops.iter().enumerate() {
+            let first = b.points.len();
+            for (index, &(start, size)) in ring.iter().enumerate() {
+                let k = (index + 1) % ring.len();
+                b.points.push(start);
+                b.segments.push(Segment {
+                    a: first + index,
+                    b: first + k,
+                    piece: b.pieces.len(),
+                    t: [0.0, 1.0],
+                });
+                b.pieces.push(Piece {
+                    id: CurveId {
+                        hole: l.checked_sub(1),
+                        index,
+                        name: name.to_string(),
+                    },
+                    start,
+                    end: ring[k].0,
+                    size,
+                    path: Path::Line,
+                });
+            }
+        }
+        b
+    }
+}
+
 /// Pieces d'un contour, chaque Curve finissant au début de la suivante.
 fn loop_pieces(hole: Option<usize>, curves: &[Curve]) -> Result<Vec<Piece>, MailleError> {
     if curves.is_empty() {

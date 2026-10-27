@@ -235,82 +235,7 @@ fn edge(a: usize, b: usize) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mesher::Patch;
-
-    type Triangle = [[f64; 3]; 3];
-
-    /// Face plane o + s u + t v (s, t dans [0, 1]) en grille mu × mv de carrés coupés en deux,
-    /// normale u × v ; `hole` retire une case.
-    fn grid(
-        o: [f64; 3],
-        u: [f64; 3],
-        v: [f64; 3],
-        [mu, mv]: [usize; 2],
-        hole: Option<[usize; 2]>,
-    ) -> Vec<Triangle> {
-        let p = |i: usize, j: usize| {
-            std::array::from_fn(|k| {
-                o[k] + u[k] * i as f64 / mu as f64 + v[k] * j as f64 / mv as f64
-            })
-        };
-        let mut out = Vec::new();
-        for i in 0..mu {
-            for j in 0..mv {
-                if hole != Some([i, j]) {
-                    out.push([p(i, j), p(i + 1, j), p(i + 1, j + 1)]);
-                    out.push([p(i, j), p(i + 1, j + 1), p(i, j + 1)]);
-                }
-            }
-        }
-        out
-    }
-
-    /// Surface d'une soupe de triangles, sommets soudés à l'identique ; un Patch par groupe.
-    fn surface(groups: &[Vec<Triangle>]) -> Surface {
-        let mut index: HashMap<[u64; 3], usize> = HashMap::new();
-        let mut s = Surface {
-            vertices: Vec::new(),
-            triangles: Vec::new(),
-            patches: Vec::new(),
-        };
-        for (g, tris) in groups.iter().enumerate() {
-            let mut patch = Patch {
-                name: format!("p{g}"),
-                triangles: Vec::new(),
-            };
-            for tri in tris {
-                let t = tri.map(|p| {
-                    *index
-                        .entry(p.map(|x| (x + 0.0).to_bits()))
-                        .or_insert_with(|| {
-                            s.vertices.push(p);
-                            s.vertices.len() - 1
-                        })
-                });
-                patch.triangles.push(s.triangles.len());
-                s.triangles.push(t);
-            }
-            s.patches.push(patch);
-        }
-        s
-    }
-
-    const X: [f64; 3] = [1.0, 0.0, 0.0];
-    const Y: [f64; 3] = [0.0, 1.0, 0.0];
-    const Z: [f64; 3] = [0.0, 0.0, 1.0];
-    const O: [f64; 3] = [0.0, 0.0, 0.0];
-
-    /// Cube unité, chaque face en grille m × m, dans l'ordre -x, +x, -y, +y, -z, +z.
-    fn cube(m: usize) -> Vec<Vec<Triangle>> {
-        vec![
-            grid(O, Z, Y, [m, m], None),
-            grid(X, Y, Z, [m, m], None),
-            grid(O, X, Z, [m, m], None),
-            grid(Y, Z, X, [m, m], None),
-            grid(O, Y, X, [m, m], None),
-            grid(Z, X, Y, [m, m], None),
-        ]
-    }
+    use crate::mesher::testsurface::*;
 
     /// Aire signée d'un contour dans le plan de la facette (positive : antihoraire vu de dehors).
     fn loop_area(s: &Surface, fs: &Facets, f: usize, lp: &[(usize, bool)]) -> f64 {
@@ -420,18 +345,7 @@ mod tests {
     #[test]
     fn cylindre_facette() {
         let n = 16;
-        let at = |i: usize, z: f64| {
-            let a = 2.0 * std::f64::consts::PI * i as f64 / n as f64;
-            [a.cos(), a.sin(), z]
-        };
-        let mut tris = Vec::new();
-        for i in 0..n {
-            let j = (i + 1) % n;
-            tris.push([at(i, 0.0), at(j, 0.0), at(j, 1.0)]);
-            tris.push([at(i, 0.0), at(j, 1.0), at(i, 1.0)]);
-            tris.push([[0.0, 0.0, 0.0], at(j, 0.0), at(i, 0.0)]);
-            tris.push([[0.0, 0.0, 1.0], at(i, 1.0), at(j, 1.0)]);
-        }
+        let tris = cylinder(n);
         let s = surface(&[tris]);
         let fs = facets(&s).unwrap();
         check_facets(&s, &fs);
@@ -445,30 +359,7 @@ mod tests {
 
     #[test]
     fn prisme_en_l() {
-        // L de 2 × 2 moins le carré [1, 2] × [1, 2], épaisseur 1
-        let l = |z: f64| {
-            [
-                [0., 0., z],
-                [2., 0., z],
-                [2., 1., z],
-                [1., 1., z],
-                [1., 2., z],
-                [0., 2., z],
-            ]
-        };
-        let (b, t) = (l(0.0), l(1.0));
-        let mut tris = Vec::new();
-        // dessus et dessous en éventail depuis le coin rentrant (indice 3)
-        for k in [4, 5, 0, 1] {
-            tris.push([t[3], t[k], t[(k + 1) % 6]]);
-            tris.push([b[3], b[(k + 1) % 6], b[k]]);
-        }
-        for k in 0..6 {
-            let j = (k + 1) % 6;
-            tris.push([b[k], b[j], t[j]]);
-            tris.push([b[k], t[j], t[k]]);
-        }
-        let s = surface(&[tris]);
+        let s = surface(&[prism(&L_SHAPE)]);
         let fs = facets(&s).unwrap();
         check_facets(&s, &fs);
         assert_eq!(fs.facets.len(), 8);
@@ -477,21 +368,7 @@ mod tests {
 
     #[test]
     fn plaque_trouee_contour_et_trou() {
-        // plaque 3 × 3 × 1 percée du carré [1, 2] × [1, 2]
-        let s3 = |a: [f64; 3]| a.map(|x| 3.0 * x);
-        let groups = vec![
-            grid(O, Z, s3(Y), [1, 3], None),
-            grid(s3(X), s3(Y), Z, [3, 1], None),
-            grid(O, s3(X), Z, [3, 1], None),
-            grid(s3(Y), Z, s3(X), [1, 3], None),
-            grid(O, s3(Y), s3(X), [3, 3], Some([1, 1])),
-            grid(Z, s3(X), s3(Y), [3, 3], Some([1, 1])),
-            grid([1., 1., 0.], Y, Z, [1, 1], None),
-            grid([2., 1., 0.], Z, Y, [1, 1], None),
-            grid([1., 1., 0.], Z, X, [1, 1], None),
-            grid([1., 2., 0.], X, Z, [1, 1], None),
-        ];
-        let s = surface(&groups);
+        let s = surface(&holed_plate());
         let fs = facets(&s).unwrap();
         check_facets(&s, &fs);
         assert_eq!(fs.facets.len(), 10);

@@ -4,7 +4,7 @@
 //! son milieu à la place. Un morceau de bord dont le cercle diamétral contient le sommet opposé de
 //! son triangle est coupé lui aussi.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use super::delaunay::Delaunay;
 use super::geometry::{Boundary, Piece, Segment};
@@ -19,6 +19,14 @@ pub(crate) struct Mesher<'a> {
     pieces: &'a [Piece],
     /// Morceau de bord porté par chaque arête contrainte (indices de points, le plus petit d'abord).
     by_edge: HashMap<(usize, usize), usize>,
+    /// Points du bord où le domaine fait un angle aigu (facettes du mailleur 3D ; vide en 2D, où
+    /// `MIN_CORNER` les refuse) : un triangle qui en a un n'est raffiné que pour sa taille, pas
+    /// pour ses angles, sinon Ruppert ne terminerait pas.
+    pub acute: HashSet<usize>,
+    /// Coins aigus de chaque Piece qui en touche un, et (Piece, coin) des points posés sur ces
+    /// Pieces : tenus à jour seulement s'il y a des coins aigus.
+    piece_apex: HashMap<usize, Vec<usize>>,
+    apex_at: HashMap<usize, Vec<(usize, usize)>>,
 }
 
 fn key(a: usize, b: usize) -> (usize, usize) {
@@ -44,6 +52,9 @@ impl<'a> Mesher<'a> {
             segments: boundary.segments.clone(),
             pieces: &boundary.pieces,
             by_edge: HashMap::new(),
+            acute: HashSet::new(),
+            piece_apex: HashMap::new(),
+            apex_at: HashMap::new(),
         };
         m.recover(
             (0..m.segments.len()).collect(),
@@ -64,6 +75,21 @@ impl<'a> Mesher<'a> {
     /// côté h), h étant pris au centre de gravité.
     pub fn refine(&mut self, options: &MeshOptions, size: &SizeField) -> Result<(), MailleError> {
         let sin_min = options.min_angle.to_radians().sin();
+        for seg in &self.segments {
+            let ends = [(seg.t[0] == 0.0, seg.a), (seg.t[1] == 1.0, seg.b)];
+            for (end, v) in ends {
+                if end && self.acute.contains(&v) {
+                    self.piece_apex.entry(seg.piece).or_default().push(v);
+                }
+            }
+        }
+        for seg in &self.segments {
+            for &apex in self.piece_apex.get(&seg.piece).into_iter().flatten() {
+                for v in [seg.a, seg.b] {
+                    self.apex_at.entry(v).or_default().push((seg.piece, apex));
+                }
+            }
+        }
         let mut tris: VecDeque<usize> = (0..self.d.triangle_slots()).collect();
         let mut segs: Vec<usize> = (0..self.segments.len()).collect();
         loop {
@@ -80,7 +106,12 @@ impl<'a> Mesher<'a> {
                     continue;
                 };
                 let p = v.map(|i| self.d.point(i));
-                if !bad(p, sin_min, size) {
+                let sin = if v.iter().any(|i| self.acute.contains(i)) || self.in_wedge(p, v) {
+                    0.0
+                } else {
+                    sin_min
+                };
+                if !bad(p, sin, size) {
                     continue;
                 }
                 let c = circumcenter(p);
@@ -172,6 +203,9 @@ impl<'a> Mesher<'a> {
         let seg = self.segments[s];
         let t = (seg.t[0] + seg.t[1]) / 2.0;
         let m = self.insert(self.pieces[seg.piece].point(t), created)?;
+        for &apex in self.piece_apex.get(&seg.piece).into_iter().flatten() {
+            self.apex_at.entry(m).or_default().push((seg.piece, apex));
+        }
         self.segments[s].b = m;
         self.segments[s].t[1] = t;
         self.segments.push(Segment {
@@ -180,6 +214,25 @@ impl<'a> Mesher<'a> {
             ..seg
         });
         Ok(self.segments.len() - 1)
+    }
+
+    /// Vrai si le plus petit côté du triangle relie deux Pieces qui partent du même coin aigu : son
+    /// petit angle vient de celui du coin, Ruppert ne peut pas l'améliorer (règle de Shewchuk).
+    fn in_wedge(&self, p: [[f64; 2]; 3], v: [usize; 3]) -> bool {
+        if self.apex_at.is_empty() {
+            return false;
+        }
+        let k = (0..3)
+            .min_by(|&i, &j| {
+                distance(p[i], p[(i + 1) % 3]).total_cmp(&distance(p[j], p[(j + 1) % 3]))
+            })
+            .unwrap_or(0);
+        let (Some(u), Some(w)) = (self.apex_at.get(&v[k]), self.apex_at.get(&v[(k + 1) % 3]))
+        else {
+            return false;
+        };
+        u.iter()
+            .any(|&(pu, au)| w.iter().any(|&(pw, aw)| pu != pw && au == aw))
     }
 
     /// Vrai si le morceau `s` est présent et contraint.
