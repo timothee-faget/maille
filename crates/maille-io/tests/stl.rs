@@ -397,3 +397,63 @@ fn surface_inutilisable_refusee() {
     let m = tetrahedralize(&s).unwrap_err().to_string();
     assert!(m.contains("sommet qui n'existe pas"), "{m}");
 }
+
+#[test]
+fn tetraedres_quadratiques_gardent_volume_et_bords() {
+    let faces = cuboid(1., 2., 3., [0.; 3]);
+    let names = ["gauche", "droite", "devant", "derriere", "bas", "haut"];
+    let solids: Vec<(&str, &[Facet])> = names
+        .iter()
+        .zip(&faces)
+        .map(|(n, f)| (*n, f.as_slice()))
+        .collect();
+    let s = read_surface(&ascii(&solids), 30.0).unwrap();
+    let linear = tetrahedralize(&s).unwrap();
+    let t = linear.clone().to_quadratic();
+    let edges: std::collections::HashSet<_> = linear
+        .tetrahedra
+        .iter()
+        .flat_map(|t| {
+            (0..4).flat_map(move |i| (i + 1..4).map(move |j| (t[i].min(t[j]), t[i].max(t[j]))))
+        })
+        .collect();
+    assert_eq!(t.nodes.len(), linear.nodes.len() + edges.len());
+    // sommets inchangés, milieux au milieu des arêtes (ordre de Tet10 : 0-1, 1-2, 2-0, 0-3, 1-3, 2-3)
+    for (lin, quad) in linear.tetrahedra.iter().zip(&t.tetrahedra) {
+        assert_eq!(quad[..4], lin[..]);
+        for (k, (a, b)) in [(0, 1), (1, 2), (2, 0), (0, 3), (1, 3), (2, 3)]
+            .into_iter()
+            .enumerate()
+        {
+            let (p, q, m) = (t.nodes[lin[a]], t.nodes[lin[b]], t.nodes[quad[4 + k]]);
+            assert!(((p.x + q.x) / 2.0 - m.x).abs() < 1e-12);
+            assert!(((p.y + q.y) / 2.0 - m.y).abs() < 1e-12);
+            assert!(((p.z + q.z) / 2.0 - m.z).abs() < 1e-12);
+        }
+    }
+    // les Nodes du bord « gauche » (x = 0) comprennent les milieux des arêtes de ses faces
+    let gauche = t.boundary("gauche").unwrap();
+    assert!(gauche.nodes.iter().all(|&i| t.nodes[i].x == 0.0));
+    let on_x0 = (0..t.nodes.len()).filter(|&i| t.nodes[i].x == 0.0).count();
+    assert_eq!(gauche.nodes.len(), on_x0);
+}
+
+#[test]
+fn fichier_msh_des_tetraedres_se_relit() {
+    use maille_io::msh::{self, CellKind, MshFile, DOMAIN_SET};
+    let s = read_surface(&ascii(&[("b", &flat(&cuboid(1., 1., 1., [0.; 3])))]), 30.0).unwrap();
+    let t = tetrahedralize(&s).unwrap();
+    let file = MshFile::from_tetrahedralization(&t).unwrap();
+    let back = msh::read(&msh::write(&file).unwrap()).unwrap();
+    assert_eq!(back.kind, CellKind::Tet4);
+    assert_eq!(back.cells.len(), t.tetrahedra.len());
+    assert_eq!(back.sets.len(), 7);
+    assert_eq!(back.sets[DOMAIN_SET].elements.len(), t.tetrahedra.len());
+    for name in t.boundary_names() {
+        assert_eq!(
+            back.sets[name].faces.len(),
+            t.boundary(name).unwrap().faces.len(),
+            "{name}"
+        );
+    }
+}

@@ -1,10 +1,11 @@
 # Exemples et guide des fichiers
 
 Maille résout un modèle en trois fichiers : **maillage → modèle → résultats**. En 2D, le maillage
-peut venir d'un dessin DXF (`maille mesh`).
+peut venir d'un dessin DXF 2D ou d'une surface STL 3D (`maille mesh`).
 
 ```
-dessin (.dxf) ── maille mesh ──▶
+dessin (.dxf) ─┐
+surface (.stl) ┴ maille mesh ──▶
 maillage (.msh) ──┐
                   ├─ maille solve ──▶ résultats (.pvd + .vtu) ──▶ maille view / ParaView
 modèle (.toml) ───┘                                  │
@@ -51,6 +52,21 @@ angle de moins de 60° entre deux entités est refusé. Le **calque** de chaque 
 bord, donc le Set où poser les BC (`0` donne `bord`). Le Set `domaine` contient tous les triangles.
 Splines, ellipses, blocs et DXF binaire ne sont pas lus. `plaque.dxf`, `trempe.dxf` et `tube.dxf`
 sont les dessins des exemples.
+
+## La surface : STL 3D, ASCII ou binaire
+
+```sh
+maille mesh cube.stl --quadratic   # écrit cube.msh (Tet10 ; sans --quadratic, Tet4)
+```
+
+Le STL doit être une surface **fermée d'une seule pièce** (pas de trou, pas de cavité, chaque arête
+partagée par deux triangles). Maille soude les sommets, vérifie l'orientation et corrige des normales
+rentrantes. Le **nom du bord** est celui du `solid` (STL ASCII à plusieurs `solid`, comme
+`cube.stl`) ; sinon la surface est découpée aux arêtes vives (`--feature-angle`, 30° par défaut) en
+bords `surface_1`, `surface_2`… Le Set `domaine` contient tous les tétraèdres. Il n'y a **pas de
+`--size`** pour l'instant : la finesse est celle des triangles du STL (Maille ajoute des points sur la
+surface, mais n'affine pas) ; un STL grossier donne donc un maillage grossier, avec des tétraèdres
+parfois aplatis. Triangles très effilés (un disque en éventail de centaines de triangles) refusés.
 
 ## Le maillage : Gmsh `.msh` 4.1 ASCII
 
@@ -102,7 +118,7 @@ seul `.vtu` et un `.pvd`). Format ASCII, lisible par ParaView. Grandeurs aux Nod
 
 ## Régénérer les maillages
 
-Les `.msh` 2D d'ici viennent des `.dxf` voisins, par `maille mesh` (le cube, 3D, est écrit à la main) :
+Les `.msh` 2D d'ici viennent des `.dxf` voisins, par `maille mesh` (le cube, 3D, est écrit à la main ; `cube.stl` en est la surface, pour `maille mesh`) :
 
 ```sh
 cargo test -p maille-cli --test examples -- --ignored
