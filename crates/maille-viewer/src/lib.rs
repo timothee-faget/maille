@@ -4,10 +4,19 @@
 //! Client du cœur : aucun calcul ici, seulement de l'affichage.
 
 mod app;
+#[cfg_attr(not(test), allow(dead_code))] // servira au viewer 3D
+mod camera;
 mod colormap;
+#[cfg_attr(not(test), allow(dead_code))] // servira au viewer 3D
+mod cut;
 mod legend;
 mod render;
 mod scene;
+#[cfg_attr(not(test), allow(dead_code))] // servira au viewer 3D
+mod solid;
+#[cfg(test)]
+mod testmesh;
+mod vec3;
 mod view;
 
 pub use scene::NodalResults;
