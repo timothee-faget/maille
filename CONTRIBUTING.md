@@ -16,7 +16,7 @@
 ```
 
 - Types : `feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `build`, `ci`, `chore`.
-- Portées : `core`, `mesher`, `viewer`, `cli`. On l'omet pour un changement transverse.
+- Portées : `core`, `mesher`, `io`, `viewer`, `cli`. On l'omet pour un changement transverse.
 - Un changement incompatible de l'API se signale par `!` (`feat(core)!: …`) et une ligne `BREAKING CHANGE:`.
 
 Exemples : `feat(core): ajouter l'élément Hexa8`, `fix(viewer): recadrer la déformée au zoom`.
