@@ -232,7 +232,7 @@ fn mesh_facet(
 
 /// Repère orthonormé (e1, e2) du plan de normale unitaire n, avec e1 × e2 = n : un triangle
 /// antihoraire dans le plan a la normale n.
-fn basis(n: [f64; 3]) -> ([f64; 3], [f64; 3]) {
+pub(super) fn basis(n: [f64; 3]) -> ([f64; 3], [f64; 3]) {
     let k = (0..3)
         .min_by(|&a, &b| n[a].abs().total_cmp(&n[b].abs()))
         .unwrap_or(0);
@@ -245,7 +245,7 @@ fn basis(n: [f64; 3]) -> ([f64; 3], [f64; 3]) {
 }
 
 /// Points des contours (numérotés à la suite) où l'angle intérieur est sous `MIN_CORNER`.
-fn acute_corners(loops: &[Vec<([f64; 2], f64)>]) -> HashSet<usize> {
+pub(super) fn acute_corners(loops: &[Vec<([f64; 2], f64)>]) -> HashSet<usize> {
     let mut out = HashSet::new();
     let mut first = 0;
     for ring in loops {

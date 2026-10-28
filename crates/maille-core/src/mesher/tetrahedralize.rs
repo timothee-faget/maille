@@ -10,6 +10,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+use super::brep::Brep;
+use super::brepmesh::triangulate;
 use super::delaunay3::Delaunay3;
 use super::predicates::orient3d;
 use super::refine3::{self, SizeField3};
@@ -143,14 +145,81 @@ pub fn tetrahedralize(
     options: &TetOptions,
 ) -> Result<Tetrahedralization<4>, MailleError> {
     let grading = positive("gradation", options.grading)?;
-    let remeshed;
-    let surface = match options.size {
-        Some(h) => {
-            remeshed = remesh(surface, h, grading)?;
-            &remeshed
+    match options.size {
+        Some(h) => fill(&remesh(surface, h, grading)?, Some(h), grading),
+        None => fill(surface, None, grading),
+    }
+}
+
+/// Maille une pièce B-rep (lue d'un STEP) en tétraèdres à la taille h : ses faces sont maillées
+/// une à une dans leur plan déroulé (bords nommés : les noms des faces), puis l'intérieur est
+/// raffiné comme avec `tetrahedralize`. La taille h est obligatoire (`InvalidBrep` sans elle) ;
+/// sur une face ou une arête courbe, elle est en plus bornée par un seizième de tour. Plan,
+/// cylindre et cône sont pris en charge. Erreurs de `tetrahedralize`, et `InvalidBrep` si une face
+/// ne se laisse pas mailler.
+pub fn tetrahedralize_brep(
+    brep: &Brep,
+    options: &TetOptions,
+) -> Result<Tetrahedralization<4>, MailleError> {
+    let grading = positive("gradation", options.grading)?;
+    let h = options.size.ok_or_else(|| MailleError::InvalidBrep {
+        problem: "une pièce B-rep se maille à une taille h : la donner (TetOptions::size, --size)"
+            .to_string(),
+    })?;
+    let h = positive("taille h", h)?;
+    fill(&triangulate(brep, h, grading)?, Some(h), grading)
+}
+
+/// Essais d'insertion dans un autre ordre quand le Delaunay 3D bute sur un arrondi.
+const REORDERINGS: u64 = 3;
+
+/// Tétraèdres conformes à `surface`, intérieur raffiné à la taille h s'il y en a une. Les points
+/// coplanaires d'une face plane rendent le Delaunay 3D sensible à l'arrondi, selon l'ordre où ils
+/// entrent : sur `MeshingFailed`, la surface est reprise avec ses sommets dans un autre ordre.
+fn fill(
+    surface: &Surface,
+    size: Option<f64>,
+    grading: f64,
+) -> Result<Tetrahedralization<4>, MailleError> {
+    let mut result = fill_once(surface, size, grading);
+    for seed in 1..=REORDERINGS {
+        if result != Err(MailleError::MeshingFailed) {
+            break;
         }
-        None => surface,
+        result = fill_once(&reordered(surface, seed), size, grading);
+    }
+    result
+}
+
+/// La même surface, ses sommets dans un ordre pseudo-aléatoire fixé par `seed`.
+fn reordered(surface: &Surface, seed: u64) -> Surface {
+    let key = |i: usize| {
+        (i as u64 ^ seed.wrapping_mul(0x9E37_79B9_7F4A_7C15))
+            .wrapping_mul(0xBF58_476D_1CE4_E5B9)
+            .rotate_left(31)
     };
+    let mut order: Vec<usize> = (0..surface.vertices.len()).collect();
+    order.sort_by_key(|&i| key(i));
+    let mut number = vec![0; order.len()];
+    for (k, &i) in order.iter().enumerate() {
+        number[i] = k;
+    }
+    Surface {
+        vertices: order.iter().map(|&i| surface.vertices[i]).collect(),
+        triangles: surface
+            .triangles
+            .iter()
+            .map(|t| t.map(|v| number[v]))
+            .collect(),
+        patches: surface.patches.clone(),
+    }
+}
+
+fn fill_once(
+    surface: &Surface,
+    size: Option<f64>,
+    grading: f64,
+) -> Result<Tetrahedralization<4>, MailleError> {
     let patch_of = check(surface)?;
     let mut points = surface.vertices.clone();
     let (lo, hi) = bounds(&points);
@@ -169,7 +238,7 @@ pub fn tetrahedralize(
 
     let caster = Caster::new(surface);
     del.classify(|t| caster.contains(centroid(&points, &t)));
-    if let Some(h) = options.size {
+    if let Some(h) = size {
         del.set_walls(pieces.iter().map(|p| p.v));
         refine3::refine(&mut del, &mut points, &SizeField3::new(surface, h, grading))?;
     }

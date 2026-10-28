@@ -1,12 +1,14 @@
-//! Commande `mesh` : dessin DXF 2D ou surface STL 3D → maillage Gmsh `.msh`. Le calque d'une entité
-//! DXF, le nom d'un `solid` STL (ou `surface_N` à défaut) nomme le bord (voir `maille_io::dxf` et
-//! `maille_io::stl`).
+//! Commande `mesh` : dessin DXF 2D, surface STL 3D ou pièce STEP → maillage Gmsh `.msh`. Le calque
+//! d'une entité DXF, le nom d'un `solid` STL (ou `surface_N` à défaut), le nom d'une face STEP (ou
+//! `face_N` à défaut) nomme le bord (voir `maille_io::dxf`, `maille_io::stl` et `maille_io::step`).
 
 use std::path::{Path, PathBuf};
 
-use maille_core::mesher::{tetrahedralize, triangulate, MeshOptions, TetOptions};
+use maille_core::mesher::{
+    tetrahedralize, tetrahedralize_brep, triangulate, MeshOptions, TetOptions,
+};
 use maille_io::msh::{self, MshFile, DOMAIN_SET};
-use maille_io::{dxf, stl};
+use maille_io::{dxf, step, stl};
 
 use crate::files::{read, read_bytes, write, Failure};
 
@@ -14,9 +16,10 @@ use crate::files::{read, read_bytes, write, Failure};
 const FEATURE_ANGLE: f64 = 30.0;
 
 /// `maille mesh <dessin.dxf> --size <h> [--quadratic] [-o <maillage.msh>]` ou
-/// `maille mesh <piece.stl> [--size <h>] [--feature-angle <degrés>] [--quadratic] [-o <maillage.msh>]`.
+/// `maille mesh <piece.stl> [--size <h>] [--feature-angle <degrés>] [--quadratic] [-o <maillage.msh>]`
+/// ou `maille mesh <piece.step> --size <h> [--quadratic] [-o <maillage.msh>]`.
 pub fn mesh(args: &[String]) -> Result<(), Failure> {
-    let usage = "usage : maille mesh <dessin.dxf> --size <h> [--quadratic] [-o <maillage.msh>]\n        maille mesh <piece.stl> [--size <h>] [--feature-angle <degrés>] [--quadratic] [-o <maillage.msh>]";
+    let usage = "usage : maille mesh <dessin.dxf> --size <h> [--quadratic] [-o <maillage.msh>]\n        maille mesh <piece.stl> [--size <h>] [--feature-angle <degrés>] [--quadratic] [-o <maillage.msh>]\n        maille mesh <piece.step> --size <h> [--quadratic] [-o <maillage.msh>]";
     let (mut input, mut size, mut angle, mut output, mut quadratic) =
         (None, None, None, None, false);
     let mut it = args.iter();
@@ -71,9 +74,21 @@ pub fn mesh(args: &[String]) -> Result<(), Failure> {
             let angle = angle.unwrap_or(FEATURE_ANGLE);
             (from_stl(&input, angle, &options, quadratic)?, "tétraèdres")
         }
+        Some("step" | "stp") => {
+            if angle.is_some() {
+                return Err("--feature-angle ne sert qu'aux fichiers STL".into());
+            }
+            let options = TetOptions {
+                size: Some(size.ok_or(
+                    "--size manque : donner la taille h des Elements, dans l'unité de longueur du fichier STEP",
+                )?),
+                ..TetOptions::default()
+            };
+            (from_step(&input, &options, quadratic)?, "tétraèdres")
+        }
         other => {
             return Err(format!(
-                "extension {} non prise en charge : Maille maille un dessin .dxf (2D) ou une surface .stl (3D)",
+                "extension {} non prise en charge : Maille maille un dessin .dxf (2D), une surface .stl ou une pièce .step (3D)",
                 other.map_or("absente".to_string(), |e| format!("« .{e} »"))
             )
             .into())
@@ -107,6 +122,20 @@ fn from_dxf(path: &Path, size: f64, quadratic: bool) -> Result<MshFile, Failure>
 
 /// Sans `--size`, les tétraèdres ont la finesse des triangles du STL ; avec, la surface est
 /// remaillée à la taille h puis l'intérieur raffiné (voir `TetOptions`).
+/// Les faces sont maillées à la taille h sur leurs surfaces exactes, puis l'intérieur raffiné
+/// (voir `tetrahedralize_brep`). L'unité de longueur du fichier est affichée : Maille ne convertit
+/// rien, la taille h et le modèle sont dans cette unité.
+fn from_step(path: &Path, options: &TetOptions, quadratic: bool) -> Result<MshFile, Failure> {
+    let (brep, unit) = step::read_brep(&read(path)?)?;
+    println!("{} : unité de longueur {unit}", path.display());
+    let tetrahedra = tetrahedralize_brep(&brep, options)?;
+    Ok(if quadratic {
+        MshFile::from_tetrahedralization(&tetrahedra.to_quadratic())?
+    } else {
+        MshFile::from_tetrahedralization(&tetrahedra)?
+    })
+}
+
 fn from_stl(
     path: &Path,
     feature_angle: f64,

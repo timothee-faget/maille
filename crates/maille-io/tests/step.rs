@@ -1,12 +1,13 @@
-//! Import STEP : topologie B-rep et courbes des arêtes. Pièces écrites à la main (pavé, quart de
-//! cylindre à arcs en CIRCLE et en B-spline rationnelle, cylindre elliptique à couture comme chez
-//! OCCT), validées par les longueurs exactes des arêtes, la formule d'Euler et l'usage des arêtes ;
-//! unités et refus avec message.
+//! Import STEP : topologie B-rep, surfaces des faces et courbes des arêtes. Pièces écrites à la
+//! main (pavé, quart de cylindre à arcs en CIRCLE et en B-spline rationnelle, cylindre à couture
+//! comme chez OCCT, tronc de cône en degrés), validées par les longueurs exactes des arêtes, la
+//! formule d'Euler, l'usage des arêtes et le volume des tétraèdres ; unités et refus avec message.
 
 use std::collections::HashMap;
 use std::f64::consts::{FRAC_1_SQRT_2, PI};
 
-use maille_io::step::{read_brep, Brep, EdgeCurve};
+use maille_core::mesher::{tetrahedralize_brep, TetOptions};
+use maille_io::step::{read_brep, Brep, EdgeCurve, FaceSurface};
 
 /// Fichier STEP en construction : une instance par ligne, numérotées dans l'ordre.
 #[derive(Default)]
@@ -32,12 +33,29 @@ impl Step {
     }
 
     fn placement(&mut self, origin: [f64; 3]) -> u64 {
-        let (o, z, x) = (
-            self.point(origin),
-            self.direction([0.0, 0.0, 1.0]),
-            self.direction([1.0, 0.0, 0.0]),
-        );
+        self.frame(origin, [0.0, 0.0, 1.0], [1.0, 0.0, 0.0])
+    }
+
+    /// Repère d'origine `origin`, d'axe `z` et de direction de référence `x`.
+    fn frame(&mut self, origin: [f64; 3], z: [f64; 3], x: [f64; 3]) -> u64 {
+        let (o, z, x) = (self.point(origin), self.direction(z), self.direction(x));
         self.add(&format!("AXIS2_PLACEMENT_3D('',#{o},#{z},#{x})"))
+    }
+
+    fn plane(&mut self, origin: [f64; 3], normal: [f64; 3]) -> u64 {
+        let x = if normal[0].abs() < 0.9 {
+            [1.0, 0.0, 0.0]
+        } else {
+            [0.0, 1.0, 0.0]
+        };
+        let frame = self.frame(origin, normal, x);
+        self.add(&format!("PLANE('',#{frame})"))
+    }
+
+    /// Cylindre d'axe z.
+    fn cylinder(&mut self, radius: f64) -> u64 {
+        let frame = self.placement([0.0; 3]);
+        self.add(&format!("CYLINDRICAL_SURFACE('',#{frame},{radius:?})"))
     }
 
     fn vertex(&mut self, p: [f64; 3]) -> u64 {
@@ -57,8 +75,9 @@ impl Step {
         self.edge(v1, v2, line)
     }
 
-    /// Face nommée `name` : un contour extérieur d'arêtes (`true` : dans leur sens).
-    fn face(&mut self, name: &str, edges: &[(u64, bool)]) -> u64 {
+    /// Face nommée `name` sur la surface `surface` : un contour extérieur d'arêtes (`true` : dans
+    /// leur sens).
+    fn face(&mut self, name: &str, edges: &[(u64, bool)], surface: u64) -> u64 {
         let oriented: Vec<String> = edges
             .iter()
             .map(|&(e, forward)| {
@@ -71,9 +90,9 @@ impl Step {
             .collect();
         let lp = self.add(&format!("EDGE_LOOP('',({}))", oriented.join(",")));
         let bound = self.add(&format!("FACE_OUTER_BOUND('',#{lp},.T.)"));
-        let placement = self.placement([0.0; 3]);
-        let plane = self.add(&format!("PLANE('',#{placement})"));
-        self.add(&format!("ADVANCED_FACE('{name}',(#{bound}),#{plane},.T.)"))
+        self.add(&format!(
+            "ADVANCED_FACE('{name}',(#{bound}),#{surface},.T.)"
+        ))
     }
 
     fn solid(&mut self, faces: &[u64]) -> u64 {
@@ -117,23 +136,24 @@ fn cuboid(s: &mut Step, [a, b, c]: [f64; 3], named: bool) -> Vec<u64> {
     }
     // cycles antihoraires vus de dehors
     let cycles = [
-        ("x0", [0, 4, 6, 2]),
-        ("x1", [1, 3, 7, 5]),
-        ("y0", [0, 1, 5, 4]),
-        ("y1", [2, 6, 7, 3]),
-        ("z0", [0, 2, 3, 1]),
-        ("z1", [4, 5, 7, 6]),
+        ("x0", [0, 4, 6, 2], [-1.0, 0.0, 0.0]),
+        ("x1", [1, 3, 7, 5], [1.0, 0.0, 0.0]),
+        ("y0", [0, 1, 5, 4], [0.0, -1.0, 0.0]),
+        ("y1", [2, 6, 7, 3], [0.0, 1.0, 0.0]),
+        ("z0", [0, 2, 3, 1], [0.0, 0.0, -1.0]),
+        ("z1", [4, 5, 7, 6], [0.0, 0.0, 1.0]),
     ];
     cycles
         .iter()
-        .map(|(name, cycle)| {
+        .map(|(name, cycle, normal)| {
             let loop_edges: Vec<(u64, bool)> = (0..4)
                 .map(|k| {
                     let (p, q) = (cycle[k], cycle[(k + 1) % 4]);
                     (edges[&(p.min(q), p.max(q))], p < q)
                 })
                 .collect();
-            s.face(if named { name } else { "" }, &loop_edges)
+            let plane = s.plane(at(cycle[0]), *normal);
+            s.face(if named { name } else { "" }, &loop_edges, plane)
         })
         .collect()
 }
@@ -212,20 +232,38 @@ fn quarter_cylinder(s: &mut Step, top_radius: f64) {
     let placement = s.placement(o1);
     let circle = s.add(&format!("CIRCLE('',#{placement},{top_radius:?})"));
     let ab1 = s.edge(va1, vb1, circle);
+    let planes = [
+        s.plane(o0, [0., 0., -1.]),
+        s.plane(o1, [0., 0., 1.]),
+        s.plane(o0, [0., -1., 0.]),
+        s.plane(o0, [-1., 0., 0.]),
+    ];
+    let cylinder = s.cylinder(2.0);
     let faces = [
-        s.face("dessous", &[(bo0, false), (ab0, false), (oa0, false)]),
-        s.face("dessus", &[(oa1, true), (ab1, true), (bo1, true)]),
+        s.face(
+            "dessous",
+            &[(bo0, false), (ab0, false), (oa0, false)],
+            planes[0],
+        ),
+        s.face(
+            "dessus",
+            &[(oa1, true), (ab1, true), (bo1, true)],
+            planes[1],
+        ),
         s.face(
             "sym_y",
             &[(oa0, true), (aa, true), (oa1, false), (oo, false)],
+            planes[2],
         ),
         s.face(
             "sym_x",
             &[(oo, true), (bo1, false), (bb, false), (bo0, true)],
+            planes[3],
         ),
         s.face(
             "courbe",
             &[(ab0, true), (bb, true), (ab1, false), (aa, false)],
+            cylinder,
         ),
     ];
     s.solid(&faces);
@@ -261,35 +299,45 @@ fn quart_de_cylindre_arcs_exacts() {
     }
 }
 
-#[test]
-fn cylindre_elliptique_a_couture() {
-    // comme OCCT : un sommet par cercle, des courbes fermées et une couture (SEAM_CURVE) parcourue
-    // deux fois par la face latérale
-    let mut s = Step::default();
-    let (a, b, h) = (2.0, 1.0, 3.0);
-    let (vb, vt) = (s.vertex([a, 0.0, 0.0]), s.vertex([a, 0.0, h]));
-    let ellipse = |s: &mut Step, z: f64, v: u64| {
+/// Cylindre de rayon r et de hauteur h comme l'écrit OCCT : un sommet par cercle, des courbes
+/// fermées et une couture (SEAM_CURVE) parcourue deux fois par la face latérale.
+fn seamed_cylinder(s: &mut Step, r: f64, h: f64) {
+    let (vb, vt) = (s.vertex([r, 0.0, 0.0]), s.vertex([r, 0.0, h]));
+    let circle = |s: &mut Step, z: f64, v: u64| {
         let placement = s.placement([0.0, 0.0, z]);
-        let e = s.add(&format!("ELLIPSE('',#{placement},{a:?},{b:?})"));
-        s.edge(v, v, e)
+        let c = s.add(&format!("CIRCLE('',#{placement},{r:?})"));
+        s.edge(v, v, c)
     };
-    let bottom = ellipse(&mut s, 0.0, vb);
-    let top = ellipse(&mut s, h, vt);
-    let p = s.point([a, 0.0, 0.0]);
+    let bottom = circle(s, 0.0, vb);
+    let top = circle(s, h, vt);
+    let p = s.point([r, 0.0, 0.0]);
     let d = s.direction([0.0, 0.0, 1.0]);
     let vector = s.add(&format!("VECTOR('',#{d},1.)"));
     let line = s.add(&format!("LINE('',#{p},#{vector})"));
     let seam_curve = s.add(&format!("SEAM_CURVE('',#{line},(),.PCURVE_S1.)"));
     let seam = s.edge(vb, vt, seam_curve);
+    let side = s.cylinder(r);
+    let (under, over) = (
+        s.plane([0.0; 3], [0.0, 0.0, -1.0]),
+        s.plane([0.0, 0.0, h], [0.0, 0.0, 1.0]),
+    );
     let faces = [
         s.face(
             "cote",
             &[(bottom, true), (seam, true), (top, false), (seam, false)],
+            side,
         ),
-        s.face("fond", &[(bottom, false)]),
-        s.face("haut", &[(top, true)]),
+        s.face("fond", &[(bottom, false)], under),
+        s.face("haut", &[(top, true)], over),
     ];
     s.solid(&faces);
+}
+
+#[test]
+fn cylindre_a_couture() {
+    let mut s = Step::default();
+    let (r, h) = (2.0, 3.0);
+    seamed_cylinder(&mut s, r, h);
     s.add("( LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT($,.METRE.) )");
     let (brep, unit) = read_brep(&s.text()).unwrap();
     assert_eq!(unit, "m");
@@ -298,13 +346,117 @@ fn cylindre_elliptique_a_couture() {
         (2, 3, 3)
     );
     assert_eq!(brep.edges[0].start, brep.edges[0].end);
-    // périmètre de l'ellipse de demi-axes 2 et 1 : 9,688448220547675…
-    let want = 2.0 * 9.688_448_220_547_675 + h;
-    assert!(
-        (total_length(&brep) - want).abs() < 1e-8,
-        "{}",
-        total_length(&brep)
+    assert!((total_length(&brep) - (4.0 * PI * r + h)).abs() < 1e-12);
+    assert_eq!(
+        brep.faces[0].surface,
+        FaceSurface::Cylinder {
+            origin: [0.0; 3],
+            axis: [0.0, 0.0, 1.0],
+            radius: r,
+        }
     );
+    assert!(matches!(
+        brep.faces[2].surface,
+        FaceSurface::Plane {
+            normal: [0.0, 0.0, 1.0],
+            ..
+        }
+    ));
+}
+
+/// Volume des tétraèdres de la pièce maillée à la taille h.
+fn meshed_volume(brep: &Brep, h: f64) -> f64 {
+    let options = TetOptions {
+        size: Some(h),
+        ..TetOptions::default()
+    };
+    let t = tetrahedralize_brep(brep, &options).unwrap();
+    let p = |i: usize| [t.nodes[i].x, t.nodes[i].y, t.nodes[i].z];
+    t.tetrahedra
+        .iter()
+        .map(|e| {
+            let [a, b, c, d] = e.map(p);
+            let (u, v, w) = (
+                [b[0] - a[0], b[1] - a[1], b[2] - a[2]],
+                [c[0] - a[0], c[1] - a[1], c[2] - a[2]],
+                [d[0] - a[0], d[1] - a[1], d[2] - a[2]],
+            );
+            (u[0] * (v[1] * w[2] - v[2] * w[1]) - u[1] * (v[0] * w[2] - v[2] * w[0])
+                + u[2] * (v[0] * w[1] - v[1] * w[0]))
+                / 6.0
+        })
+        .sum()
+}
+
+#[test]
+fn pieces_lues_puis_maillees() {
+    // quart de cylindre de rayon 2 et de hauteur 1 : π ; cylindre à couture : 12π. Sommets sur
+    // le cylindre : volume par défaut, de moins que la flèche relative des cordes (h / r)² / 8
+    let sag = |h: f64| (h / 2.0f64).powi(2) / 8.0;
+    let mut s = Step::default();
+    quarter_cylinder(&mut s, 2.0);
+    let (b, _) = read_brep(&s.text()).unwrap();
+    let e = (PI - meshed_volume(&b, 0.25)) / PI;
+    assert!(e > 0.0 && e < sag(0.25), "quart de cylindre : écart {e:e}");
+    let mut s = Step::default();
+    seamed_cylinder(&mut s, 2.0, 3.0);
+    let (b, _) = read_brep(&s.text()).unwrap();
+    let e = (12.0 * PI - meshed_volume(&b, 0.5)) / (12.0 * PI);
+    assert!(e > 0.0 && e < sag(0.5), "cylindre : écart {e:e}");
+}
+
+#[test]
+fn tronc_de_cone_en_degres() {
+    // rayon 1 en bas, 2 en haut, hauteur 1 : demi-angle 45°, volume 7π/3
+    let mut s = Step::default();
+    let (vb, vt) = (s.vertex([1.0, 0.0, 0.0]), s.vertex([2.0, 0.0, 1.0]));
+    let circle = |s: &mut Step, r: f64, z: f64, v: u64| {
+        let placement = s.placement([0.0, 0.0, z]);
+        let c = s.add(&format!("CIRCLE('',#{placement},{r:?})"));
+        s.edge(v, v, c)
+    };
+    let bottom = circle(&mut s, 1.0, 0.0, vb);
+    let top = circle(&mut s, 2.0, 1.0, vt);
+    let seam = s.line(vb, vt, [1.0, 0.0, 0.0], [2.0, 0.0, 1.0]);
+    let frame = s.placement([0.0; 3]);
+    let cone = s.add(&format!("CONICAL_SURFACE('',#{frame},1.,45.)"));
+    let (under, over) = (
+        s.plane([0.0; 3], [0.0, 0.0, -1.0]),
+        s.plane([0.0, 0.0, 1.0], [0.0, 0.0, 1.0]),
+    );
+    let faces = [
+        s.face(
+            "cote",
+            &[(bottom, true), (seam, true), (top, false), (seam, false)],
+            cone,
+        ),
+        s.face("fond", &[(bottom, false)], under),
+        s.face("haut", &[(top, true)], over),
+    ];
+    s.solid(&faces);
+    let radian = s.add("( NAMED_UNIT(*) PLANE_ANGLE_UNIT() SI_UNIT($,.RADIAN.) )");
+    let measure = s.add(&format!(
+        "PLANE_ANGLE_MEASURE_WITH_UNIT(PLANE_ANGLE_MEASURE(0.017453292519943295),#{radian})"
+    ));
+    let dims = s.add("DIMENSIONAL_EXPONENTS(0.,0.,0.,0.,0.,0.,0.)");
+    let degree = s.add(&format!(
+        "( CONVERSION_BASED_UNIT('DEGREE',#{measure}) NAMED_UNIT(#{dims}) PLANE_ANGLE_UNIT() )"
+    ));
+    // le contexte dit quelle unité d'angle vaut pour la géométrie : le degré, pas le radian
+    s.add(&format!(
+        "( GEOMETRIC_REPRESENTATION_CONTEXT(3) GLOBAL_UNIT_ASSIGNED_CONTEXT((#{degree})) REPRESENTATION_CONTEXT('','') )"
+    ));
+    let (b, _) = read_brep(&s.text()).unwrap();
+    let FaceSurface::Cone { half_angle, .. } = b.faces[0].surface else {
+        panic!("{:?}", b.faces[0].surface);
+    };
+    assert!((half_angle - PI / 4.0).abs() < 1e-15);
+    let exact = 7.0 * PI / 3.0;
+    let e = (exact - meshed_volume(&b, 0.25)) / exact;
+    assert!(e > 0.0 && e < 1e-2, "écart {e:e}");
+    // unité d'angle illisible : le cône est refusé
+    s.lines[measure as usize - 1] = format!("PLANE_ANGLE_MEASURE_WITH_UNIT($,#{radian})");
+    assert!(message(&s.text()).contains("unité d'angle"));
 }
 
 #[test]
@@ -369,6 +521,23 @@ fn refus_avec_message() {
     let m = message(&s.text());
     assert!(
         m.contains(&format!("ligne {} : courbe OFFSET_CURVE_3D", line + 7)),
+        "{m}"
+    );
+    // surface non prise en charge
+    let mut s = Step::default();
+    quarter_cylinder(&mut s, 2.0);
+    let cylinder = s
+        .lines
+        .iter()
+        .position(|l| l.starts_with("CYLINDRICAL_SURFACE("))
+        .unwrap();
+    s.lines[cylinder] = s.lines[cylinder].replace("CYLINDRICAL_SURFACE", "SPHERICAL_SURFACE");
+    let m = message(&s.text());
+    assert!(
+        m.contains(&format!(
+            "ligne {} : face sur une surface SPHERICAL_SURFACE",
+            cylinder + 7
+        )),
         "{m}"
     );
     // sommet hors de son cercle

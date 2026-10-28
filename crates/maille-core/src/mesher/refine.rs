@@ -2,7 +2,8 @@
 //! petit ou dépasse la taille locale h(x), on insère le centre de son cercle circonscrit. Si ce
 //! centre empiète sur un morceau de bord (tombe dans son cercle diamétral), on coupe ce morceau en
 //! son milieu à la place. Un morceau de bord dont le cercle diamétral contient le sommet opposé de
-//! son triangle est coupé lui aussi.
+//! son triangle est coupé lui aussi, sauf si ce sommet est sur un autre bord parti du même coin
+//! aigu.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -23,7 +24,10 @@ pub(crate) struct Mesher<'a> {
     /// `MIN_CORNER` les refuse) : un triangle qui en a un n'est raffiné que pour sa taille, pas
     /// pour ses angles, sinon Ruppert ne terminerait pas.
     pub acute: HashSet<usize>,
-    /// Coins aigus de chaque Piece qui en touche un, et (Piece, coin) des points posés sur ces
+    /// Groupe de chaque Piece pour les coins aigus : les Pieces d'un même bord d'entrée (une arête
+    /// découpée en cordes) partent ensemble du coin. Vide : chaque Piece est son propre groupe.
+    pub groups: Vec<usize>,
+    /// Coins aigus de chaque groupe qui en touche un, et (groupe, coin) des points posés sur ses
     /// Pieces : tenus à jour seulement s'il y a des coins aigus.
     piece_apex: HashMap<usize, Vec<usize>>,
     apex_at: HashMap<usize, Vec<(usize, usize)>>,
@@ -53,6 +57,7 @@ impl<'a> Mesher<'a> {
             pieces: &boundary.pieces,
             by_edge: HashMap::new(),
             acute: HashSet::new(),
+            groups: Vec::new(),
             piece_apex: HashMap::new(),
             apex_at: HashMap::new(),
         };
@@ -79,14 +84,16 @@ impl<'a> Mesher<'a> {
             let ends = [(seg.t[0] == 0.0, seg.a), (seg.t[1] == 1.0, seg.b)];
             for (end, v) in ends {
                 if end && self.acute.contains(&v) {
-                    self.piece_apex.entry(seg.piece).or_default().push(v);
+                    let g = self.group(seg.piece);
+                    self.piece_apex.entry(g).or_default().push(v);
                 }
             }
         }
         for seg in &self.segments {
-            for &apex in self.piece_apex.get(&seg.piece).into_iter().flatten() {
+            let g = self.group(seg.piece);
+            for &apex in self.piece_apex.get(&g).into_iter().flatten() {
                 for v in [seg.a, seg.b] {
-                    self.apex_at.entry(v).or_default().push((seg.piece, apex));
+                    self.apex_at.entry(v).or_default().push((g, apex));
                 }
             }
         }
@@ -203,8 +210,9 @@ impl<'a> Mesher<'a> {
         let seg = self.segments[s];
         let t = (seg.t[0] + seg.t[1]) / 2.0;
         let m = self.insert(self.pieces[seg.piece].point(t), created)?;
-        for &apex in self.piece_apex.get(&seg.piece).into_iter().flatten() {
-            self.apex_at.entry(m).or_default().push((seg.piece, apex));
+        let g = self.group(seg.piece);
+        for &apex in self.piece_apex.get(&g).into_iter().flatten() {
+            self.apex_at.entry(m).or_default().push((g, apex));
         }
         self.segments[s].b = m;
         self.segments[s].t[1] = t;
@@ -216,7 +224,11 @@ impl<'a> Mesher<'a> {
         Ok(self.segments.len() - 1)
     }
 
-    /// Vrai si le plus petit côté du triangle relie deux Pieces qui partent du même coin aigu : son
+    fn group(&self, piece: usize) -> usize {
+        self.groups.get(piece).copied().unwrap_or(piece)
+    }
+
+    /// Vrai si le plus petit côté du triangle relie deux groupes qui partent du même coin aigu : son
     /// petit angle vient de celui du coin, Ruppert ne peut pas l'améliorer (règle de Shewchuk).
     fn in_wedge(&self, p: [[f64; 2]; 3], v: [usize; 3]) -> bool {
         if self.apex_at.is_empty() {
@@ -260,6 +272,17 @@ impl<'a> Mesher<'a> {
         let Some(v) = self.d.left_vertex(seg.a, seg.b) else {
             return false;
         };
+        // sommet posé sur un autre groupe parti du même coin aigu : couper ne ferait que
+        // rapprocher les deux bords du coin, sans fin (règle de Shewchuk)
+        let g = self.group(seg.piece);
+        if let (Some(apexes), Some(at)) = (self.piece_apex.get(&g), self.apex_at.get(&v)) {
+            if at
+                .iter()
+                .any(|&(other, apex)| other != g && apexes.contains(&apex))
+            {
+                return false;
+            }
+        }
         let (a, b, c) = (self.d.point(seg.a), self.d.point(seg.b), self.d.point(v));
         let (u, w) = ([a[0] - c[0], a[1] - c[1]], [b[0] - c[0], b[1] - c[1]]);
         u[0] * w[0] + u[1] * w[1] < -1e-12 * u[0].hypot(u[1]) * w[0].hypot(w[1])
@@ -324,6 +347,57 @@ fn circumcenter(p: [[f64; 2]; 3]) -> [f64; 2] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mesher::remesh::acute_corners;
+
+    /// Deux pointes : la droite x = 1 et la droite y = 0 sont tangentes au cercle de centre (0, 1)
+    /// et de rayon 1, en (1, 1) et en (0, 0). Chaque bord est découpé en cordes, un groupe par bord :
+    /// le raffinement termine et couvre le polygone.
+    #[test]
+    fn pointes_entre_bords_tangents() {
+        let n = 8;
+        let mut ring = Vec::new();
+        let mut groups = Vec::new();
+        for i in 0..n {
+            ring.push(([i as f64 / n as f64, 0.0], 0.2));
+            groups.push(0);
+        }
+        for i in 0..n {
+            ring.push(([1.0, i as f64 / n as f64], 0.2));
+            groups.push(1);
+        }
+        for i in 0..n {
+            let a = -std::f64::consts::FRAC_PI_2 * i as f64 / n as f64;
+            ring.push(([a.cos(), 1.0 + a.sin()], 0.2));
+            groups.push(2);
+        }
+        let rings = [ring];
+        let boundary = Boundary::polygons(&rings, "pointes");
+        let mut m = Mesher::new(&boundary).unwrap();
+        m.acute = acute_corners(&rings);
+        assert_eq!(m.acute.len(), 2);
+        m.groups = groups;
+        m.refine(&MeshOptions::default(), &SizeField::new(&boundary, 0.3))
+            .unwrap();
+        m.carve().unwrap();
+        // aire du polygone de cordes
+        let r = &rings[0];
+        let polygon: f64 = (0..r.len())
+            .map(|i| {
+                let (a, b) = (r[i].0, r[(i + 1) % r.len()].0);
+                a[0] * b[1] - a[1] * b[0]
+            })
+            .sum::<f64>()
+            / 2.0;
+        let area: f64 =
+            m.d.inside_triangles()
+                .iter()
+                .map(|t| {
+                    let [a, b, c] = t.map(|v| m.d.point(v));
+                    ((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])) / 2.0
+                })
+                .sum();
+        assert!((area - polygon).abs() < 1e-12, "{area} {polygon}");
+    }
 
     #[test]
     fn circumcenter_is_equidistant() {
