@@ -4,7 +4,8 @@ use crate::element::{
     plane_stresses, plane_thermal_load, solid_d, solid_gauss, solid_response, solid_stiffness,
     solid_stresses, solid_thermal_load, ElementResponse, GaussData,
 };
-use crate::finite_strain::{large_strain_response, SaintVenantKirchhoff};
+use crate::finite_strain::{lame, large_strain_response, LargeStrainLaw};
+use crate::material::Hyperelasticity;
 use crate::material::Material;
 use crate::mesh::{Element, Mesh, PlaneState, Tet10, Tet4, Tri3, Tri6};
 use crate::plasticity::{PlasticState, VonMises};
@@ -49,9 +50,14 @@ fn von_mises(material: &Material) -> VonMises {
     }
 }
 
-/// Loi de Saint-Venant–Kirchhoff du Material (E et ν garantis par `Model::new`).
-fn saint_venant_kirchhoff(material: &Material) -> SaintVenantKirchhoff {
-    SaintVenantKirchhoff::new(young(material), material.poisson.unwrap_or(0.0))
+/// Loi de grandes déformations du Material (E et ν garantis par `Model::new`) : néo-Hookéen si le
+/// Material le demande, sinon Saint-Venant–Kirchhoff.
+fn large_strain_law(material: &Material) -> LargeStrainLaw {
+    let (lambda, mu) = lame(young(material), material.poisson.unwrap_or(0.0));
+    match material.hyperelasticity {
+        Some(Hyperelasticity::NeoHookean) => LargeStrainLaw::NeoHookean { lambda, mu },
+        None => LargeStrainLaw::SaintVenantKirchhoff { lambda, mu },
+    }
 }
 
 /// Matrice de rigidité de l'Element `i`, DOF dans l'ordre de `element_dofs`.
@@ -158,7 +164,7 @@ impl<'a> PlaneKernel<'a> {
     fn large_response(&self, mesh: &Mesh, u: &[f64]) -> ElementResponse {
         large_strain_response(
             &self.gauss(mesh),
-            &saint_venant_kirchhoff(self.material),
+            &large_strain_law(self.material),
             &self.displacements(u),
         )
     }
@@ -265,7 +271,7 @@ impl<'a> SolidKernel<'a> {
     fn large_response(&self, mesh: &Mesh, u: &[f64]) -> ElementResponse {
         large_strain_response(
             &self.gauss(mesh),
-            &saint_venant_kirchhoff(self.material),
+            &large_strain_law(self.material),
             &self.displacements(u),
         )
     }
@@ -667,6 +673,155 @@ pub fn face_pressure(mesh: &Mesh, i: usize, face: usize, value: f64) -> Option<F
     })
 }
 
+/// Pression suiveuse sur une face : forces f_a = −p ∫ N_a n dS sur la face déformée, et leur raideur
+/// ∂f/∂x. Les deux sont indexées comme `FacePressure` (`dim` composantes par Node de la face).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FollowerPressure {
+    pub positions: Vec<usize>,
+    pub dim: usize,
+    pub forces: Vec<f64>,
+    /// ∂f_(a,c) / ∂x_(b,k), non symétrique en général.
+    pub stiffness: Vec<Vec<f64>>,
+}
+
+/// Symbole de Levi-Civita ε_ijk, pour des indices de 0 à 2.
+fn levi_civita(i: usize, j: usize, k: usize) -> f64 {
+    let (i, j, k) = (i as f64, j as f64, k as f64);
+    (i - j) * (j - k) * (k - i) / 2.0
+}
+
+/// Pression `value` suiveuse sur la face `face` de l'Element `i`, aux déplacements globaux `u` :
+/// n dS = x,ξ × x,η dξ dη (3D) ou (y,s, −x,s) ds (2D) sur la face déformée, orientée vers l'extérieur
+/// comme dans `face_pressure`. `None` si la face n'existe pas ou pour une Bar ou une Beam.
+pub fn follower_pressure(
+    mesh: &Mesh,
+    i: usize,
+    face: usize,
+    value: f64,
+    u: &[f64],
+) -> Option<FollowerPressure> {
+    let FaceRule {
+        positions, normal, ..
+    } = face_rule(mesh, i, face)?;
+    let e = &mesh.elements[i];
+    let nodes: Vec<usize> = positions.iter().map(|&k| e.nodes()[k]).collect();
+    let m = nodes.len();
+    let (dim, thickness) = match e {
+        Element::Tri3(Tri3 { thickness, .. }) | Element::Tri6(Tri6 { thickness, .. }) => {
+            (2, *thickness)
+        }
+        _ => (3, 1.0),
+    };
+    let reference: Vec<[f64; 3]> = mesh.coords_3d(&nodes);
+    let current: Vec<[f64; 3]> = nodes
+        .iter()
+        .zip(&reference)
+        .map(|(&n, x)| std::array::from_fn(|c| if c < dim { x[c] + u[dim * n + c] } else { x[c] }))
+        .collect();
+    // (poids, N, dérivées de N par rapport aux coordonnées de la face) aux points de Gauss
+    let points: Vec<(f64, Vec<f64>, Vec<[f64; 2]>)> = if dim == 2 {
+        let linear = m == 2;
+        let rule: &[LinePoint] = if linear { &LINE_2 } else { &LINE_3 };
+        rule.iter()
+            .map(|p| {
+                let (n, dn) = if linear {
+                    (line2(p.s), vec![[-1.0, 0.0], [1.0, 0.0]])
+                } else {
+                    (
+                        line3(p.s),
+                        vec![
+                            [4.0 * p.s - 3.0, 0.0],
+                            [4.0 * p.s - 1.0, 0.0],
+                            [4.0 - 8.0 * p.s, 0.0],
+                        ],
+                    )
+                };
+                (p.weight * thickness, n, dn)
+            })
+            .collect()
+    } else {
+        let (rule, shape): (&[GaussPoint], ShapeFn) = if m == 3 {
+            (&TRIANGLE_3, tri3_vec)
+        } else {
+            (&TRIANGLE_6, tri6_vec)
+        };
+        rule.iter()
+            .map(|g| {
+                let (n, dn) = shape(g.xi, g.eta);
+                (g.weight, n, dn)
+            })
+            .collect()
+    };
+    // n dS : (y,s, −x,s) en 2D, x,ξ × x,η en 3D, avec la dérivée par Node `dn`
+    let tangents = |x: &[[f64; 3]], dn: &[[f64; 2]]| -> ([f64; 3], [f64; 3]) {
+        let sum = |d: usize| -> [f64; 3] {
+            std::array::from_fn(|c| dn.iter().zip(x).map(|(g, x)| g[d] * x[c]).sum())
+        };
+        (sum(0), sum(1))
+    };
+    let area_vector = |a: [f64; 3], b: [f64; 3]| -> [f64; 3] {
+        if dim == 2 {
+            [a[1], -a[0], 0.0]
+        } else {
+            [
+                a[1] * b[2] - a[2] * b[1],
+                a[2] * b[0] - a[0] * b[2],
+                a[0] * b[1] - a[1] * b[0],
+            ]
+        }
+    };
+    let (a0, b0) = tangents(&reference, &points[0].2);
+    let along: f64 = area_vector(a0, b0)
+        .iter()
+        .zip(&normal)
+        .map(|(a, b)| a * b)
+        .sum();
+    let sign = if along < 0.0 { -1.0 } else { 1.0 };
+
+    let mut forces = vec![0.0; dim * m];
+    let mut stiffness = vec![vec![0.0; dim * m]; dim * m];
+    for (weight, n, dn) in &points {
+        let (xi, eta) = tangents(&current, dn);
+        let area = area_vector(xi, eta);
+        let w = -value * sign * weight;
+        for (a, na) in n.iter().enumerate() {
+            for c in 0..dim {
+                forces[dim * a + c] += w * na * area[c];
+            }
+        }
+        // ∂(n dS)_c / ∂x_(b,k) : 2D, (y,s, −x,s) ; 3D, ε_ckl ξ_b η_l + ε_cjk ξ_j η_b
+        for (b, g) in dn.iter().enumerate() {
+            for c in 0..dim {
+                for k in 0..dim {
+                    let d = if dim == 2 {
+                        match (c, k) {
+                            (0, 1) => g[0],
+                            (1, 0) => -g[0],
+                            _ => 0.0,
+                        }
+                    } else {
+                        (0..3)
+                            .map(|l| {
+                                levi_civita(c, k, l) * g[0] * eta[l]
+                                    + levi_civita(c, l, k) * xi[l] * g[1]
+                            })
+                            .sum()
+                    };
+                    for (a, na) in n.iter().enumerate() {
+                        stiffness[dim * a + c][dim * b + k] += w * na * d;
+                    }
+                }
+            }
+        }
+    }
+    Some(FollowerPressure {
+        positions,
+        dim,
+        forces,
+        stiffness,
+    })
+}
+
 #[cfg(test)]
 mod capacity_tests {
     use super::*;
@@ -916,8 +1071,9 @@ mod response_tests {
 
     #[test]
     fn large_tangent_is_the_derivative_of_the_internal_forces() {
-        let material = Material::with_poisson(210e3, 0.3).unwrap();
-        for (name, mesh) in meshes(material) {
+        let elastic = Material::with_poisson(210e3, 0.3).unwrap();
+        let neo_hookean = elastic.with_hyperelasticity(Hyperelasticity::NeoHookean);
+        for (name, mesh) in [elastic, neo_hookean].into_iter().flat_map(meshes) {
             // déformations de l'ordre de 10 à 20 % : loin du domaine linéaire
             let u: Vec<f64> = displacements(&mesh).iter().map(|u| 40.0 * u).collect();
             let r = element_large_response(&mesh, 0, &u);
@@ -937,6 +1093,60 @@ mod response_tests {
                         row[j]
                     );
                     assert!((row[j] - r.tangent[j][i]).abs() < 1e-9 * scale, "{name}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn follower_pressure_stiffness_is_the_derivative_of_its_forces() {
+        let material = Material::with_poisson(210e3, 0.3).unwrap();
+        for (name, mesh) in meshes(material) {
+            let u: Vec<f64> = displacements(&mesh).iter().map(|u| 20.0 * u).collect();
+            let faces = if mesh.dofs_per_node() == 2 { 3 } else { 4 };
+            for face in 0..faces {
+                let t = follower_pressure(&mesh, 0, face, 2.0, &u).unwrap();
+                let dim = t.dim;
+                let h = 1e-7;
+                for (b, &pb) in t.positions.iter().enumerate() {
+                    for k in 0..dim {
+                        let node = mesh.elements[0].nodes()[pb];
+                        let (mut plus, mut minus) = (u.clone(), u.clone());
+                        plus[dim * node + k] += h;
+                        minus[dim * node + k] -= h;
+                        let fp = follower_pressure(&mesh, 0, face, 2.0, &plus)
+                            .unwrap()
+                            .forces;
+                        let fm = follower_pressure(&mesh, 0, face, 2.0, &minus)
+                            .unwrap()
+                            .forces;
+                        for (row, (p, m)) in fp.iter().zip(&fm).enumerate() {
+                            let numeric = (p - m) / (2.0 * h);
+                            let got = t.stiffness[row][dim * b + k];
+                            assert!(
+                                (got - numeric).abs() < 1e-6 * (1.0 + numeric.abs()),
+                                "{name}, face {face} : K[{row}][{}] = {got} au lieu de {numeric}",
+                                dim * b + k
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn follower_pressure_at_rest_is_the_dead_pressure() {
+        let material = Material::with_poisson(210e3, 0.3).unwrap();
+        for (name, mesh) in meshes(material) {
+            let zero = vec![0.0; mesh.nodes.len() * mesh.dofs_per_node()];
+            let faces = if mesh.dofs_per_node() == 2 { 3 } else { 4 };
+            for face in 0..faces {
+                let dead = face_pressure(&mesh, 0, face, 2.0).unwrap();
+                let follower = follower_pressure(&mesh, 0, face, 2.0, &zero).unwrap();
+                assert_eq!(dead.positions, follower.positions, "{name}");
+                for (a, b) in dead.forces.iter().zip(&follower.forces) {
+                    assert!((a - b).abs() < 1e-12, "{name}, face {face} : {a} et {b}");
                 }
             }
         }

@@ -29,6 +29,16 @@ pub struct Material {
     pub expansion: Option<f64>,
     /// Plasticité de von Mises, absente pour un Material élastique.
     pub plasticity: Option<Plasticity>,
+    /// Loi hyperélastique en grandes déformations, absente : Saint-Venant–Kirchhoff.
+    pub hyperelasticity: Option<Hyperelasticity>,
+}
+
+/// Loi hyperélastique d'un Material en grandes déformations (`Kinematics::Large`), de paramètres
+/// λ et μ tirés de E et ν. Sans elle, la loi est Saint-Venant–Kirchhoff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hyperelasticity {
+    /// Néo-Hookéen compressible : W = μ/2 (I₁ − 3) − μ ln J + λ/2 (ln J)².
+    NeoHookean,
 }
 
 /// Plasticité de von Mises à écrouissage isotrope linéaire : limite d'élasticité σy(p) = σy0 + H p,
@@ -53,6 +63,7 @@ impl Material {
             specific_heat: None,
             expansion: None,
             plasticity: None,
+            hyperelasticity: None,
         })
     }
 
@@ -66,6 +77,7 @@ impl Material {
             specific_heat: None,
             expansion: None,
             plasticity: None,
+            hyperelasticity: None,
         })
     }
 
@@ -118,6 +130,15 @@ impl Material {
             }),
             ..self
         })
+    }
+
+    /// Loi hyperélastique du Material (E et ν requis) : voir `Hyperelasticity`. Pas de plasticité en
+    /// grandes déformations, donc ni les deux ensemble.
+    pub fn with_hyperelasticity(self, law: Hyperelasticity) -> Self {
+        Self {
+            hyperelasticity: Some(law),
+            ..self
+        }
     }
 
     /// Matériau élastique isotrope pour les triangles et tétraèdres, avec −1 < ν < 0,5.

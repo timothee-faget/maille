@@ -4,7 +4,7 @@ use crate::assembly::{
     element_capacity, element_conduction, element_dofs, element_gauss_count,
     element_heat_flux_operator, element_heat_source, element_large_response, element_response,
     element_stiffness, element_stresses, element_thermal_load, element_thermal_strains,
-    face_convection, face_pressure, FaceConvection, FluxOperator,
+    face_convection, face_pressure, follower_pressure, FaceConvection, FluxOperator,
 };
 use crate::element::{bar_equivalent_load, beam_equivalent_load, ElementResponse};
 use crate::error::MailleError;
@@ -88,8 +88,9 @@ pub enum Kinematics {
     /// Petites déformations : équilibre écrit sur la configuration de départ, déformation linéarisée.
     #[default]
     Small,
-    /// Grandes déformations : Lagrangien total, loi de Saint-Venant–Kirchhoff, contraintes de Cauchy
-    /// en sortie. Par `Model::solve_quasi_static` seulement.
+    /// Grandes déformations : Lagrangien total, loi de Saint-Venant–Kirchhoff (ou néo-Hookéen,
+    /// `Material::with_hyperelasticity`), contraintes de Cauchy en sortie, pression suiveuse. Par
+    /// `Model::solve_quasi_static` seulement.
     Large,
 }
 
@@ -295,7 +296,8 @@ impl Model {
 
     /// Cinématique du calcul statique (`Kinematics::Small` par défaut). `Large` : grandes
     /// déformations, par `solve_quasi_static` seulement, sur des triangles en déformations planes et des
-    /// tétraèdres, sans plasticité, sans champ de températures et sans Pressure.
+    /// tétraèdres, sans plasticité et sans champ de températures. Une Pressure y reste normale à la face
+    /// déformée (pression suiveuse).
     pub fn with_kinematics(self, kinematics: Kinematics) -> Result<Self, MailleError> {
         if kinematics == Kinematics::Large {
             if self.analysis != Analysis::Static {
@@ -311,9 +313,6 @@ impl Model {
             }
             if self.temperatures.is_some() {
                 return Err(MailleError::LargeStrainWithTemperatures);
-            }
-            if !self.pressures.is_empty() {
-                return Err(MailleError::LargeStrainWithPressure);
             }
         }
         Ok(Self { kinematics, ..self })
@@ -374,9 +373,6 @@ impl Model {
     pub fn with_pressures(mut self, pressures: Vec<Pressure>) -> Result<Self, MailleError> {
         if self.analysis != Analysis::Static {
             return Err(MailleError::PressureStaticOnly);
-        }
-        if self.kinematics == Kinematics::Large && !pressures.is_empty() {
-            return Err(MailleError::LargeStrainWithPressure);
         }
         for p in &pressures {
             let e = self.element(p.element)?;
@@ -462,6 +458,7 @@ impl Model {
         if self.kinematics == Kinematics::Large {
             return Err(MailleError::LargeStrainNeedsQuasiStatic);
         }
+        self.require_small_strain_laws()?;
         let mesh = &self.mesh;
         if let Some(i) = mesh
             .elements
@@ -598,6 +595,8 @@ impl Model {
     /// gardé qu'à la convergence. Renvoie l'incrément t = 0 (Mesh au repos), puis un par pas.
     /// Réactions : F_int − λ F aux DOF imposés.
     ///
+    /// Si Newton ne converge pas, l'incrément est coupé en deux, jusqu'à 5 fois (voir `advance`).
+    ///
     /// Triangles en déformations planes et tétraèdres seulement, sans champ de températures. Un
     /// Material sans `Plasticity` reste élastique : le résultat est alors celui de `solve` mis à
     /// l'échelle par λ, chaque incrément convergeant en une itération.
@@ -609,6 +608,9 @@ impl Model {
         if self.analysis != Analysis::Static {
             return Err(MailleError::StaticOnly);
         }
+        if self.kinematics == Kinematics::Small {
+            self.require_small_strain_laws()?;
+        }
         if self.temperatures.is_some() {
             return Err(MailleError::QuasiStaticWithTemperatures);
         }
@@ -617,39 +619,137 @@ impl Model {
             return Err(MailleError::UnsupportedPlasticElement { element: i });
         }
         let a = self.assemble()?;
-        let mut committed: Vec<Vec<PlasticState>> = (0..mesh.elements.len())
+        let committed: Vec<Vec<PlasticState>> = (0..mesh.elements.len())
             .map(|i| vec![PlasticState::default(); element_gauss_count(mesh, i)])
             .collect();
-        let mut u = vec![0.0; a.f.len()];
-        let at_rest = self.responses(&u, &committed);
+        let mut state = QuasiStaticState {
+            u: vec![0.0; a.f.len()],
+            committed,
+            // échelle des forces : la plus grande norme de F_int ou de λ F vue depuis le début de la
+            // Step (F_int contient les réactions, la référence reste non nulle sous déplacement
+            // imposé et quand la décharge ramène les forces à zéro)
+            scale: 0.0,
+        };
+        let at_rest = self.responses(&state.u, &state.committed);
         let mut history = vec![Increment {
             time: 0.0,
-            field: quasi_static_field(u.clone(), vec![0.0; a.f.len()], at_rest),
+            field: quasi_static_field(state.u.clone(), vec![0.0; a.f.len()], at_rest),
             residuals: Vec::new(),
         }];
-        // échelle des forces : la plus grande norme de F_int ou de λ F vue depuis le début de la Step
-        // (F_int contient les réactions, la référence reste non nulle sous déplacement imposé et
-        // quand la décharge ramène les forces à zéro)
-        let mut scale = 0.0;
         for increment in 1..=step.increments() {
             let time = increment as f64 * step.time_step();
-            let lambda = amplitude.at(time);
-            let (responses, reactions, residuals) = self.equilibrium(
+            let start = time - step.time_step();
+            let (responses, reactions, residuals) = self.advance(
                 &a,
-                &committed,
-                &mut u,
-                lambda,
-                &mut scale,
+                amplitude,
+                &mut state,
+                (start, time),
+                0,
                 (increment, time),
             )?;
-            committed = responses.iter().map(|r| r.states.clone()).collect();
             history.push(Increment {
                 time,
-                field: quasi_static_field(u.clone(), reactions, responses),
+                field: quasi_static_field(state.u.clone(), reactions, responses),
                 residuals,
             });
         }
         Ok(history)
+    }
+
+    /// Mène l'état de l'instant `t0` à `t1` : un Newton-Raphson, et si Newton ne converge pas ou si la
+    /// tangente n'est pas définie positive (incrément trop grand, flambement), deux moitiés de l'intervalle
+    /// l'une après l'autre, jusqu'à `MAX_CUTS` fois (1/32 de l'incrément). Seuls les Increments de la
+    /// Step sont gardés ; en cas de coupe, les résidus rendus sont ceux de la dernière moitié.
+    /// L'état n'est modifié qu'aux convergences.
+    fn advance(
+        &self,
+        a: &Assembly,
+        amplitude: &Amplitude,
+        state: &mut QuasiStaticState,
+        (t0, t1): (f64, f64),
+        cuts: usize,
+        at: (usize, f64),
+    ) -> Result<Equilibrium, MailleError> {
+        let mut trial = state.u.clone();
+        let mut scale = state.scale;
+        let attempt = self.equilibrium(
+            a,
+            &state.committed,
+            &mut trial,
+            amplitude.at(t1),
+            &mut scale,
+            at,
+        );
+        match attempt {
+            Ok(equilibrium) => {
+                state.u = trial;
+                state.scale = scale;
+                state.committed = equilibrium.0.iter().map(|r| r.states.clone()).collect();
+                Ok(equilibrium)
+            }
+            Err(
+                MailleError::NotConverged { .. }
+                | MailleError::Singular
+                | MailleError::PlasticCollapse { .. },
+            ) if cuts < MAX_CUTS => {
+                let middle = (t0 + t1) / 2.0;
+                self.advance(a, amplitude, state, (t0, middle), cuts + 1, at)?;
+                self.advance(a, amplitude, state, (middle, t1), cuts + 1, at)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Le Material hyperélastique n'existe qu'en grandes déformations.
+    fn require_small_strain_laws(&self) -> Result<(), MailleError> {
+        match self
+            .mesh
+            .elements
+            .iter()
+            .position(|e| e.material().hyperelasticity.is_some())
+        {
+            Some(element) => Err(MailleError::HyperelasticityNeedsLargeStrain { element }),
+            None => Ok(()),
+        }
+    }
+
+    /// Forces des Pressure suiveuses (grandes déformations) aux déplacements `u`, par unité de λ ; leur
+    /// raideur symétrisée, dont le Newton retranche λ ∂f/∂u, est ajoutée à la tangente des
+    /// `responses`. La partie antisymétrique est abandonnée pour rester sur Cholesky et les gradients
+    /// conjugués : la convergence n'est plus quadratique quand la pression domine.
+    fn follower_force(
+        &self,
+        a: &Assembly,
+        u: &[f64],
+        lambda: f64,
+        responses: &mut [ElementResponse],
+    ) -> Vec<f64> {
+        let mut f = vec![0.0; u.len()];
+        if self.kinematics == Kinematics::Small {
+            return f;
+        }
+        for p in &self.pressures {
+            let Some(t) = follower_pressure(&self.mesh, p.element, p.face, p.value, u) else {
+                continue;
+            };
+            let dofs = &a.dofs[p.element];
+            let local = |k: usize, c: usize| t.dim * t.positions[k] + c;
+            for k in 0..t.positions.len() {
+                for c in 0..t.dim {
+                    f[dofs[local(k, c)]] += t.forces[t.dim * k + c];
+                }
+            }
+            let tangent = &mut responses[p.element].tangent;
+            let n = t.positions.len() * t.dim;
+            for row in 0..n {
+                for col in 0..n {
+                    let sym = 0.5 * (t.stiffness[row][col] + t.stiffness[col][row]);
+                    tangent[local(row / t.dim, row % t.dim)][local(col / t.dim, col % t.dim)] -=
+                        lambda * sym;
+                }
+            }
+        }
+        f
     }
 
     /// Newton-Raphson d'un incrément : part de `u` (équilibre de l'incrément précédent, états
@@ -665,10 +765,15 @@ impl Model {
         scale: &mut f64,
         (increment, time): (usize, f64),
     ) -> Result<Equilibrium, MailleError> {
-        let external: Vec<f64> = a.f.iter().map(|f| lambda * f).collect();
         let mut residuals = Vec::new();
         loop {
-            let responses = self.responses(u, committed);
+            let mut responses = self.responses(u, committed);
+            let follower = self.follower_force(a, u, lambda, &mut responses);
+            let external: Vec<f64> =
+                a.f.iter()
+                    .zip(&follower)
+                    .map(|(f, p)| lambda * (f + p))
+                    .collect();
             let internal = internal_force(&responses, &a.dofs, u.len());
             let residual: Vec<f64> = internal.iter().zip(&external).map(|(i, e)| i - e).collect();
             *scale = scale
@@ -778,7 +883,12 @@ impl Model {
                 f[g] += v;
             }
         }
-        for p in &self.pressures {
+        // en grandes déformations, la pression suit la face : elle dépend de u (`follower_force`)
+        for p in self
+            .pressures
+            .iter()
+            .filter(|_| self.kinematics == Kinematics::Small)
+        {
             if let Some(terms) = face_pressure(mesh, p.element, p.face, p.value) {
                 terms.add_load(&dofs[p.element], &mut f);
             }
@@ -805,6 +915,13 @@ impl Model {
     }
 }
 
+/// Ce que `solve_quasi_static` porte d'un incrément à l'autre.
+struct QuasiStaticState {
+    u: Vec<f64>,
+    committed: Vec<Vec<PlasticState>>,
+    scale: f64,
+}
+
 /// Équilibre d'un incrément : réponses des Elements, réactions, résidus relatifs.
 type Equilibrium = (Vec<ElementResponse>, Vec<f64>, Vec<f64>);
 
@@ -812,6 +929,8 @@ type Equilibrium = (Vec<ElementResponse>, Vec<f64>, Vec<f64>);
 const NEWTON_TOLERANCE: f64 = 1e-8;
 /// Nombre maximal d'itérations de Newton-Raphson par incrément.
 const NEWTON_ITERATIONS: usize = 25;
+/// Nombre maximal de coupes de l'incrément par deux (1/32 de l'incrément au plus petit).
+const MAX_CUTS: usize = 5;
 
 /// Triangle en déformations planes ou tétraèdre : les Elements du calcul élasto-plastique.
 fn elastoplastic(e: &Element) -> bool {

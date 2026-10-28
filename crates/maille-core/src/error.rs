@@ -124,8 +124,10 @@ pub enum MailleError {
     },
     /// Champ de températures en grandes déformations.
     LargeStrainWithTemperatures,
-    /// Pression en grandes déformations (la pression suiveuse n'est pas encore gérée).
-    LargeStrainWithPressure,
+    /// Loi hyperélastique (néo-Hookéen) avec `Kinematics::Small`.
+    HyperelasticityNeedsLargeStrain {
+        element: usize,
+    },
     /// `Model::solve` (linéaire) avec `Kinematics::Large`.
     LargeStrainNeedsQuasiStatic,
     /// Newton-Raphson n'a pas trouvé l'équilibre de l'incrément `increment` (temps `time`).
@@ -368,9 +370,9 @@ impl fmt::Display for MailleError {
                 f,
                 "les grandes déformations ne prennent pas de champ de températures : retirer with_temperatures ou utiliser Kinematics::Small"
             ),
-            Self::LargeStrainWithPressure => write!(
+            Self::HyperelasticityNeedsLargeStrain { element } => write!(
                 f,
-                "les grandes déformations ne prennent pas encore de Pressure (la pression suiveuse viendra) : retirer with_pressures, la remplacer par des Load, ou utiliser Kinematics::Small"
+                "le Material de l'Element {element} est hyperélastique (néo-Hookéen) : la loi n'existe qu'en grandes déformations, utiliser Model::with_kinematics(Kinematics::Large)"
             ),
             Self::LargeStrainNeedsQuasiStatic => write!(
                 f,
@@ -378,7 +380,7 @@ impl fmt::Display for MailleError {
             ),
             Self::NotConverged { increment, time } => write!(
                 f,
-                "Newton-Raphson ne converge pas à l'incrément {increment} (t = {time}) : augmenter le nombre d'incréments de la Step. Si la plasticité est parfaite (H = 0), la charge dépasse peut-être la charge limite de la structure"
+                "Newton-Raphson ne converge pas à l'incrément {increment} (t = {time}) : augmenter le nombre d'incréments de la Step, ou réduire la charge. Si la plasticité est parfaite (H = 0), la charge dépasse peut-être la charge limite de la structure ; en grandes déformations, la structure flambe peut-être (ou ses Elements se retournent : mailler plus fin)"
             ),
             Self::PlasticCollapse { increment, time } => write!(
                 f,

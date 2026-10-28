@@ -1,8 +1,8 @@
-//! Grandes déformations : Lagrangien total, loi de Saint-Venant–Kirchhoff.
+//! Grandes déformations : Lagrangien total, loi de Saint-Venant–Kirchhoff ou néo-Hookéen.
 //!
 //! Tout est intégré sur la configuration de départ (points de Gauss et fonctions de forme inchangés).
 //! Gradient de la transformation F = I + ∇₀u, déformation de Green-Lagrange E = ½ (FᵀF − I),
-//! second tenseur de Piola-Kirchhoff S = λ tr(E) I + 2μ E. Forces internes f = ∫ P ∇₀N dV₀ avec
+//! second tenseur de Piola-Kirchhoff S = ∂W/∂E de la loi (`LargeStrainLaw`). Forces internes f = ∫ P ∇₀N dV₀ avec
 //! P = F S, tangente K = K_mat + K_géo (la raideur géométrique est le terme en S). Les contraintes
 //! sorties sont celles de Cauchy σ = J⁻¹ F S Fᵀ, sur la configuration déformée.
 //!
@@ -14,37 +14,75 @@ use crate::results::Stress;
 
 type Mat3 = [[f64; 3]; 3];
 
-/// Loi de Saint-Venant–Kirchhoff, de coefficients de Lamé λ et μ : Hooke écrite en E et S.
+/// Loi de grandes déformations, de coefficients de Lamé λ et μ.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct SaintVenantKirchhoff {
-    pub lambda: f64,
-    pub mu: f64,
+pub enum LargeStrainLaw {
+    /// Saint-Venant–Kirchhoff : S = λ tr(E) I + 2μ E (Hooke écrite en E et S).
+    SaintVenantKirchhoff { lambda: f64, mu: f64 },
+    /// Néo-Hookéen compressible : S = μ (I − C⁻¹) + λ ln J C⁻¹.
+    NeoHookean { lambda: f64, mu: f64 },
 }
 
-impl SaintVenantKirchhoff {
-    /// λ = E ν / ((1 + ν)(1 − 2ν)), μ = E / (2 (1 + ν)).
-    pub fn new(young: f64, poisson: f64) -> Self {
-        Self {
-            lambda: young * poisson / ((1.0 + poisson) * (1.0 - 2.0 * poisson)),
-            mu: young / (2.0 * (1.0 + poisson)),
-        }
-    }
+/// ∂S_IJ / ∂E_KL.
+type Modulus = [[[[f64; 3]; 3]; 3]; 3];
 
-    /// S = λ tr(E) I + 2μ E.
-    fn second_piola(&self, e: &Mat3) -> Mat3 {
-        let trace = e[0][0] + e[1][1] + e[2][2];
-        std::array::from_fn(|i| {
-            std::array::from_fn(|j| {
-                2.0 * self.mu * e[i][j] + if i == j { self.lambda * trace } else { 0.0 }
-            })
-        })
-    }
+/// (λ, μ) pour E et ν : λ = E ν / ((1 + ν)(1 − 2ν)), μ = E / (2 (1 + ν)).
+pub fn lame(young: f64, poisson: f64) -> (f64, f64) {
+    (
+        young * poisson / ((1.0 + poisson) * (1.0 - 2.0 * poisson)),
+        young / (2.0 * (1.0 + poisson)),
+    )
+}
 
-    /// Tenseur d'élasticité C_IJKL = ∂S_IJ / ∂E_KL = λ δIJ δKL + μ (δIK δJL + δIL δJK).
-    fn modulus(&self, i: usize, j: usize, k: usize, l: usize) -> f64 {
+impl LargeStrainLaw {
+    /// Second tenseur de Piola-Kirchhoff S et tenseur d'élasticité C_IJKL = ∂S_IJ / ∂E_KL en F. Non
+    /// fini quand le néo-Hookéen reçoit J ≤ 0 (Element retourné) : Newton-Raphson le refuse.
+    fn evaluate(&self, f: &Mat3) -> (Mat3, Modulus) {
         let delta = |a: usize, b: usize| f64::from(u8::from(a == b));
-        self.lambda * delta(i, j) * delta(k, l)
-            + self.mu * (delta(i, k) * delta(j, l) + delta(i, l) * delta(j, k))
+        let c = mul(&transpose(f), f);
+        match *self {
+            Self::SaintVenantKirchhoff { lambda, mu } => {
+                let e: Mat3 =
+                    std::array::from_fn(|i| std::array::from_fn(|j| 0.5 * (c[i][j] - delta(i, j))));
+                let trace = e[0][0] + e[1][1] + e[2][2];
+                let s = std::array::from_fn(|i| {
+                    std::array::from_fn(|j| 2.0 * mu * e[i][j] + lambda * trace * delta(i, j))
+                });
+                let modulus = std::array::from_fn(|i| {
+                    std::array::from_fn(|j| {
+                        std::array::from_fn(|k| {
+                            std::array::from_fn(|l| {
+                                lambda * delta(i, j) * delta(k, l)
+                                    + mu * (delta(i, k) * delta(j, l) + delta(i, l) * delta(j, k))
+                            })
+                        })
+                    })
+                });
+                (s, modulus)
+            }
+            Self::NeoHookean { lambda, mu } => {
+                let log_j = det(f).ln();
+                let inv = inverse(&c);
+                let s = std::array::from_fn(|i| {
+                    std::array::from_fn(|j| {
+                        mu * (delta(i, j) - inv[i][j]) + lambda * log_j * inv[i][j]
+                    })
+                });
+                // C = λ C⁻¹ ⊗ C⁻¹ + (μ − λ ln J) (C⁻¹_IK C⁻¹_JL + C⁻¹_IL C⁻¹_JK)
+                let modulus = std::array::from_fn(|i| {
+                    std::array::from_fn(|j| {
+                        std::array::from_fn(|k| {
+                            std::array::from_fn(|l| {
+                                lambda * inv[i][j] * inv[k][l]
+                                    + (mu - lambda * log_j)
+                                        * (inv[i][k] * inv[j][l] + inv[i][l] * inv[j][k])
+                            })
+                        })
+                    })
+                });
+                (s, modulus)
+            }
+        }
     }
 }
 
@@ -62,6 +100,17 @@ fn det(a: &Mat3) -> f64 {
         + a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0])
 }
 
+fn inverse(a: &Mat3) -> Mat3 {
+    let d = det(a);
+    let cofactor = |i: usize, j: usize| {
+        let (r0, r1) = ((i + 1) % 3, (i + 2) % 3);
+        let (c0, c1) = ((j + 1) % 3, (j + 2) % 3);
+        a[r0][c0] * a[r1][c1] - a[r0][c1] * a[r1][c0]
+    };
+    // A⁻¹ = cofacteurs transposés / det
+    std::array::from_fn(|i| std::array::from_fn(|j| cofactor(j, i) / d))
+}
+
 /// Réponse d'un Element de dimension `D` (2 : triangle en déformations planes, 3 : tétraèdre) aux
 /// déplacements locaux `u_e` ((ux, uy[, uz]) par Node). Les `stresses` sont de Cauchy, positionnées
 /// sur la configuration déformée ; `states` est vide de plasticité (un état nul par point).
@@ -69,7 +118,7 @@ fn det(a: &Mat3) -> f64 {
 #[allow(clippy::needless_range_loop)]
 pub fn large_strain_response<const D: usize>(
     points: &[GaussData<D>],
-    law: &SaintVenantKirchhoff,
+    law: &LargeStrainLaw,
     u_e: &[f64],
 ) -> ElementResponse {
     let m = u_e.len();
@@ -90,11 +139,7 @@ pub fn large_strain_response<const D: usize>(
             }
         }
         let ft = transpose(&f);
-        let c = mul(&ft, &f);
-        let e: Mat3 = std::array::from_fn(|i| {
-            std::array::from_fn(|j| 0.5 * (c[i][j] - f64::from(u8::from(i == j))))
-        });
-        let s = law.second_piola(&e);
+        let (s, modulus) = law.evaluate(&f);
         let pk1 = mul(&f, &s);
 
         // A_iJkL = ∂P_iJ / ∂F_kL = δik S_JL + F_iI C_IJKL F_kK, pour i, k, J, L dans les D directions
@@ -107,7 +152,7 @@ pub fn large_strain_response<const D: usize>(
                         let mut material = 0.0;
                         for ii in 0..D {
                             for kk in 0..D {
-                                material += f[i][ii] * law.modulus(ii, j, kk, l) * f[k][kk];
+                                material += f[i][ii] * modulus[ii][j][kk][l] * f[k][kk];
                             }
                         }
                         let geometric = if i == k { s[j][l] } else { 0.0 };
