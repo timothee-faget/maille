@@ -20,6 +20,7 @@
 pub mod assembly;
 pub mod element;
 pub mod error;
+pub mod finite_strain;
 pub mod iterative;
 pub mod material;
 pub mod mesh;
