@@ -5,5 +5,6 @@
 /examples/*.vtu
 /examples/*.pvd
 
-# maillage généré par maille mesh tube3d.stl --size 2 --quadratic
+# maillages générés par maille mesh tube3d.stl et sphere.step --size 2 --quadratic
 /examples/tube3d.msh
+/examples/sphere.msh

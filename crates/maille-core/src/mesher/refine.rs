@@ -296,6 +296,8 @@ pub(crate) struct SizeField {
     points: Vec<([f64; 2], f64)>,
     max: f64,
     grading: f64,
+    /// Taille la plus grande en chaque point, quand la carte d'une face déforme les longueurs.
+    limit: Option<Box<dyn Fn([f64; 2]) -> f64>>,
 }
 
 impl SizeField {
@@ -310,14 +312,25 @@ impl SizeField {
             points,
             max,
             grading,
+            limit: None,
+        }
+    }
+
+    /// Le même champ, borné en chaque point par `limit`.
+    pub fn limited(self, limit: impl Fn([f64; 2]) -> f64 + 'static) -> Self {
+        Self {
+            limit: Some(Box::new(limit)),
+            ..self
         }
     }
 
     pub fn at(&self, x: [f64; 2]) -> f64 {
-        self.points
+        let h = self
+            .points
             .iter()
             .map(|&(p, h)| h + self.grading * distance(x, p))
-            .fold(self.max, f64::min)
+            .fold(self.max, f64::min);
+        self.limit.as_ref().map_or(h, |limit| h.min(limit(x)))
     }
 }
 
@@ -415,6 +428,7 @@ mod tests {
             points: vec![([0.0, 0.0], h)],
             max: h,
             grading: 0.3,
+            limit: None,
         };
         let sin25 = 25f64.to_radians().sin();
         // h(x) = h partout (h_max = h)

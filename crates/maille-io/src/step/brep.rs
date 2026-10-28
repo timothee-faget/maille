@@ -1,5 +1,6 @@
 //! Du contenu Part 21 à la `Brep` : le solide unique (MANIFOLD_SOLID_BREP), sa coque fermée, ses
-//! faces (ADVANCED_FACE) et leurs surfaces (PLANE, CYLINDRICAL_SURFACE, CONICAL_SURFACE), leurs
+//! faces (ADVANCED_FACE) et leurs surfaces (PLANE, CYLINDRICAL_SURFACE, CONICAL_SURFACE,
+//! SPHERICAL_SURFACE, TOROIDAL_SURFACE), leurs
 //! contours (EDGE_LOOP d'ORIENTED_EDGE), les arêtes (EDGE_CURVE) et leurs courbes (LINE, CIRCLE,
 //! ELLIPSE, B_SPLINE_CURVE_WITH_KNOTS, rationnelle ou non), puis l'unité de longueur du fichier.
 
@@ -224,9 +225,11 @@ impl<'a> Reader<'a> {
             }
         }
         outer.extend(inner);
+        let same = boolean(face.params.get(3), line, "sens de la face")?;
         let surface = self.surface(
             self.reference(&face.params, 2, line, "surface de la face")?,
             line,
+            same,
         )?;
         Ok(BrepFace {
             name,
@@ -235,8 +238,10 @@ impl<'a> Reader<'a> {
         })
     }
 
-    /// Surface d'une face : PLANE, CYLINDRICAL_SURFACE ou CONICAL_SURFACE.
-    fn surface(&self, id: u64, from: usize) -> Result<FaceSurface, IoError> {
+    /// Surface d'une face : PLANE, CYLINDRICAL_SURFACE, CONICAL_SURFACE, SPHERICAL_SURFACE ou
+    /// TOROIDAL_SURFACE. `same` : la normale de la face est celle de la surface (vers l'extérieur
+    /// pour une sphère, donc face bombée).
+    fn surface(&self, id: u64, from: usize, same: bool) -> Result<FaceSurface, IoError> {
         let i = self.p.get(id, from)?;
         let line = i.line;
         let frame = |r: &Record| -> Result<[[f64; 3]; 4], IoError> {
@@ -283,9 +288,32 @@ impl<'a> Reader<'a> {
                 half_angle,
             });
         }
+        if let Some(r) = i.record("SPHERICAL_SURFACE") {
+            let [center, ..] = frame(r)?;
+            let radius = positive(r.params.get(2), line, "rayon")?;
+            return Ok(FaceSurface::Sphere {
+                center,
+                radius,
+                convex: same,
+            });
+        }
+        if let Some(r) = i
+            .record("TOROIDAL_SURFACE")
+            .filter(|_| i.record("DEGENERATE_TOROIDAL_SURFACE").is_none())
+        {
+            let [center, _, _, axis] = frame(r)?;
+            let major = positive(r.params.get(2), line, "grand rayon")?;
+            let minor = positive(r.params.get(3), line, "petit rayon")?;
+            return Ok(FaceSurface::Torus {
+                center,
+                axis,
+                major,
+                minor,
+            });
+        }
         let names: Vec<&str> = i.records.iter().map(|r| r.name.as_str()).collect();
         Err(error(format!(
-            "ligne {line} : face sur une surface {} pas encore prise en charge (Maille lit PLANE, CYLINDRICAL_SURFACE et CONICAL_SURFACE)",
+            "ligne {line} : face sur une surface {} pas encore prise en charge (Maille lit PLANE, CYLINDRICAL_SURFACE, CONICAL_SURFACE, SPHERICAL_SURFACE et TOROIDAL_SURFACE)",
             names.join(" + ")
         )))
     }

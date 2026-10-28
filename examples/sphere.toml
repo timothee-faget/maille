@@ -1,0 +1,45 @@
+# Sphère creuse sous pression, en 3D : un huitième de sphère maillé en tétraèdres depuis un STEP.
+#
+# Rayon intérieur 10 mm, extérieur 20 mm, faces sphériques exactes : 100 MPa de pression à
+# l'intérieur, 20 MPa à l'extérieur, les trois plans de coupe en appui glissant. Solution de Lamé
+# pour la sphère : u_r = (1 − 2ν)/E · C r + (1 + ν)/(2E) · D / r², avec
+# C = (pi a³ − pe b³)/(b³ − a³) et D = (pi − pe) a³ b³/(b³ − a³).
+#
+# Lancer : maille mesh sphere.step --size 2 --quadratic    (écrit sphere.msh, en Tet10)
+#          maille solve sphere.toml                         puis : maille view sphere.pvd
+
+units = "N, mm, MPa"
+mesh = "sphere.msh"
+analysis = "static"
+
+[materials.acier]
+young = 210e3
+poisson = 0.3
+
+[[sections]]
+set = "domaine"
+material = "acier"
+
+# Symétries : chaque plan de coupe ne bouge pas dans sa normale.
+[[bcs]]
+set = "sym_x"
+dof = "ux"
+value = 0.0
+
+[[bcs]]
+set = "sym_y"
+dof = "uy"
+value = 0.0
+
+[[bcs]]
+set = "sym_z"
+dof = "uz"
+value = 0.0
+
+[[pressures]]
+set = "interieur"
+value = 100.0
+
+[[pressures]]
+set = "exterieur"
+value = 20.0

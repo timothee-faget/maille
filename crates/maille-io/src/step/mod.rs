@@ -13,7 +13,8 @@ use crate::IoError;
 pub use maille_core::mesher::{BSpline, Brep, BrepEdge, BrepFace, EdgeCurve, FaceSurface};
 
 /// Lit un fichier STEP texte (AP203, AP214, AP242) : un seul solide (MANIFOLD_SOLID_BREP), sa
-/// coque fermée, ses faces, leurs surfaces (PLANE, CYLINDRICAL_SURFACE, CONICAL_SURFACE) et leurs
+/// coque fermée, ses faces, leurs surfaces (PLANE, CYLINDRICAL_SURFACE, CONICAL_SURFACE,
+/// SPHERICAL_SURFACE, TOROIDAL_SURFACE) et leurs
 /// contours, les arêtes et leurs courbes (LINE, CIRCLE, ELLIPSE, B_SPLINE_CURVE_WITH_KNOTS,
 /// rationnelle ou non). Renvoie la pièce et l'unité de longueur du fichier (`mm`, `m`, `inch`…,
 /// ou `inconnue`) ; les angles sont convertis en radians.
