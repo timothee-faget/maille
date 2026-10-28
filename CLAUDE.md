@@ -82,6 +82,10 @@ un `solid` du STL ou une zone limitée par des arêtes vives, `surface_1`, `surf
 Triangulation en 2D). **TetOptions** (M10b : `size` = taille h optionnelle, `grading` ; `tetrahedralize(&surface, &options)`) :
 avec une taille h, la surface est remaillée facette par facette puis l'intérieur raffiné ; `None` garde la finesse du STL.
 Une **facette** est un morceau plan et connexe d'un Patch (interne au mailleur, ce n'est pas un Set).
+Import STEP (M11) : **Brep** (pièce d'un seul solide lue d'un STEP : sommets, arêtes, faces ; `maille_io::step::read_brep`
+la donne avec l'unité de longueur du fichier, sans rien convertir), **BrepFace** (face de la pièce, à ne pas confondre avec
+la face d'un Element ; son nom devient un Patch), **BrepEdge** (arête entre deux sommets), **EdgeCurve** (courbe d'une arête :
+segment, arc de cercle ou d'ellipse, morceau de **BSpline** ; ce n'est pas la Curve 2D du mailleur).
 Solveur (M8) : **SolverKind** (`Auto` / `Direct` / `Iterative`, `Model::with_solver`) : le Cholesky en ligne de ciel (direct) ou les gradients conjugués préconditionnés par un Cholesky incomplet IC(0) (itératif). Ce n'est pas un trait : deux solveurs, un `enum`.
 Pression (M7b) : **Pressure** (pression uniforme sur une face d'Element, `with_pressures`, statique ; positive, elle comprime). Distincte de la **Convection** (thermique) et du **Load** (force par Node).
 Fichiers (M7) : **Set** (ensemble nommé de Nodes, de faces ou d'Elements : un groupe physique de Gmsh), **MshFile**

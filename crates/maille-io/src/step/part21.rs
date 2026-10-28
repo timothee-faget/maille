@@ -10,7 +10,7 @@ use crate::IoError;
 
 /// Contenu d'un fichier Part 21.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Part21 {
+pub(super) struct Part21 {
     /// Schémas de `FILE_SCHEMA`, par exemple `AUTOMOTIVE_DESIGN { 1 0 10303 214 1 1 1 1 }` (AP214).
     pub schemas: Vec<String>,
     /// Instances de la section DATA, par numéro.
@@ -20,7 +20,7 @@ pub(crate) struct Part21 {
 /// Instance `#n` : un enregistrement (instance simple) ou plusieurs (instance complexe, dans
 /// l'ordre du fichier).
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Instance {
+pub(super) struct Instance {
     /// Ligne de `#n` dans le fichier, pour les messages d'erreur.
     pub line: usize,
     pub records: Vec<Record>,
@@ -28,14 +28,14 @@ pub(crate) struct Instance {
 
 /// `NOM(paramètres)`.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Record {
+pub(super) struct Record {
     pub name: String,
     pub params: Vec<Value>,
 }
 
 /// Paramètre d'un enregistrement.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum Value {
+pub(super) enum Value {
     Integer(i64),
     Real(f64),
     String(String),
@@ -73,7 +73,7 @@ impl Instance {
 }
 
 /// Lit un fichier Part 21.
-pub(crate) fn parse(text: &str) -> Result<Part21, IoError> {
+pub(super) fn parse(text: &str) -> Result<Part21, IoError> {
     let trimmed = text.trim_start();
     if trimmed.starts_with('<') {
         return Err(error(

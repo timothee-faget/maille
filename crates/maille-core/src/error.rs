@@ -188,6 +188,10 @@ pub enum MailleError {
     InvalidSurface {
         problem: String,
     },
+    /// Pièce B-rep ou courbe d'arête inutilisable (nœuds d'une B-spline mal rangés, poids négatif…).
+    InvalidBrep {
+        problem: String,
+    },
     /// Taille h d'une Curve nulle, négative ou non finie.
     InvalidCurveSize {
         curve: CurveId,
@@ -424,6 +428,7 @@ impl fmt::Display for MailleError {
                 "le mailleur n'a pas pu trianguler la géométrie (points de la géométrie confondus ou presque cocirculaires à l'arrondi près) : déplacer légèrement un point de la géométrie ou changer les tailles h"
             ),
             Self::InvalidSurface { problem } => write!(f, "surface 3D inutilisable : {problem}"),
+            Self::InvalidBrep { problem } => write!(f, "pièce B-rep inutilisable : {problem}"),
             Self::TooManyNodes { max } => write!(
                 f,
                 "le maillage dépasserait {max} Nodes : augmenter les tailles h des Curves"
