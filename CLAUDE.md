@@ -29,7 +29,8 @@ Commandes :
   de von Mises en petites déformations (M6), fichiers de maillage, de modèle et de résultats (M7), performance du solveur
   (M8, fait), import CAO en 2D (DXF, M9, fait) et en 3D (STL, mailleur 3D, M10 et M10b, faits ; STEP, M11, fait).
   Grandes déformations (M12, en cours) : Lagrangien total sur triangles en déformations planes et tétraèdres,
-  Saint-Venant–Kirchhoff, puis néo-Hookéen ; cadrage dans 28.23 Non-linéarités.
+  Saint-Venant–Kirchhoff et néo-Hookéen, pression suiveuse, découpe automatique de l'incrément ; cadrage dans
+  28.23 Non-linéarités.
 - Dehors, sauf demande explicite : fluides, électromagnétisme, contact général,
   calcul parallèle/GPU, interface graphique (viendra une fois les formats stables).
 - Ne pas élargir le périmètre de ta propre initiative. En cas de doute, demander.
@@ -96,7 +97,7 @@ segment, arc de cercle ou d'ellipse, morceau de **BSpline** ; ce n'est pas la Cu
 (surface d'une BrepFace : plan, cylindre, cône, sphère, tore ; ce n'est pas la `Surface` triangulée d'un STL ; la face
 est orientée par ses contours, et une sphère dit en plus si elle est bombée, `convex`). `tetrahedralize_brep(&brep, &options)` exige une taille h.
 Solveur (M8) : **SolverKind** (`Auto` / `Direct` / `Iterative`, `Model::with_solver`) : le Cholesky en ligne de ciel (direct) ou les gradients conjugués préconditionnés par un Cholesky incomplet IC(0) (itératif). Ce n'est pas un trait : deux solveurs, un `enum`.
-Grandes déformations (M12) : **Kinematics** (`Small` / `Large`, `Model::with_kinematics` ; `Large` = **grandes déformations**, par `solve_quasi_static` seulement), **raideur géométrique** (le terme de la tangente en contrainte S, en plus de la raideur du Material), **contrainte de Cauchy** (σ = J⁻¹ F S Fᵀ sur la configuration déformée : ce que le Field porte en `Large`). Loi par défaut : Saint-Venant–Kirchhoff, avec E et ν du Material.
+Grandes déformations (M12) : **Kinematics** (`Small` / `Large`, `Model::with_kinematics` ; `Large` = **grandes déformations**, par `solve_quasi_static` seulement), **raideur géométrique** (le terme de la tangente en contrainte S, en plus de la raideur du Material), **contrainte de Cauchy** (σ = J⁻¹ F S Fᵀ sur la configuration déformée : ce que le Field porte en `Large`). Loi par défaut : Saint-Venant–Kirchhoff, avec E et ν du Material. **Hyperelasticity** (`Material::with_hyperelasticity`, `NeoHookean` : loi du Material en `Large` seulement, à la place de SVK). **Pression suiveuse** : en `Large`, une Pressure reste normale à la face déformée (pas une force morte). **Coupe de l'incrément** : si Newton ne converge pas, `solve_quasi_static` coupe l'incrément en deux, jusqu'à 5 fois (1/32) ; seuls les Increments de la Step sont gardés (vaut aussi pour la plasticité).
 Pression (M7b) : **Pressure** (pression uniforme sur une face d'Element, `with_pressures`, statique ; positive, elle comprime). Distincte de la **Convection** (thermique) et du **Load** (force par Node).
 Fichiers (M7) : **Set** (ensemble nommé de Nodes, de faces ou d'Elements : un groupe physique de Gmsh), **MshFile**
 (contenu d'un `.msh` : Nodes, connectivité, Sets ; ce n'est pas un Mesh, il n'a pas de Material). Dans le futur fichier de
