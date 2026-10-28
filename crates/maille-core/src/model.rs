@@ -2,9 +2,9 @@ use std::ops::Deref;
 
 use crate::assembly::{
     element_capacity, element_conduction, element_dofs, element_gauss_count,
-    element_heat_flux_operator, element_heat_source, element_response, element_stiffness,
-    element_stresses, element_thermal_load, element_thermal_strains, face_convection,
-    face_pressure, FaceConvection, FluxOperator,
+    element_heat_flux_operator, element_heat_source, element_large_response, element_response,
+    element_stiffness, element_stresses, element_thermal_load, element_thermal_strains,
+    face_convection, face_pressure, FaceConvection, FluxOperator,
 };
 use crate::element::{bar_equivalent_load, beam_equivalent_load, ElementResponse};
 use crate::error::MailleError;
@@ -80,6 +80,17 @@ pub enum Analysis {
     /// Thermique, un DOF `T` par Node : stationnaire −∇·(k ∇T) = Q avec `Model::solve`, transitoire
     /// ρc ∂T/∂t − ∇·(k ∇T) = Q avec `Model::solve_step`.
     Thermal,
+}
+
+/// Cinématique du calcul statique, réglée par `Model::with_kinematics`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Kinematics {
+    /// Petites déformations : équilibre écrit sur la configuration de départ, déformation linéarisée.
+    #[default]
+    Small,
+    /// Grandes déformations : Lagrangien total, loi de Saint-Venant–Kirchhoff, contraintes de Cauchy
+    /// en sortie. Par `Model::solve_quasi_static` seulement.
+    Large,
 }
 
 /// Step : durée découpée en incréments égaux Δt. Deux usages :
@@ -215,6 +226,7 @@ pub struct Model {
     /// Champ de températures aux Nodes et T_ref (statique), voir `with_temperatures`.
     temperatures: Option<(Vec<f64>, f64)>,
     solver: SolverKind,
+    kinematics: Kinematics,
 }
 
 impl Model {
@@ -277,7 +289,34 @@ impl Model {
             pressures: Vec::new(),
             temperatures: None,
             solver: SolverKind::default(),
+            kinematics: Kinematics::default(),
         })
+    }
+
+    /// Cinématique du calcul statique (`Kinematics::Small` par défaut). `Large` : grandes
+    /// déformations, par `solve_quasi_static` seulement, sur des triangles en déformations planes et des
+    /// tétraèdres, sans plasticité, sans champ de températures et sans Pressure.
+    pub fn with_kinematics(self, kinematics: Kinematics) -> Result<Self, MailleError> {
+        if kinematics == Kinematics::Large {
+            if self.analysis != Analysis::Static {
+                return Err(MailleError::StaticOnly);
+            }
+            for (i, e) in self.mesh.elements.iter().enumerate() {
+                if !elastoplastic(e) {
+                    return Err(MailleError::UnsupportedLargeStrainElement { element: i });
+                }
+                if e.material().plasticity.is_some() {
+                    return Err(MailleError::LargeStrainPlasticity { element: i });
+                }
+            }
+            if self.temperatures.is_some() {
+                return Err(MailleError::LargeStrainWithTemperatures);
+            }
+            if !self.pressures.is_empty() {
+                return Err(MailleError::LargeStrainWithPressure);
+            }
+        }
+        Ok(Self { kinematics, ..self })
     }
 
     /// Solveur du système K_ff u_f = b. Par défaut `SolverKind::Auto` : direct pour les petits
@@ -336,6 +375,9 @@ impl Model {
         if self.analysis != Analysis::Static {
             return Err(MailleError::PressureStaticOnly);
         }
+        if self.kinematics == Kinematics::Large && !pressures.is_empty() {
+            return Err(MailleError::LargeStrainWithPressure);
+        }
         for p in &pressures {
             let e = self.element(p.element)?;
             if matches!(e, Element::Bar(_) | Element::Beam(_)) {
@@ -371,6 +413,9 @@ impl Model {
     ) -> Result<Self, MailleError> {
         if self.analysis != Analysis::Static {
             return Err(MailleError::StaticOnly);
+        }
+        if self.kinematics == Kinematics::Large {
+            return Err(MailleError::LargeStrainWithTemperatures);
         }
         check_temperatures(&self.mesh, &temperatures)?;
         if !reference.is_finite() {
@@ -414,6 +459,9 @@ impl Model {
     /// réactions R = K u − F sur les DOF contraints. K n'est jamais formée en entier : K_ff est
     /// assemblée en ligne de ciel, les réactions sont recalculées Element par Element.
     pub fn solve(&self) -> Result<Field, MailleError> {
+        if self.kinematics == Kinematics::Large {
+            return Err(MailleError::LargeStrainNeedsQuasiStatic);
+        }
         let mesh = &self.mesh;
         if let Some(i) = mesh
             .elements
@@ -680,7 +728,10 @@ impl Model {
         committed
             .iter()
             .enumerate()
-            .map(|(i, previous)| element_response(&self.mesh, i, u, previous))
+            .map(|(i, previous)| match self.kinematics {
+                Kinematics::Small => element_response(&self.mesh, i, u, previous),
+                Kinematics::Large => element_large_response(&self.mesh, i, u),
+            })
             .collect()
     }
 

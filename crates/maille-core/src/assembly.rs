@@ -4,6 +4,7 @@ use crate::element::{
     plane_stresses, plane_thermal_load, solid_d, solid_gauss, solid_response, solid_stiffness,
     solid_stresses, solid_thermal_load, ElementResponse, GaussData,
 };
+use crate::finite_strain::{large_strain_response, SaintVenantKirchhoff};
 use crate::material::Material;
 use crate::mesh::{Element, Mesh, PlaneState, Tet10, Tet4, Tri3, Tri6};
 use crate::plasticity::{PlasticState, VonMises};
@@ -46,6 +47,11 @@ fn von_mises(material: &Material) -> VonMises {
         yield_stress,
         hardening,
     }
+}
+
+/// Loi de Saint-Venant–Kirchhoff du Material (E et ν garantis par `Model::new`).
+fn saint_venant_kirchhoff(material: &Material) -> SaintVenantKirchhoff {
+    SaintVenantKirchhoff::new(young(material), material.poisson.unwrap_or(0.0))
 }
 
 /// Matrice de rigidité de l'Element `i`, DOF dans l'ordre de `element_dofs`.
@@ -148,6 +154,15 @@ impl<'a> PlaneKernel<'a> {
         )
     }
 
+    /// Réponse en grandes déformations, en déformations planes (`Model` refuse les contraintes planes).
+    fn large_response(&self, mesh: &Mesh, u: &[f64]) -> ElementResponse {
+        large_strain_response(
+            &self.gauss(mesh),
+            &saint_venant_kirchhoff(self.material),
+            &self.displacements(u),
+        )
+    }
+
     fn stresses(&self, mesh: &Mesh, u: &[f64], strain_e: &[f64]) -> Vec<Stress> {
         let nu = self.nu();
         let d = plane_d(young(self.material), nu, self.state);
@@ -247,6 +262,14 @@ impl<'a> SolidKernel<'a> {
         )
     }
 
+    fn large_response(&self, mesh: &Mesh, u: &[f64]) -> ElementResponse {
+        large_strain_response(
+            &self.gauss(mesh),
+            &saint_venant_kirchhoff(self.material),
+            &self.displacements(u),
+        )
+    }
+
     fn stresses(&self, mesh: &Mesh, u: &[f64], strain_e: &[f64]) -> Vec<Stress> {
         solid_stresses(
             &mesh.coords_3d(self.nodes),
@@ -308,6 +331,19 @@ pub fn element_response(
         Element::Tri6(t) => PlaneKernel::tri6(t).response(mesh, u, previous),
         Element::Tet4(t) => SolidKernel::tet4(t).response(mesh, u, previous),
         Element::Tet10(t) => SolidKernel::tet10(t).response(mesh, u, previous),
+        Element::Bar(_) | Element::Beam(_) => ElementResponse::default(),
+    }
+}
+
+/// Réponse en grandes déformations (Lagrangien total, Saint-Venant–Kirchhoff) de l'Element `i` aux
+/// déplacements globaux `u`, DOF dans l'ordre de `element_dofs`. Contraintes de Cauchy. Triangles en
+/// déformations planes et tétraèdres ; vide pour les Bar et Beam (refusées par `Model`).
+pub fn element_large_response(mesh: &Mesh, i: usize, u: &[f64]) -> ElementResponse {
+    match &mesh.elements[i] {
+        Element::Tri3(t) => PlaneKernel::tri3(t).large_response(mesh, u),
+        Element::Tri6(t) => PlaneKernel::tri6(t).large_response(mesh, u),
+        Element::Tet4(t) => SolidKernel::tet4(t).large_response(mesh, u),
+        Element::Tet10(t) => SolidKernel::tet10(t).large_response(mesh, u),
         Element::Bar(_) | Element::Beam(_) => ElementResponse::default(),
     }
 }
@@ -873,6 +909,52 @@ mod response_tests {
                         "{name} : K[{i}][{j}] = {} au lieu de {numeric}",
                         row[j]
                     );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn large_tangent_is_the_derivative_of_the_internal_forces() {
+        let material = Material::with_poisson(210e3, 0.3).unwrap();
+        for (name, mesh) in meshes(material) {
+            // déformations de l'ordre de 10 à 20 % : loin du domaine linéaire
+            let u: Vec<f64> = displacements(&mesh).iter().map(|u| 40.0 * u).collect();
+            let r = element_large_response(&mesh, 0, &u);
+            let scale = r.tangent[0][0].abs();
+            let h = 1e-6;
+            for j in 0..u.len() {
+                let (mut plus, mut minus) = (u.clone(), u.clone());
+                plus[j] += h;
+                minus[j] -= h;
+                let fp = element_large_response(&mesh, 0, &plus).internal_force;
+                let fm = element_large_response(&mesh, 0, &minus).internal_force;
+                for (i, row) in r.tangent.iter().enumerate() {
+                    let numeric = (fp[i] - fm[i]) / (2.0 * h);
+                    assert!(
+                        (row[j] - numeric).abs() < 1e-6 * scale,
+                        "{name} : K[{i}][{j}] = {} au lieu de {numeric}",
+                        row[j]
+                    );
+                    assert!((row[j] - r.tangent[j][i]).abs() < 1e-9 * scale, "{name}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn large_response_tends_to_the_linear_one_for_small_displacements() {
+        let material = Material::with_poisson(210e3, 0.3).unwrap();
+        for (name, mesh) in meshes(material) {
+            let u: Vec<f64> = displacements(&mesh).iter().map(|u| 1e-6 * u).collect();
+            let r = element_large_response(&mesh, 0, &u);
+            let k = element_stiffness(&mesh, 0);
+            let scale = k[0][0];
+            for ((row, tangent_row), f) in k.iter().zip(&r.tangent).zip(&r.internal_force) {
+                let ku: f64 = row.iter().zip(&u).map(|(k, u)| k * u).sum();
+                assert!((f - ku).abs() < 1e-5 * scale * 1e-5, "{name}");
+                for (a, b) in row.iter().zip(tangent_row) {
+                    assert!((a - b).abs() < 1e-5 * scale, "{name}");
                 }
             }
         }

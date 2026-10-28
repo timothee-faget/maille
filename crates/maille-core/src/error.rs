@@ -113,6 +113,21 @@ pub enum MailleError {
     },
     /// Champ de températures dans un calcul quasi-statique (thermo-plasticité non gérée).
     QuasiStaticWithTemperatures,
+    /// Grandes déformations sur un Element qui n'est ni un triangle en déformations planes ni un
+    /// tétraèdre.
+    UnsupportedLargeStrainElement {
+        element: usize,
+    },
+    /// Plasticité en grandes déformations.
+    LargeStrainPlasticity {
+        element: usize,
+    },
+    /// Champ de températures en grandes déformations.
+    LargeStrainWithTemperatures,
+    /// Pression en grandes déformations (la pression suiveuse n'est pas encore gérée).
+    LargeStrainWithPressure,
+    /// `Model::solve` (linéaire) avec `Kinematics::Large`.
+    LargeStrainNeedsQuasiStatic,
     /// Newton-Raphson n'a pas trouvé l'équilibre de l'incrément `increment` (temps `time`).
     NotConverged {
         increment: usize,
@@ -340,6 +355,26 @@ impl fmt::Display for MailleError {
             Self::QuasiStaticWithTemperatures => write!(
                 f,
                 "le calcul quasi-statique ne prend pas de champ de températures (la thermo-plasticité n'est pas gérée) : retirer with_temperatures"
+            ),
+            Self::UnsupportedLargeStrainElement { element } => write!(
+                f,
+                "l'Element {element} ne supporte pas les grandes déformations, qui demandent des triangles en déformations planes (les contraintes planes ne sont pas gérées) ou des tétraèdres : utiliser Kinematics::Small, ou changer d'Element"
+            ),
+            Self::LargeStrainPlasticity { element } => write!(
+                f,
+                "le Material de l'Element {element} est plastique : la plasticité en grandes déformations n'est pas gérée, utiliser Kinematics::Small ou retirer with_plasticity"
+            ),
+            Self::LargeStrainWithTemperatures => write!(
+                f,
+                "les grandes déformations ne prennent pas de champ de températures : retirer with_temperatures ou utiliser Kinematics::Small"
+            ),
+            Self::LargeStrainWithPressure => write!(
+                f,
+                "les grandes déformations ne prennent pas encore de Pressure (la pression suiveuse viendra) : retirer with_pressures, la remplacer par des Load, ou utiliser Kinematics::Small"
+            ),
+            Self::LargeStrainNeedsQuasiStatic => write!(
+                f,
+                "Kinematics::Large demande un calcul non linéaire : utiliser Model::solve_quasi_static avec une Step::quasi_static et une Amplitude, au lieu de Model::solve"
             ),
             Self::NotConverged { increment, time } => write!(
                 f,
