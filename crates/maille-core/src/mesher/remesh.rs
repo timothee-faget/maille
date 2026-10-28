@@ -271,7 +271,7 @@ fn lerp(a: [f64; 3], b: [f64; 3], t: f64) -> [f64; 3] {
 mod tests {
     use super::*;
     use crate::mesher::testsurface::*;
-    use crate::mesher::tetrahedralize;
+    use crate::mesher::{tetrahedralize, TetOptions};
 
     /// Plus petit angle (en degrés) et plus grand rayon circonscrit des triangles.
     fn quality(s: &Surface) -> (f64, f64) {
@@ -385,7 +385,7 @@ mod tests {
     fn surface_remaillee_se_laisse_tetraedriser() {
         let s = surface(&cube(1));
         let r = remesh(&s, 0.25, 0.3).unwrap();
-        let t = tetrahedralize(&r).unwrap();
+        let t = tetrahedralize(&r, &TetOptions::default()).unwrap();
         let volume: f64 = t
             .tetrahedra
             .iter()

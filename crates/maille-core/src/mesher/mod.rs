@@ -15,7 +15,7 @@ mod facet;
 mod geometry;
 mod predicates;
 mod refine;
-#[cfg_attr(not(test), allow(dead_code))] // servira au mailleur 3D à taille h (M10b, PR 3)
+mod refine3;
 mod remesh;
 mod surface;
 #[cfg(test)]
@@ -28,7 +28,7 @@ use crate::error::MailleError;
 use crate::mesh::Node;
 pub use geometry::{Curve, CurveId, CurveKind, Geometry, MIN_CORNER};
 pub use surface::{Patch, Surface};
-pub use tetrahedralize::{tetrahedralize, Tetrahedralization};
+pub use tetrahedralize::{tetrahedralize, TetOptions, Tetrahedralization};
 
 /// Plafond de Nodes produits par le mailleur : au-delà, `TooManyNodes` plutôt qu'un calcul sans fin.
 pub const MAX_NODES: usize = 1_000_000;

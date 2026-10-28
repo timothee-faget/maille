@@ -1,12 +1,12 @@
 //! Maillages de tétraèdres pour les tests : un cube de côté 2 centré à l'origine, maillé par le
 //! mailleur 3D du cœur (Tet4, ou Tet10 par `to_quadratic`).
 
-use maille_core::mesher::{tetrahedralize, Patch, Surface};
+use maille_core::mesher::{tetrahedralize, Patch, Surface, TetOptions};
 
 /// (positions, cellules) du cube [-1, 1]³ en Tet4.
 pub fn cube() -> (Vec<[f64; 3]>, Vec<Vec<usize>>) {
     let t = surface_cube();
-    let mesh = tetrahedralize(&t).unwrap();
+    let mesh = tetrahedralize(&t, &TetOptions::default()).unwrap();
     (
         mesh.nodes.iter().map(|n| [n.x, n.y, n.z]).collect(),
         mesh.tetrahedra.iter().map(|c| c.to_vec()).collect(),
@@ -15,7 +15,9 @@ pub fn cube() -> (Vec<[f64; 3]>, Vec<Vec<usize>>) {
 
 /// Même cube en Tet10.
 pub fn cube_quadratic() -> (Vec<[f64; 3]>, Vec<Vec<usize>>) {
-    let mesh = tetrahedralize(&surface_cube()).unwrap().to_quadratic();
+    let mesh = tetrahedralize(&surface_cube(), &TetOptions::default())
+        .unwrap()
+        .to_quadratic();
     (
         mesh.nodes.iter().map(|n| [n.x, n.y, n.z]).collect(),
         mesh.tetrahedra.iter().map(|c| c.to_vec()).collect(),

@@ -1,4 +1,6 @@
-//! Mailleur 3D, première étape : tétraèdres conformes à une `Surface`. Les sommets de la surface
+//! Mailleur 3D : tétraèdres conformes à une `Surface`. Avec une taille h (`TetOptions::size`), la
+//! surface est d'abord remaillée à la taille h (`remesh`), puis l'intérieur est raffiné une fois le
+//! bord récupéré (`refine3`). Récupération du bord : les sommets de la surface
 //! entrent dans un Delaunay 3D ; toute arête ou face de la surface qui n'y figure pas est coupée
 //! (milieu d'une arête, centre d'une face) jusqu'à ce que chaque morceau soit une arête ou une
 //! face du Delaunay. Les points ajoutés sont sur la surface : elle ne change pas de forme. Les
@@ -10,9 +12,12 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use super::delaunay3::Delaunay3;
 use super::predicates::orient3d;
+use super::refine3::{self, SizeField3};
+use super::remesh::remesh;
 use super::surface::Surface;
-use super::{BoundarySet, MAX_NODES};
+use super::{BoundarySet, MeshOptions, MAX_NODES};
 use crate::error::MailleError;
+use crate::material::positive;
 use crate::mesh::Node;
 use crate::shape::{TET10_EDGES, TET_FACES};
 
@@ -106,10 +111,46 @@ struct Piece {
     triangle: usize,
 }
 
+/// Réglages du mailleur 3D.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TetOptions {
+    /// Taille h, strictement positive : la surface est remaillée en triangles de rayon
+    /// circonscrit au plus h/√3, l'intérieur raffiné jusqu'à un rayon circonscrit d'au plus
+    /// h √6 / 4 (celui du tétraèdre régulier de côté h) et un rapport rayon / plus petite arête
+    /// d'au plus 2, sauf près de la surface où un point qui l'empiéterait est refusé. `None` : ni
+    /// remaillage ni raffinement, les tétraèdres ont la finesse des triangles de la surface.
+    pub size: Option<f64>,
+    /// Gradation g, sans dimension : de combien la taille peut croître par unité de longueur en
+    /// s'éloignant d'un détail fin de la surface, strictement positive.
+    pub grading: f64,
+}
+
+impl Default for TetOptions {
+    fn default() -> Self {
+        Self {
+            size: None,
+            grading: MeshOptions::default().grading,
+        }
+    }
+}
+
 /// Maille l'intérieur de la surface en tétraèdres dont les faces de bord suivent la surface.
+/// `InvalidProperty` si la taille h ou la gradation n'est pas strictement positive,
 /// `InvalidSurface` si la surface est inutilisable, `MeshingFailed` si la récupération échoue
 /// (angles très aigus, arrondi), `TooManyNodes` au-delà de `MAX_NODES`.
-pub fn tetrahedralize(surface: &Surface) -> Result<Tetrahedralization<4>, MailleError> {
+pub fn tetrahedralize(
+    surface: &Surface,
+    options: &TetOptions,
+) -> Result<Tetrahedralization<4>, MailleError> {
+    let grading = positive("gradation", options.grading)?;
+    let remeshed;
+    let surface = match options.size {
+        Some(h) => {
+            remeshed = remesh(surface, h, grading)?;
+            &remeshed
+        }
+        None => surface,
+    };
     let patch_of = check(surface)?;
     let mut points = surface.vertices.clone();
     let (lo, hi) = bounds(&points);
@@ -127,11 +168,12 @@ pub fn tetrahedralize(surface: &Surface) -> Result<Tetrahedralization<4>, Maille
     })?;
 
     let caster = Caster::new(surface);
-    let tetrahedra: Vec<[usize; 4]> = del
-        .tetrahedra()
-        .into_iter()
-        .filter(|t| caster.contains(centroid(&points, t)))
-        .collect();
+    del.classify(|t| caster.contains(centroid(&points, &t)));
+    if let Some(h) = options.size {
+        del.set_walls(pieces.iter().map(|p| p.v));
+        refine3::refine(&mut del, &mut points, &SizeField3::new(surface, h, grading))?;
+    }
+    let tetrahedra = del.inside_tetrahedra();
     let volume: f64 = tetrahedra
         .iter()
         .map(|t| {
