@@ -7,9 +7,11 @@
 //! ses BC et ses Convection sur les bords nommés (`Triangulation::boundary`).
 //!
 //! Unités : comme le reste du cœur, le mailleur ne convertit rien. Coordonnées et tailles h sont
-//! dans l'unité de longueur de l'utilisateur ; les angles sont en degrés.
+//! dans l'unité de longueur de l'utilisateur ; les angles des réglages sont en degrés, ceux de la
+//! géométrie d'une `Brep` (arcs, demi-angle d'un cône) en radians.
 
 mod brep;
+mod brepmesh;
 mod delaunay;
 mod delaunay3;
 mod facet;
@@ -27,10 +29,10 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::error::MailleError;
 use crate::mesh::Node;
-pub use brep::{BSpline, Brep, BrepEdge, BrepFace, EdgeCurve};
+pub use brep::{BSpline, Brep, BrepEdge, BrepFace, EdgeCurve, FaceSurface};
 pub use geometry::{Curve, CurveId, CurveKind, Geometry, MIN_CORNER};
 pub use surface::{Patch, Surface};
-pub use tetrahedralize::{tetrahedralize, TetOptions, Tetrahedralization};
+pub use tetrahedralize::{tetrahedralize, tetrahedralize_brep, TetOptions, Tetrahedralization};
 
 /// Plafond de Nodes produits par le mailleur : au-delà, `TooManyNodes` plutôt qu'un calcul sans fin.
 pub const MAX_NODES: usize = 1_000_000;

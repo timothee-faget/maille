@@ -243,6 +243,47 @@ fn stl_surface_meshed_by_the_cli_follows_the_analytic_field() {
     }
 }
 
+/// Pièce STEP maillée par la CLI : cylindre de rayon 2 et de hauteur 3 à couture, comme l'écrit
+/// OCCT (`tests/cylindre.step`). Volume des tétraèdres : 12π par défaut, de moins que la flèche
+/// relative des cordes (h / r)² / 8 ; sans `--size`, refus.
+#[test]
+fn step_piece_meshed_by_the_cli() {
+    let w = Workdir::new("step");
+    fs::write(w.0.join("cylindre.step"), include_str!("cylindre.step")).unwrap();
+    let out = w.maille(&["mesh", "cylindre.step", "--size", "0.5"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("unité de longueur mm"), "{stdout}");
+    assert!(stdout.contains("bords cote, fond, haut"), "{stdout}");
+    let file =
+        maille_io::msh::read(&fs::read_to_string(w.0.join("cylindre.msh")).unwrap()).unwrap();
+    let p = |i: usize| [file.nodes[i].x, file.nodes[i].y, file.nodes[i].z];
+    let volume: f64 = file
+        .cells
+        .iter()
+        .map(|c| {
+            let [a, b, c, d] = [c[0], c[1], c[2], c[3]].map(p);
+            let (u, v, w) = (
+                [b[0] - a[0], b[1] - a[1], b[2] - a[2]],
+                [c[0] - a[0], c[1] - a[1], c[2] - a[2]],
+                [d[0] - a[0], d[1] - a[1], d[2] - a[2]],
+            );
+            (u[0] * (v[1] * w[2] - v[2] * w[1]) - u[1] * (v[0] * w[2] - v[2] * w[0])
+                + u[2] * (v[0] * w[1] - v[1] * w[0]))
+                / 6.0
+        })
+        .sum();
+    let e = (12.0 * PI - volume) / (12.0 * PI);
+    assert!(e > 0.0 && e < (0.5f64 / 2.0).powi(2) / 8.0, "écart {e:e}");
+    let out = w.maille(&["mesh", "cylindre.step"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--size manque"));
+}
+
 /// `maille view --png` écrit une image PNG d'un résultat 3D, avec coupe et déformée. Sans carte
 /// graphique (machine d'intégration continue), le test est sauté.
 /// `tube3d.stl` (quart de tube facetté en 16 côtés) maillé à la taille h en Tet10 par la CLI, puis

@@ -1,12 +1,12 @@
 //! Du contenu Part 21 à la `Brep` : le solide unique (MANIFOLD_SOLID_BREP), sa coque fermée, ses
-//! faces (ADVANCED_FACE), leurs contours (EDGE_LOOP d'ORIENTED_EDGE), les arêtes (EDGE_CURVE) et
-//! leurs courbes (LINE, CIRCLE, ELLIPSE, B_SPLINE_CURVE_WITH_KNOTS, rationnelle ou non), puis
-//! l'unité de longueur du fichier.
+//! faces (ADVANCED_FACE) et leurs surfaces (PLANE, CYLINDRICAL_SURFACE, CONICAL_SURFACE), leurs
+//! contours (EDGE_LOOP d'ORIENTED_EDGE), les arêtes (EDGE_CURVE) et leurs courbes (LINE, CIRCLE,
+//! ELLIPSE, B_SPLINE_CURVE_WITH_KNOTS, rationnelle ou non), puis l'unité de longueur du fichier.
 
 use std::collections::HashMap;
-use std::f64::consts::TAU;
+use std::f64::consts::{FRAC_PI_2, TAU};
 
-use maille_core::mesher::{BSpline, Brep, BrepEdge, BrepFace, EdgeCurve};
+use maille_core::mesher::{BSpline, Brep, BrepEdge, BrepFace, EdgeCurve, FaceSurface};
 
 use super::error;
 use super::part21::{Instance, Part21, Record, Value};
@@ -52,6 +52,7 @@ pub(super) fn build(p: &Part21) -> Result<(Brep, String), IoError> {
         edges: Vec::new(),
         edge_of: HashMap::new(),
         tolerance: 0.0,
+        radian: angle_unit(p),
     };
     r.tolerance = ON_CURVE * r.diagonal();
     let record = r.only(id, solid.line, &["MANIFOLD_SOLID_BREP"])?;
@@ -88,6 +89,8 @@ struct Reader<'a> {
     /// Arête de la `Brep` de chaque EDGE_CURVE, et son numéro dans le fichier.
     edge_of: HashMap<u64, usize>,
     tolerance: f64,
+    /// Valeur en radians de l'unité d'angle du fichier, si elle se lit.
+    radian: Option<f64>,
 }
 
 impl<'a> Reader<'a> {
@@ -221,7 +224,70 @@ impl<'a> Reader<'a> {
             }
         }
         outer.extend(inner);
-        Ok(BrepFace { name, loops: outer })
+        let surface = self.surface(
+            self.reference(&face.params, 2, line, "surface de la face")?,
+            line,
+        )?;
+        Ok(BrepFace {
+            name,
+            surface,
+            loops: outer,
+        })
+    }
+
+    /// Surface d'une face : PLANE, CYLINDRICAL_SURFACE ou CONICAL_SURFACE.
+    fn surface(&self, id: u64, from: usize) -> Result<FaceSurface, IoError> {
+        let i = self.p.get(id, from)?;
+        let line = i.line;
+        let frame = |r: &Record| -> Result<[[f64; 3]; 4], IoError> {
+            self.placement(self.reference(&r.params, 1, line, "repère")?, line)
+        };
+        if let Some(r) = i.record("PLANE") {
+            let [origin, _, _, normal] = frame(r)?;
+            return Ok(FaceSurface::Plane { origin, normal });
+        }
+        if let Some(r) = i.record("CYLINDRICAL_SURFACE") {
+            let [origin, _, _, axis] = frame(r)?;
+            let radius = positive(r.params.get(2), line, "rayon")?;
+            return Ok(FaceSurface::Cylinder {
+                origin,
+                axis,
+                radius,
+            });
+        }
+        if let Some(r) = i.record("CONICAL_SURFACE") {
+            let [origin, _, _, axis] = frame(r)?;
+            let radius = match r.params.get(2).and_then(number) {
+                Some(x) if x.is_finite() && x >= 0.0 => x,
+                _ => {
+                    return Err(error(format!(
+                        "ligne {line} : rayon du cône positif ou nul attendu"
+                    )))
+                }
+            };
+            let radian = self.radian.ok_or_else(|| {
+                error(format!(
+                    "ligne {line} : cône, mais l'unité d'angle du fichier (PLANE_ANGLE_UNIT) ne se lit pas"
+                ))
+            })?;
+            let half_angle = positive(r.params.get(3), line, "demi-angle")? * radian;
+            if half_angle >= FRAC_PI_2 {
+                return Err(error(format!(
+                    "ligne {line} : demi-angle du cône d'au moins 90°"
+                )));
+            }
+            return Ok(FaceSurface::Cone {
+                origin,
+                axis,
+                radius,
+                half_angle,
+            });
+        }
+        let names: Vec<&str> = i.records.iter().map(|r| r.name.as_str()).collect();
+        Err(error(format!(
+            "ligne {line} : face sur une surface {} pas encore prise en charge (Maille lit PLANE, CYLINDRICAL_SURFACE et CONICAL_SURFACE)",
+            names.join(" + ")
+        )))
     }
 
     fn vertex(&mut self, id: u64, from: usize) -> Result<usize, IoError> {
@@ -570,6 +636,52 @@ fn length_unit(p: &Part21) -> String {
         }
     }
     "inconnue".to_string()
+}
+
+/// Valeur en radians de l'unité d'angle du contexte (GLOBAL_UNIT_ASSIGNED_CONTEXT ; sans
+/// contexte, la première unité d'angle) : 1 pour le radian ou sans unité d'angle, le facteur de
+/// conversion d'une unité convertie (degré : π/180), `None` s'il ne se lit pas.
+fn angle_unit(p: &Part21) -> Option<f64> {
+    let assigned = p.instances.values().find_map(|i| {
+        match &i.record("GLOBAL_UNIT_ASSIGNED_CONTEXT")?.params.first()? {
+            Value::List(l) => Some(l.clone()),
+            _ => None,
+        }
+    });
+    let units: Vec<&Instance> = match assigned {
+        Some(l) => l
+            .iter()
+            .filter_map(|v| match v {
+                Value::Ref(id) => p.instances.get(id),
+                _ => None,
+            })
+            .collect(),
+        None => p.instances.values().collect(),
+    };
+    let Some(unit) = units
+        .into_iter()
+        .find(|i| i.record("PLANE_ANGLE_UNIT").is_some())
+    else {
+        return Some(1.0);
+    };
+    if unit.record("SI_UNIT").is_some() {
+        return Some(1.0);
+    }
+    // CONVERSION_BASED_UNIT('DEGREE', #m), #m = PLANE_ANGLE_MEASURE_WITH_UNIT(
+    // PLANE_ANGLE_MEASURE(0.0174532925), #radian)
+    let Some(Value::Ref(m)) = unit.record("CONVERSION_BASED_UNIT")?.params.get(1) else {
+        return None;
+    };
+    let measure = p
+        .instances
+        .get(m)?
+        .record("PLANE_ANGLE_MEASURE_WITH_UNIT")?;
+    match measure.params.first() {
+        Some(Value::Typed(_, v)) => v.first().and_then(number),
+        Some(v) => number(v),
+        None => None,
+    }
+    .filter(|x| x.is_finite() && *x > 0.0)
 }
 
 fn number(v: &Value) -> Option<f64> {

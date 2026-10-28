@@ -1,7 +1,7 @@
 //! Pièce B-rep : le bord exact d'un solide, lu d'un STEP (`maille_io::step::read_brep`). Des
 //! sommets, des arêtes portées par des courbes (`EdgeCurve`), et des faces bordées par des contours
-//! d'arêtes orientées. C'est l'entrée du futur mailleur des faces (M11) ; les surfaces des faces
-//! viendront avec lui. Le nom d'une face devient celui d'un Patch, donc du Set où poser les BC.
+//! d'arêtes orientées, chacune sur sa surface (`FaceSurface`). C'est l'entrée du mailleur des faces
+//! (`tetrahedralize_brep`). Le nom d'une face devient celui d'un Patch, donc du Set où poser les BC.
 
 use crate::error::MailleError;
 
@@ -27,9 +27,35 @@ pub struct BrepEdge {
 pub struct BrepFace {
     /// Nom de la face dans le fichier, ou `face_1`, `face_2`… s'il est vide.
     pub name: String,
+    /// Surface qui porte la face.
+    pub surface: FaceSurface,
     /// Contours fermés : indices dans `Brep::edges`, avec `true` pour une arête parcourue de `end`
-    /// à `start`. Le premier est le contour extérieur.
+    /// à `start`. Le premier est le contour extérieur. Vue de dehors, la face est à gauche de ses
+    /// contours : ce sont eux qui l'orientent, pas la surface.
     pub loops: Vec<Vec<(usize, bool)>>,
+}
+
+/// Surface d'une face (ce n'est pas la `Surface` triangulée d'un STL). Les directions sont
+/// unitaires ; son sens ne compte pas, la face est orientée par ses contours.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FaceSurface {
+    /// Plan passant par `origin`, de normale `normal`.
+    Plane { origin: [f64; 3], normal: [f64; 3] },
+    /// Cylindre de rayon `radius` autour de l'axe qui passe par `origin` dans la direction `axis`.
+    Cylinder {
+        origin: [f64; 3],
+        axis: [f64; 3],
+        radius: f64,
+    },
+    /// Cône d'axe (`origin`, `axis`) : rayon `radius` (positif ou nul) dans le plan de `origin`,
+    /// qui croît de tan(`half_angle`) par unité de longueur le long de `axis` ; demi-angle au
+    /// sommet dans ]0, π/2[, en radians.
+    Cone {
+        origin: [f64; 3],
+        axis: [f64; 3],
+        radius: f64,
+        half_angle: f64,
+    },
 }
 
 /// Courbe d'une arête, paramétrée par t ∈ [0, 1] du début à la fin de l'arête.

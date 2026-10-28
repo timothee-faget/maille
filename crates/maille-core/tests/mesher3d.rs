@@ -6,7 +6,10 @@ use std::collections::HashMap;
 
 use maille_core::material::Material;
 use maille_core::mesh::{Dof, Element, Mesh, Tet10, Tet4};
-use maille_core::mesher::{tetrahedralize, Patch, Surface, TetOptions, Tetrahedralization};
+use maille_core::mesher::{
+    tetrahedralize, tetrahedralize_brep, Brep, BrepEdge, BrepFace, EdgeCurve, FaceSurface, Patch,
+    Surface, TetOptions, Tetrahedralization,
+};
 use maille_core::model::{Bc, Model, Pressure};
 use maille_core::MailleError;
 
@@ -301,7 +304,11 @@ fn lame_ur(r: f64) -> f64 {
 /// Erreur maximale du déplacement radial aux Nodes (rapportée à u_r intérieur) et plus grand |uz|,
 /// quart de tube en Tet10 de taille h.
 fn tube_errors(m: usize, h: f64) -> (f64, f64, usize) {
-    let t = tetrahedralize(&tube(m), &sized(h)).unwrap();
+    lame_errors(tetrahedralize(&tube(m), &sized(h)).unwrap())
+}
+
+/// Erreurs de Lamé (comme `tube_errors`) d'un quart de tube déjà maillé, passé en Tet10.
+fn lame_errors(t: Tetrahedralization<4>) -> (f64, f64, usize) {
     let t = t.to_quadratic();
     let material = Material::with_poisson(E, NU).unwrap();
     let elements = t
@@ -365,6 +372,149 @@ fn tube_de_lame_en_tet10() {
         errors.push(worst);
     }
     assert!(errors[1] < errors[0] / 3.0, "{errors:?}");
+}
+
+/// Le même quart de tube en B-rep exact : arcs de cercle, faces cylindriques et planes.
+fn tube_brep() -> Brep {
+    // sommets a = (Ri, 0), b = (Ro, 0), c = (0, Ro), d = (0, Ri) en bas, puis en haut
+    let mut vertices = Vec::new();
+    for z in [0.0, HEIGHT] {
+        for (x, y) in [(INNER, 0.0), (OUTER, 0.0), (0.0, OUTER), (0.0, INNER)] {
+            vertices.push([x, y, z]);
+        }
+    }
+    let mut edges = Vec::new();
+    let mut edge = |start: usize, end: usize, curve: EdgeCurve| {
+        edges.push(BrepEdge { start, end, curve });
+        edges.len() - 1
+    };
+    let line = |a: usize, b: usize| EdgeCurve::Line {
+        from: vertices[a],
+        to: vertices[b],
+    };
+    let arc = |r: f64, z: f64| EdgeCurve::Arc {
+        center: [0.0, 0.0, z],
+        u: [1.0, 0.0, 0.0],
+        v: [0.0, 1.0, 0.0],
+        radii: [r, r],
+        start_angle: 0.0,
+        sweep: std::f64::consts::FRAC_PI_2,
+    };
+    let (mut inner, mut outer, mut sym_x, mut sym_y) = ([0; 2], [0; 2], [0; 2], [0; 2]);
+    for k in 0..2 {
+        let (a, b, c, d) = (4 * k, 4 * k + 1, 4 * k + 2, 4 * k + 3);
+        let z = k as f64 * HEIGHT;
+        inner[k] = edge(a, d, arc(INNER, z));
+        outer[k] = edge(b, c, arc(OUTER, z));
+        sym_x[k] = edge(a, b, line(a, b));
+        sym_y[k] = edge(d, c, line(d, c));
+    }
+    let up: Vec<usize> = (0..4).map(|i| edge(i, i + 4, line(i, i + 4))).collect();
+    let cylinder = |radius: f64| FaceSurface::Cylinder {
+        origin: [0.0; 3],
+        axis: [0.0, 0.0, 1.0],
+        radius,
+    };
+    let plane = |origin: [f64; 3], normal: [f64; 3]| FaceSurface::Plane { origin, normal };
+    // vu de dehors, chaque face est à gauche de son contour (`true` : arête à rebours)
+    let faces = [
+        (
+            "bas",
+            plane([0.0; 3], [0.0, 0.0, -1.0]),
+            [
+                (inner[0], false),
+                (sym_y[0], false),
+                (outer[0], true),
+                (sym_x[0], true),
+            ],
+        ),
+        (
+            "haut",
+            plane([0.0, 0.0, HEIGHT], [0.0, 0.0, 1.0]),
+            [
+                (sym_x[1], false),
+                (outer[1], false),
+                (sym_y[1], true),
+                (inner[1], true),
+            ],
+        ),
+        (
+            "sym_x",
+            plane([0.0; 3], [0.0, -1.0, 0.0]),
+            [
+                (sym_x[0], false),
+                (up[1], false),
+                (sym_x[1], true),
+                (up[0], true),
+            ],
+        ),
+        (
+            "sym_y",
+            plane([0.0; 3], [-1.0, 0.0, 0.0]),
+            [
+                (up[3], false),
+                (sym_y[1], false),
+                (up[2], true),
+                (sym_y[0], true),
+            ],
+        ),
+        (
+            "exterieur",
+            cylinder(OUTER),
+            [
+                (outer[0], false),
+                (up[2], false),
+                (outer[1], true),
+                (up[1], true),
+            ],
+        ),
+        (
+            "interieur",
+            cylinder(INNER),
+            [
+                (up[0], false),
+                (inner[1], false),
+                (up[3], true),
+                (inner[0], true),
+            ],
+        ),
+    ];
+    Brep {
+        vertices,
+        edges,
+        faces: faces
+            .into_iter()
+            .map(|(name, surface, lp)| BrepFace {
+                name: name.to_string(),
+                surface,
+                loops: vec![lp.to_vec()],
+            })
+            .collect(),
+    }
+}
+
+/// Les sommets des faces courbes sont sur les cylindres : l'erreur suit la flèche des cordes de
+/// longueur h sur le rayon intérieur, (h / Ri)² / 8. Mesuré : 4,5e-3 à h = 2 (flèche 5e-3),
+/// 1,27e-3 à h = 1 (flèche 1,25e-3).
+#[test]
+fn tube_de_lame_lu_en_b_rep() {
+    let mut errors = Vec::new();
+    for h in [2.0, 1.0] {
+        let (worst, uz, _) = lame_errors(tetrahedralize_brep(&tube_brep(), &sized(h)).unwrap());
+        let sag = (h / INNER).powi(2) / 8.0;
+        assert!(worst < 1.5 * sag, "h = {h} : erreur {worst:e}");
+        assert!(uz < 1e-3, "h = {h} : uz {uz:e}");
+        errors.push(worst);
+    }
+    assert!(errors[1] < errors[0] / 3.0, "{errors:?}");
+}
+
+#[test]
+fn b_rep_sans_taille_refusee() {
+    let m = tetrahedralize_brep(&tube_brep(), &TetOptions::default())
+        .unwrap_err()
+        .to_string();
+    assert!(m.contains("taille h"), "{m}");
 }
 
 #[test]
