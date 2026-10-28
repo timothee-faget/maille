@@ -115,7 +115,8 @@ commits, PR) sont dans `CONTRIBUTING.md` et s'appliquent à Claude sans exceptio
 - PR : description selon `.github/pull_request_template.md` (quoi, pourquoi, validation analytique avec les écarts).
   Ensuite, s'arrêter et attendre l'OK explicite de Tim dans le chat. Après l'OK : `gh pr merge --squash
   --delete-branch`, puis revenir sur `main` à jour. Ne jamais fusionner sans cet OK, même si la CI est verte.
-- Fin de jalon : tag annoté `vX.Y.0` sur `main`, proposé à Tim avant d'être poussé.
+- Fin de jalon : la PR de clôture passe la version du workspace (`Cargo.toml`) à `X.Y.0`, puis tag annoté `vX.Y.0` sur `main`,
+  proposé à Tim avant d'être poussé.
 - Décider avant de coder : cadrage d'un jalon, choix d'architecture, nouvelle dépendance, changement d'API publique
   → proposer à Tim et attendre sa décision. Les détails d'implémentation restent à Claude.
 - Surgical changes : ne toucher que ce que la demande exige, ne pas refactorer au passage.
