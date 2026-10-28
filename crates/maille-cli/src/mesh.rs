@@ -14,9 +14,9 @@ use crate::files::{read, read_bytes, write, Failure};
 const FEATURE_ANGLE: f64 = 30.0;
 
 /// `maille mesh <dessin.dxf> --size <h> [--quadratic] [-o <maillage.msh>]` ou
-/// `maille mesh <piece.stl> [--feature-angle <degrés>] [--quadratic] [-o <maillage.msh>]`.
+/// `maille mesh <piece.stl> [--size <h>] [--feature-angle <degrés>] [--quadratic] [-o <maillage.msh>]`.
 pub fn mesh(args: &[String]) -> Result<(), Failure> {
-    let usage = "usage : maille mesh <dessin.dxf> --size <h> [--quadratic] [-o <maillage.msh>]\n        maille mesh <piece.stl> [--feature-angle <degrés>] [--quadratic] [-o <maillage.msh>]";
+    let usage = "usage : maille mesh <dessin.dxf> --size <h> [--quadratic] [-o <maillage.msh>]\n        maille mesh <piece.stl> [--size <h>] [--feature-angle <degrés>] [--quadratic] [-o <maillage.msh>]";
     let (mut input, mut size, mut angle, mut output, mut quadratic) =
         (None, None, None, None, false);
     let mut it = args.iter();
@@ -30,7 +30,7 @@ pub fn mesh(args: &[String]) -> Result<(), Failure> {
             "--size" => {
                 size = Some(number(
                     "--size",
-                    "taille h des Elements, dans les unités du dessin",
+                    "taille h des Elements, dans les unités du fichier",
                     it.next(),
                 )?)
             }
@@ -64,10 +64,12 @@ pub fn mesh(args: &[String]) -> Result<(), Failure> {
             (from_dxf(&input, size, quadratic)?, "triangles")
         }
         Some("stl") => {
-            if size.is_some() {
-                return Err("--size n'existe pas encore pour un STL : la finesse du maillage est celle des triangles du fichier. Pour un maillage plus fin, mailler le STL plus finement dans l'outil de CAO".into());
-            }
-            (from_stl(&input, angle.unwrap_or(FEATURE_ANGLE), quadratic)?, "tétraèdres")
+            let options = TetOptions {
+                size,
+                ..TetOptions::default()
+            };
+            let angle = angle.unwrap_or(FEATURE_ANGLE);
+            (from_stl(&input, angle, &options, quadratic)?, "tétraèdres")
         }
         other => {
             return Err(format!(
@@ -103,9 +105,16 @@ fn from_dxf(path: &Path, size: f64, quadratic: bool) -> Result<MshFile, Failure>
     })
 }
 
-fn from_stl(path: &Path, feature_angle: f64, quadratic: bool) -> Result<MshFile, Failure> {
+/// Sans `--size`, les tétraèdres ont la finesse des triangles du STL ; avec, la surface est
+/// remaillée à la taille h puis l'intérieur raffiné (voir `TetOptions`).
+fn from_stl(
+    path: &Path,
+    feature_angle: f64,
+    options: &TetOptions,
+    quadratic: bool,
+) -> Result<MshFile, Failure> {
     let surface = stl::read_surface(&read_bytes(path)?, feature_angle)?;
-    let tetrahedra = tetrahedralize(&surface, &TetOptions::default())?;
+    let tetrahedra = tetrahedralize(&surface, options)?;
     Ok(if quadratic {
         MshFile::from_tetrahedralization(&tetrahedra.to_quadratic())?
     } else {

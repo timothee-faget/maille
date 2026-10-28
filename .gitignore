@@ -4,3 +4,6 @@
 # résultats des exemples (maille solve examples/*.toml)
 /examples/*.vtu
 /examples/*.pvd
+
+# maillage généré par maille mesh tube3d.stl --size 2 --quadratic
+/examples/tube3d.msh

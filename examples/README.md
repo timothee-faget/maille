@@ -1,7 +1,7 @@
 # Exemples et guide des fichiers
 
 Maille résout un modèle en trois fichiers : **maillage → modèle → résultats**. En 2D, le maillage
-peut venir d'un dessin DXF 2D ou d'une surface STL 3D (`maille mesh`).
+peut venir d'un dessin DXF 2D ; en 3D, d'une surface STL (`maille mesh`).
 
 ```
 dessin (.dxf) ─┐
@@ -28,6 +28,7 @@ maille view trempe.pvd 50         # un incrément précis, depuis 0
 | `tube_thermique` puis `tube_contraintes` | couplage thermo-mécanique (lancer dans cet ordre) | Timoshenko et Goodier |
 | `tube_pression` | pression sur un bord, déformations planes | Lamé |
 | `cube` | 3D, Tet4 (viewer 3D ou ParaView) | champ linéaire |
+| `tube3d` | 3D depuis un STL : `maille mesh tube3d.stl --size 2 --quadratic` d'abord, Tet10 | Lamé |
 
 **Viewer 3D.** Un maillage de tétraèdres s'affiche par sa peau, colorée par le champ (touches 1 à 8 :
 von Mises, σxx, σyy, σzz, τxy, τyz, τxz, |u| ; 9 pour p en plasticité). Glisser tourne, Maj + glisser (ou
@@ -70,17 +71,28 @@ sont les dessins des exemples.
 ## La surface : STL 3D, ASCII ou binaire
 
 ```sh
-maille mesh cube.stl --quadratic   # écrit cube.msh (Tet10 ; sans --quadratic, Tet4)
+maille mesh cube.stl --quadratic             # écrit cube.msh (Tet10 ; sans --quadratic, Tet4)
+maille mesh tube3d.stl --size 2 --quadratic  # tétraèdres de taille h = 2 mm
 ```
 
 Le STL doit être une surface **fermée d'une seule pièce** (pas de trou, pas de cavité, chaque arête
 partagée par deux triangles). Maille soude les sommets, vérifie l'orientation et corrige des normales
 rentrantes. Le **nom du bord** est celui du `solid` (STL ASCII à plusieurs `solid`, comme
 `cube.stl`) ; sinon la surface est découpée aux arêtes vives (`--feature-angle`, 30° par défaut) en
-bords `surface_1`, `surface_2`… Le Set `domaine` contient tous les tétraèdres. Il n'y a **pas de
-`--size`** pour l'instant : la finesse est celle des triangles du STL (Maille ajoute des points sur la
-surface, mais n'affine pas) ; un STL grossier donne donc un maillage grossier, avec des tétraèdres
-parfois aplatis. Triangles très effilés (un disque en éventail de centaines de triangles) refusés.
+bords `surface_1`, `surface_2`… Le Set `domaine` contient tous les tétraèdres.
+
+**Taille h (`--size`).** Maille regroupe les triangles du STL en faces planes, remaille chacune à la
+taille h (triangles de rayon circonscrit au plus h/√3, comme en 2D), puis remplit l'intérieur de
+tétraèdres de taille au plus h (rayon circonscrit au plus h √6/4, rapport rayon / plus petite arête
+visé à 2), plus fins près des petits détails (gradation 0,3). Limites : une surface courbe d'un STL est
+faite de bandes planes, et une bande plus étroite que h garde sa largeur (la finesse est alors celle
+du facettage) ; près de la surface, la qualité est visée mais pas garantie, et des tétraèdres plats
+(slivers) peuvent rester ; un coin ou un dièdre de moins de 6° environ est refusé, avec un message.
+
+**Sans `--size`**, la finesse est celle des triangles du STL (Maille ajoute des points sur la
+surface, mais n'affine pas) : un STL grossier donne un maillage grossier, avec des tétraèdres parfois
+aplatis, et des triangles très effilés (un disque en éventail de centaines de triangles) sont refusés.
+`--size` lève ce refus, puisque la surface est remaillée.
 
 ## Le maillage : Gmsh `.msh` 4.1 ASCII
 
@@ -132,7 +144,8 @@ seul `.vtu` et un `.pvd`). Format ASCII, lisible par ParaView. Grandeurs aux Nod
 
 ## Régénérer les maillages
 
-Les `.msh` 2D d'ici viennent des `.dxf` voisins, par `maille mesh` (le cube, 3D, est écrit à la main ; `cube.stl` en est la surface, pour `maille mesh`) :
+Les `.msh` 2D d'ici viennent des `.dxf` voisins, par `maille mesh` (le cube, 3D, est écrit à la main ; `cube.stl` en est la surface, pour `maille mesh`). `tube3d.msh`
+n'est pas livré : `maille mesh tube3d.stl --size 2 --quadratic` l'écrit en une seconde :
 
 ```sh
 cargo test -p maille-cli --test examples -- --ignored

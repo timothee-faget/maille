@@ -198,15 +198,25 @@ fn dxf_drawing_meshed_by_the_cli_follows_the_analytic_field() {
     }
 }
 
-/// `cube.stl` (6 solids nommés comme les Sets de `cube.toml`) meshé par la CLI : l'élasticité linéaire
-/// retrouve exactement le champ affine, en Tet4 comme en Tet10.
+/// `cube.stl` (6 solids nommés comme les Sets de `cube.toml`) meshé par la CLI, à la finesse du STL
+/// puis à la taille h : l'élasticité linéaire retrouve exactement le champ affine, en Tet4 comme en
+/// Tet10.
 #[test]
 fn stl_surface_meshed_by_the_cli_follows_the_analytic_field() {
     let w = Workdir::new("stl");
-    for (quadratic, kind) in [(false, CellKind::Tet4), (true, CellKind::Tet10)] {
+    let cases = [
+        (false, None, CellKind::Tet4),
+        (true, None, CellKind::Tet10),
+        (false, Some("0.25"), CellKind::Tet4),
+        (true, Some("0.5"), CellKind::Tet10),
+    ];
+    for (quadratic, size, kind) in cases {
         let mut args = vec!["mesh", "cube.stl", "-o", "piece.msh"];
         if quadratic {
             args.push("--quadratic");
+        }
+        if let Some(h) = size {
+            args.extend(["--size", h]);
         }
         let out = w.maille(&args);
         assert!(
@@ -235,6 +245,57 @@ fn stl_surface_meshed_by_the_cli_follows_the_analytic_field() {
 
 /// `maille view --png` écrit une image PNG d'un résultat 3D, avec coupe et déformée. Sans carte
 /// graphique (machine d'intégration continue), le test est sauté.
+/// `tube3d.stl` (quart de tube facetté en 16 côtés) maillé à la taille h en Tet10 par la CLI, puis
+/// `tube3d.toml` : pressions intérieure et extérieure, bouts bloqués en z. Lamé en déformations
+/// planes, à l'erreur de facettage près (flèche des cordes : 1,2e-3 du rayon). Mesuré : u_r à
+/// 1,85e-3 près, contraintes à 4,4e-3 près en RMS.
+#[test]
+fn tube3d_meshed_from_its_stl_follows_lame() {
+    let w = Workdir::new("tube3d");
+    let out = w.maille(&["mesh", "tube3d.stl", "--size", "2", "--quadratic"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    w.solve("tube3d.toml");
+    let (_, r) = w.results("tube3d.pvd", None);
+    assert_eq!(r.kind, CellKind::Tet10);
+    let (u, s) = (array(&r, "displacement"), array(&r, "stress"));
+    let (pi, po, ri, ro, e, nu): (f64, f64, f64, f64, f64, f64) =
+        (100.0, 20.0, 10.0, 20.0, 210e3, 0.3);
+    let span = ro * ro - ri * ri;
+    let a = (pi * ri * ri - po * ro * ro) / span;
+    let b = (pi - po) * ri * ri * ro * ro / span;
+    let ur = |r: f64| (1.0 + nu) / e * ((1.0 - 2.0 * nu) * a * r + b / r);
+    let scale = a + b / (ri * ri);
+    let (mut worst_u, mut sum, mut count) = (0.0_f64, 0.0, 0);
+    for (i, p) in r.nodes.iter().enumerate() {
+        let radius = p.x.hypot(p.y);
+        let (c, sn) = (p.x / radius, p.y / radius);
+        let got_u = u[3 * i] * c + u[3 * i + 1] * sn;
+        worst_u = worst_u.max((got_u - ur(radius)).abs() / ur(ri));
+        let (xx, yy, xy) = (s[6 * i], s[6 * i + 1], s[6 * i + 3]);
+        let got = [
+            xx * c * c + yy * sn * sn + 2.0 * xy * c * sn,
+            xx * sn * sn + yy * c * c - 2.0 * xy * c * sn,
+            s[6 * i + 2],
+        ];
+        let want = [
+            a - b / (radius * radius),
+            a + b / (radius * radius),
+            2.0 * nu * a,
+        ];
+        for (g, x) in got.iter().zip(want) {
+            sum += (g - x) * (g - x);
+            count += 1;
+        }
+    }
+    let rms = (sum / count as f64).sqrt() / scale;
+    assert!(worst_u < 2.5e-3, "u_r : {worst_u:.2e}");
+    assert!(rms < 6e-3, "σ RMS : {rms:.2e}");
+}
+
 #[test]
 fn view_writes_a_png_of_a_3d_result() {
     let w = Workdir::new("png");
@@ -321,10 +382,8 @@ fn stl_mesh_command_reports_errors() {
         assert!(!out.status.success(), "{args:?}");
         assert!(stderr.contains(expected), "{args:?} : {stderr}");
     };
-    fail(
-        &["mesh", "cube.stl", "--size", "1"],
-        "pas encore pour un STL",
-    );
+    fail(&["mesh", "cube.stl", "--size", "0"], "taille h");
+    fail(&["mesh", "cube.stl", "--size", "fin"], "attend un nombre");
     fail(
         &["mesh", "plaque.dxf", "--size", "1", "--feature-angle", "20"],
         "ne sert qu'aux fichiers STL",
