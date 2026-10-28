@@ -14,7 +14,7 @@ M0 à M11 (dont M7b et M10b) terminés : FEM 1D barre + poutre ; élasticité pl
 cylindriques, coniques, sphériques et toriques, arêtes en segments, arcs et B-splines) et
 `maille_core::mesher::tetrahedralize_brep` le maille à la taille h, chaque face dans une carte plane (déroulée, ou
 conforme pour la sphère et le tore) ; validé par le tube de Lamé lu en B-rep exact et la sphère creuse de Lamé
-(`examples/sphere.step`). Tout est validé contre l'analytique. Suite (M12+) dans la roadmap (28.41). Workspace Cargo : `crates/maille-core` (lib pure, zéro dépendance), `crates/maille-io` (fichiers : `.msh` Gmsh 4.1 ASCII, modèle TOML et résultats VTK, M7 ; dessin DXF 2D, M9), `crates/maille-viewer` (client 2D : wgpu, winit, glyphon) et `crates/maille-cli` (le binaire `maille` : `maille solve modele.toml` écrit les résultats `.vtu` et `.pvd`, `maille view resultats.pvd` ouvre le viewer, `maille mesh dessin.dxf --size h [--quadratic]` écrit un `.msh` depuis un dessin DXF, `maille mesh piece.stl [--size h] [--feature-angle a] [--quadratic]` depuis un STL, `maille mesh piece.step --size h
+(`examples/sphere.step`). Tout est validé contre l'analytique. Suite (M12+) dans la roadmap (28.41). Workspace Cargo : `crates/maille-core` (lib pure, zéro dépendance), `crates/maille-io` (fichiers : `.msh` Gmsh 4.1 ASCII, modèle TOML et résultats VTK, M7 ; dessin DXF 2D, M9 ; surface STL, M10 ; pièce STEP, M11), `crates/maille-viewer` (client 2D et 3D : wgpu, winit, glyphon) et `crates/maille-cli` (le binaire `maille` : `maille solve modele.toml` écrit les résultats `.vtu` et `.pvd`, `maille view resultats.pvd` ouvre le viewer, `maille mesh dessin.dxf --size h [--quadratic]` écrit un `.msh` depuis un dessin DXF, `maille mesh piece.stl [--size h] [--feature-angle a] [--quadratic]` depuis un STL, `maille mesh piece.step --size h
 [--quadratic]` depuis un STEP ; les cas `maille kirsch`, `cylindre`, `trempe`, `cylindre-thermo` et `cylindre-plastique` maillent leur géométrie puis ouvrent le viewer). Exemples et guide des fichiers dans `examples/`.
 
 Commandes :
@@ -108,7 +108,7 @@ commits, PR) sont dans `CONTRIBUTING.md` et s'appliquent à Claude sans exceptio
   ni de push direct dessus, tout passe par une PR avec la CI verte (fmt, clippy, test, cargo-deny).
 - Une branche par sujet, depuis `main` à jour : `<type>/<sujet>` (`feat/`, `fix/`, `refactor/`, `docs/`, `ci/`,
   `chore/`). Un jalon peut se découper en plusieurs PR, une par étape relisible.
-- Commits en Conventional Commits, en français (`feat(core): …`, portées `core`, `mesher`, `viewer`, `cli`).
+- Commits en Conventional Commits, en français (`feat(core): …`, portées `core`, `mesher`, `io`, `viewer`, `cli`).
   Petits et cohérents ; chaque commit compile et passe les tests.
 - Avant de pousser : `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, `cargo test`,
   `cargo deny check licenses sources`. Montrer la sortie plutôt que d'affirmer que ça passe.

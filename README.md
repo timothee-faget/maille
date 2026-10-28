@@ -12,7 +12,13 @@ Chaque élément et chaque physique sont validés contre une solution analytique
 - Thermique stationnaire et transitoire (conduction, source, convection)
 - Couplage thermo-mécanique séquentiel (dilatation thermique)
 - Plasticité de von Mises en petites déformations (écrouissage isotrope linéaire)
-- Mailleur 2D (Delaunay contraint, raffinement de Ruppert) et viewer natif (wgpu)
+- Pression sur une face, en 2D et en 3D
+- Solveur creux direct (Cholesky en ligne de ciel) et itératif (gradients conjugués préconditionnés), choisi
+  selon la taille du problème
+- Mailleur 2D (Delaunay contraint, raffinement de Ruppert) et mailleur 3D (tétraèdres, à la taille h)
+- Import CAO : dessin DXF 2D, surface STL 3D, pièce STEP 3D (faces planes, cylindriques, coniques,
+  sphériques et toriques)
+- Viewer natif 2D et 3D (wgpu), avec plan de coupe et capture en image PNG
 
 Le projet est en cours de développement : l'API n'est pas stable.
 
@@ -22,10 +28,12 @@ Le projet est en cours de développement : l'API n'est pas stable.
 cargo build --release
 cd examples
 ../target/release/maille solve traction.toml     # maillage .msh + modèle .toml → résultats .vtu/.pvd
-../target/release/maille view traction.pvd       # ouvre le viewer 2D
+../target/release/maille view traction.pvd       # ouvre le viewer
+../target/release/maille mesh sphere.step --size 2 --quadratic   # maille une pièce STEP → sphere.msh
 ```
 
-Le flux de travail (maillage Gmsh `.msh`, modèle `.toml`, résultats VTK lisibles par ParaView) et les exemples
+Le flux de travail (CAO DXF, STL ou STEP, maillage Gmsh `.msh`, modèle `.toml`, résultats VTK lisibles par
+ParaView) et les exemples
 sont décrits dans [`examples/README.md`](examples/README.md).
 
 Des cas d'exemple, qui maillent leur géométrie, comparent le résultat à la solution analytique, puis ouvrent le
@@ -36,10 +44,10 @@ viewer : `maille console`, `kirsch`, `cylindre`, `trempe`, `cylindre-thermo` et 
 
 | Crate | Rôle |
 |---|---|
-| `maille-core` | Cœur de calcul pur (maillage, éléments, assemblage, solveur), sans dépendance ni I/O |
-| `maille-io` | Fichiers : maillage Gmsh `.msh`, modèle TOML, résultats VTK |
-| `maille-viewer` | Viewer 2D (wgpu, winit, glyphon) |
-| `maille-cli` | Le binaire `maille` : `solve`, `view` et les cas d'exemple |
+| `maille-core` | Cœur de calcul pur (maillage, éléments, assemblage, solveur, mailleurs 2D et 3D), sans dépendance ni I/O |
+| `maille-io` | Fichiers : dessin DXF, surface STL, pièce STEP, maillage Gmsh `.msh`, modèle TOML, résultats VTK |
+| `maille-viewer` | Viewer 2D et 3D (wgpu, winit, glyphon) |
+| `maille-cli` | Le binaire `maille` : `solve`, `view`, `mesh` et les cas d'exemple |
 
 ## Unités
 

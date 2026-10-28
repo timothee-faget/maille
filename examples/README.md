@@ -1,11 +1,12 @@
 # Exemples et guide des fichiers
 
 Maille résout un modèle en trois fichiers : **maillage → modèle → résultats**. En 2D, le maillage
-peut venir d'un dessin DXF 2D ; en 3D, d'une surface STL (`maille mesh`).
+peut venir d'un dessin DXF 2D ; en 3D, d'une surface STL ou d'une pièce STEP (`maille mesh`).
 
 ```
-dessin (.dxf) ─┐
-surface (.stl) ┴ maille mesh ──▶
+dessin (.dxf) ──┐
+surface (.stl) ─┤
+pièce (.step) ──┴ maille mesh ──▶
 maillage (.msh) ──┐
                   ├─ maille solve ──▶ résultats (.pvd + .vtu) ──▶ maille view / ParaView
 modèle (.toml) ───┘                                  │

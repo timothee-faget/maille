@@ -1,8 +1,8 @@
 //! Surface STL (ASCII ou binaire) vers `Surface` : triangles soudés, fermés et orientés vers
-//! l'extérieur, répartis en patches nommés. C'est l'entrée du futur mailleur 3D.
+//! l'extérieur, répartis en patches nommés. C'est l'entrée du mailleur 3D (`tetrahedralize`).
 //!
 //! Les unités du fichier sont reprises telles quelles : un STL n'en porte pas et le cœur ne
-//! convertit rien. Le nom d'un patch deviendra le nom du Set où poser les BC.
+//! convertit rien. Le nom d'un patch devient le nom du Set où poser les BC.
 
 mod reader;
 mod surface;
