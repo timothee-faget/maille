@@ -64,6 +64,15 @@ pub struct Field {
     pub temperatures: Vec<f64>,
     /// Thermique : flux de chaleur aux points de Gauss de chaque Element.
     pub heat_fluxes: Vec<Vec<HeatFlux>>,
+    /// Calcul avec contacts : force de contact sur le corps déformable, un vecteur par DOF (zéro hors
+    /// des Nodes en contact). Vide sans contacts.
+    pub contact_forces: Vec<f64>,
+    /// Calcul avec contacts : force exercée sur chaque surface rigide (un `Contact` : un vecteur
+    /// (x, y, z)), opposée à la somme des forces de contact. Vide sans contacts.
+    pub rigid_forces: Vec<[f64; 3]>,
+    /// Calcul avec contacts : pression de contact en chaque Node, force de contact divisée par son aire
+    /// tributaire (zéro hors contact). Vide sans contacts.
+    pub contact_pressures: Vec<f64>,
 }
 
 /// Résultat d'un incrément d'une Step : le Field au temps `time`, compté depuis le début de la Step.
@@ -284,6 +293,9 @@ mod tests {
             equivalent_plastic_strains: Vec::new(),
             temperatures: Vec::new(),
             heat_fluxes: Vec::new(),
+            contact_forces: Vec::new(),
+            rigid_forces: Vec::new(),
+            contact_pressures: Vec::new(),
         };
         assert_eq!(nodal_stresses(&bars, &empty), Err(MailleError::NoStresses));
 

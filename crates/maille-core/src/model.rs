@@ -6,6 +6,7 @@ use crate::assembly::{
     element_stiffness, element_stresses, element_thermal_load, element_thermal_strains,
     face_convection, face_pressure, follower_pressure, FaceConvection, FluxOperator,
 };
+use crate::contact::{contact_terms, Contact, ContactTerms};
 use crate::element::{bar_equivalent_load, beam_equivalent_load, ElementResponse};
 use crate::error::MailleError;
 use crate::iterative::{Csr, Graph, Pcg};
@@ -228,6 +229,9 @@ pub struct Model {
     temperatures: Option<(Vec<f64>, f64)>,
     solver: SolverKind,
     kinematics: Kinematics,
+    contacts: Vec<Contact>,
+    /// Raideur de pénalité et aire tributaire de chaque Node de `contacts`, voir `contact_terms`.
+    contact_terms: Vec<ContactTerms>,
 }
 
 impl Model {
@@ -291,7 +295,44 @@ impl Model {
             temperatures: None,
             solver: SolverKind::default(),
             kinematics: Kinematics::default(),
+            contacts: Vec::new(),
+            contact_terms: Vec::new(),
         })
+    }
+
+    /// Contacts sans frottement de Nodes esclaves (un bord) contre des surfaces rigides, en statique et
+    /// par `solve_quasi_static` seulement. Triangles et tétraèdres ; en petites comme en grandes
+    /// déformations, l'interstice est évalué sur la position courante x + u. Pénalité automatique.
+    pub fn with_contacts(mut self, contacts: Vec<Contact>) -> Result<Self, MailleError> {
+        if self.analysis != Analysis::Static {
+            return Err(MailleError::StaticOnly);
+        }
+        if let Some(element) = self
+            .mesh
+            .elements
+            .iter()
+            .position(|e| matches!(e, Element::Bar(_) | Element::Beam(_)))
+        {
+            return Err(MailleError::UnsupportedContactElement { element });
+        }
+        let dim = self.mesh.dofs_per_node();
+        let mut terms = Vec::new();
+        for contact in &contacts {
+            if let Some(&node) = contact.nodes.iter().find(|&&n| n >= self.mesh.nodes.len()) {
+                return Err(MailleError::UnknownNode { node });
+            }
+            contact.surface.check(dim)?;
+            if let Some(&value) = contact.motion.iter().find(|v| !v.is_finite()) {
+                return Err(MailleError::NonFinite {
+                    name: "motion (déplacement de la surface rigide)",
+                    value,
+                });
+            }
+            terms.push(contact_terms(&self.mesh, contact)?);
+        }
+        self.contacts = contacts;
+        self.contact_terms = terms;
+        Ok(self)
     }
 
     /// Cinématique du calcul statique (`Kinematics::Small` par défaut). `Large` : grandes
@@ -458,6 +499,9 @@ impl Model {
         if self.kinematics == Kinematics::Large {
             return Err(MailleError::LargeStrainNeedsQuasiStatic);
         }
+        if !self.contacts.is_empty() {
+            return Err(MailleError::ContactNeedsQuasiStatic);
+        }
         self.require_small_strain_laws()?;
         let mesh = &self.mesh;
         if let Some(i) = mesh
@@ -507,6 +551,9 @@ impl Model {
                 reactions,
                 temperatures: Vec::new(),
                 heat_fluxes: Vec::new(),
+                contact_forces: Vec::new(),
+                rigid_forces: Vec::new(),
+                contact_pressures: Vec::new(),
             },
             Analysis::Thermal => thermal_field(&flux_operators(mesh), u, reactions),
         })
@@ -633,7 +680,12 @@ impl Model {
         let at_rest = self.responses(&state.u, &state.committed);
         let mut history = vec![Increment {
             time: 0.0,
-            field: quasi_static_field(state.u.clone(), vec![0.0; a.f.len()], at_rest),
+            field: quasi_static_field(
+                state.u.clone(),
+                vec![0.0; a.f.len()],
+                at_rest,
+                ContactState::none(a.f.len(), self.mesh.nodes.len(), self.contacts.len()),
+            ),
             residuals: Vec::new(),
         }];
         for increment in 1..=step.increments() {
@@ -647,9 +699,10 @@ impl Model {
                 0,
                 (increment, time),
             )?;
+            let contact = self.contact_state(&state.u, amplitude.at(time));
             history.push(Increment {
                 time,
-                field: quasi_static_field(state.u.clone(), reactions, responses),
+                field: quasi_static_field(state.u.clone(), reactions, responses, contact),
                 residuals,
             });
         }
@@ -766,13 +819,26 @@ impl Model {
         (increment, time): (usize, f64),
     ) -> Result<Equilibrium, MailleError> {
         let mut residuals = Vec::new();
+        // un « Element » de plus par Node esclave, pour la tangente du contact
+        let mut all_dofs = a.dofs.clone();
+        for contact in &self.contacts {
+            let dim = self.mesh.dofs_per_node();
+            all_dofs.extend(
+                contact
+                    .nodes
+                    .iter()
+                    .map(|&n| (0..dim).map(|c| dim * n + c).collect::<Vec<_>>()),
+            );
+        }
         loop {
             let mut responses = self.responses(u, committed);
             let follower = self.follower_force(a, u, lambda, &mut responses);
+            let contact = self.contact_state(u, lambda);
             let external: Vec<f64> =
                 a.f.iter()
                     .zip(&follower)
-                    .map(|(f, p)| lambda * (f + p))
+                    .zip(&contact.force)
+                    .map(|((f, p), c)| lambda * (f + p) + c)
                     .collect();
             let internal = internal_force(&responses, &a.dofs, u.len());
             let residual: Vec<f64> = internal.iter().zip(&external).map(|(i, e)| i - e).collect();
@@ -814,8 +880,15 @@ impl Model {
                 .zip(&*u)
                 .map(|((&c, imposed), u)| if c { lambda * imposed - u } else { 0.0 })
                 .collect();
-            let tangent = |i: usize| responses[i].tangent.as_slice();
-            let system = match FreeSystem::new(&a.dofs, &tangent, &a.fixed, &du, self.solver) {
+            let elements = responses.len();
+            let tangent = |i: usize| {
+                if i < elements {
+                    responses[i].tangent.as_slice()
+                } else {
+                    contact.blocks[i - elements].as_slice()
+                }
+            };
+            let system = match FreeSystem::new(&all_dofs, &tangent, &a.fixed, &du, self.solver) {
                 Err(MailleError::Singular) if responses.iter().any(|r| r.yielding) => {
                     return Err(MailleError::PlasticCollapse { increment, time })
                 }
@@ -826,6 +899,39 @@ impl Model {
                 *u += du;
             }
         }
+    }
+
+    /// Force de contact sur le corps aux déplacements `u` quand la surface rigide a avancé de
+    /// λ × `motion`, la raideur de chaque Node esclave (bloc dim × dim, nul hors contact) et la force
+    /// sur chaque surface rigide. g < 0 : f = k (−g) n, tangente k (n ⊗ n + g ∂n/∂x).
+    fn contact_state(&self, u: &[f64], lambda: f64) -> ContactState {
+        let mut state = ContactState::none(u.len(), self.mesh.nodes.len(), self.contacts.len());
+        let dim = self.mesh.dofs_per_node();
+        for (c, (contact, terms)) in self.contacts.iter().zip(&self.contact_terms).enumerate() {
+            for ((&node, &k), &area) in contact.nodes.iter().zip(&terms.stiffness).zip(&terms.area)
+            {
+                let n = &self.mesh.nodes[node];
+                let mut x = [n.x, n.y, n.z];
+                for (i, xi) in x.iter_mut().enumerate().take(dim) {
+                    *xi += u[dim * node + i] - lambda * contact.motion[i];
+                }
+                let gap = contact.surface.gap(x, dim);
+                let mut block = vec![vec![0.0; dim]; dim];
+                if gap.g < 0.0 {
+                    state.pressure[node] += k * -gap.g / area;
+                    for (i, row) in block.iter_mut().enumerate() {
+                        let force = k * -gap.g * gap.n[i];
+                        state.force[dim * node + i] += force;
+                        state.resultants[c][i] -= force;
+                        for (j, b) in row.iter_mut().enumerate() {
+                            *b = k * (gap.n[i] * gap.n[j] + gap.g * gap.dn[i][j]);
+                        }
+                    }
+                }
+                state.blocks.push(block);
+            }
+        }
+        state
     }
 
     /// Réponse élasto-plastique de chaque Element aux déplacements `u`, depuis les états `committed`.
@@ -915,6 +1021,27 @@ impl Model {
     }
 }
 
+/// Contacts à un instant : force sur le corps (par DOF), bloc de raideur de chaque Node esclave (dans
+/// l'ordre des `Contact`), force sur chaque surface rigide.
+struct ContactState {
+    force: Vec<f64>,
+    blocks: Vec<Vec<Vec<f64>>>,
+    resultants: Vec<[f64; 3]>,
+    /// Pression de contact par Node.
+    pressure: Vec<f64>,
+}
+
+impl ContactState {
+    fn none(dofs: usize, nodes: usize, contacts: usize) -> Self {
+        Self {
+            force: vec![0.0; dofs],
+            pressure: vec![0.0; nodes],
+            blocks: Vec::new(),
+            resultants: vec![[0.0; 3]; contacts],
+        }
+    }
+}
+
 /// Ce que `solve_quasi_static` porte d'un incrément à l'autre.
 struct QuasiStaticState {
     u: Vec<f64>,
@@ -962,7 +1089,9 @@ fn quasi_static_field(
     displacements: Vec<f64>,
     reactions: Vec<f64>,
     responses: Vec<ElementResponse>,
+    contact: ContactState,
 ) -> Field {
+    let with_contacts = !contact.resultants.is_empty();
     let (stresses, equivalent_plastic_strains) = responses
         .into_iter()
         .map(|r| (r.stresses, r.states.iter().map(|s| s.p).collect()))
@@ -974,6 +1103,17 @@ fn quasi_static_field(
         equivalent_plastic_strains,
         temperatures: Vec::new(),
         heat_fluxes: Vec::new(),
+        contact_forces: if with_contacts {
+            contact.force
+        } else {
+            Vec::new()
+        },
+        rigid_forces: contact.resultants,
+        contact_pressures: if with_contacts {
+            contact.pressure
+        } else {
+            Vec::new()
+        },
     }
 }
 
@@ -1024,6 +1164,9 @@ fn flux_operators(mesh: &Mesh) -> Vec<FluxOperator> {
 fn thermal_field(fluxes: &[FluxOperator], temperatures: Vec<f64>, reactions: Vec<f64>) -> Field {
     Field {
         heat_fluxes: fluxes.iter().map(|flux| flux(&temperatures)).collect(),
+        contact_forces: Vec::new(),
+        rigid_forces: Vec::new(),
+        contact_pressures: Vec::new(),
         temperatures,
         reactions,
         displacements: Vec::new(),

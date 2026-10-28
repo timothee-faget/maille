@@ -444,6 +444,9 @@ mod tests {
             equivalent_plastic_strains: Vec::new(),
             temperatures: Vec::new(),
             heat_fluxes: Vec::new(),
+            contact_forces: Vec::new(),
+            rigid_forces: Vec::new(),
+            contact_pressures: Vec::new(),
         }
     }
 
@@ -629,6 +632,9 @@ mod tests {
             equivalent_plastic_strains: Vec::new(),
             temperatures: Vec::new(),
             heat_fluxes: Vec::new(),
+            contact_forces: Vec::new(),
+            rigid_forces: Vec::new(),
+            contact_pressures: Vec::new(),
         };
         assert_eq!(
             Scene::new(&mesh, &field).err(),
@@ -647,6 +653,9 @@ mod tests {
             equivalent_plastic_strains: Vec::new(),
             temperatures: temperatures.clone(),
             heat_fluxes: Vec::new(),
+            contact_forces: Vec::new(),
+            rigid_forces: Vec::new(),
+            contact_pressures: Vec::new(),
         };
         let scene = Scene::new(&mesh, &field).unwrap();
         assert_eq!(scene.quantities(), &[Quantity::Temperature]);
