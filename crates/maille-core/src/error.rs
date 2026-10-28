@@ -130,6 +130,20 @@ pub enum MailleError {
     },
     /// `Model::solve` (linéaire) avec `Kinematics::Large`.
     LargeStrainNeedsQuasiStatic,
+    /// Contact sur un maillage qui a une Bar ou une Beam.
+    UnsupportedContactElement {
+        element: usize,
+    },
+    /// Surface rigide invalide (valeur non finie, normale ou axe nul, rayon non positif).
+    InvalidRigidSurface {
+        problem: &'static str,
+    },
+    /// Un Node esclave n'est sur aucune face dont tous les Nodes sont esclaves.
+    ContactNodeWithoutFace {
+        node: usize,
+    },
+    /// `Model::solve` (linéaire) avec des contacts.
+    ContactNeedsQuasiStatic,
     /// Newton-Raphson n'a pas trouvé l'équilibre de l'incrément `increment` (temps `time`).
     NotConverged {
         increment: usize,
@@ -377,6 +391,19 @@ impl fmt::Display for MailleError {
             Self::LargeStrainNeedsQuasiStatic => write!(
                 f,
                 "Kinematics::Large demande un calcul non linéaire : utiliser Model::solve_quasi_static avec une Step::quasi_static et une Amplitude, au lieu de Model::solve"
+            ),
+            Self::UnsupportedContactElement { element } => write!(
+                f,
+                "l'Element {element} est une Bar ou une Beam : le contact demande un maillage de triangles ou de tétraèdres"
+            ),
+            Self::InvalidRigidSurface { problem } => write!(f, "surface rigide invalide : {problem}"),
+            Self::ContactNodeWithoutFace { node } => write!(
+                f,
+                "le Node {node} d'un contact n'est sur aucune face de bord dont tous les Nodes sont dans le contact : donner tous les Nodes d'un bord (le Set du bord), pas des Nodes isolés"
+            ),
+            Self::ContactNeedsQuasiStatic => write!(
+                f,
+                "un contact est non linéaire : utiliser Model::solve_quasi_static avec une Step::quasi_static et une Amplitude, au lieu de Model::solve"
             ),
             Self::NotConverged { increment, time } => write!(
                 f,

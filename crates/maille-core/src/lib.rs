@@ -18,6 +18,7 @@
 //! (en 1/K) relie les deux systèmes d'unités, chacun cohérent de son côté.
 
 pub mod assembly;
+pub mod contact;
 pub mod element;
 pub mod error;
 pub mod finite_strain;
