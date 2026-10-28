@@ -1,0 +1,51 @@
+# Tube épais sous pression, en 3D : le cas `tube_pression` maillé en tétraèdres depuis une surface STL.
+#
+# Un quart de tube (rayon intérieur 10 mm, extérieur 20 mm, hauteur 5 mm), facetté en 16 côtés :
+# 100 MPa de pression à l'intérieur, 20 MPa à l'extérieur. Les deux bouts sont bloqués en z
+# (déformations planes) : solution de Lamé, à l'erreur de facettage près (de l'ordre de 0,2 %).
+#
+# Lancer : maille mesh tube3d.stl --size 2 --quadratic     (écrit tube3d.msh, en Tet10)
+#          maille solve tube3d.toml                         puis : maille view tube3d.pvd
+
+units = "N, mm, MPa"
+mesh = "tube3d.msh"
+analysis = "static"
+
+[materials.acier]
+young = 210e3
+poisson = 0.3
+
+# En 3D, ni thickness ni plane_state.
+[[sections]]
+set = "domaine"
+material = "acier"
+
+# Symétries du quart de tube, en appui glissant.
+[[bcs]]
+set = "sym_x"
+dof = "uy"
+value = 0.0
+
+[[bcs]]
+set = "sym_y"
+dof = "ux"
+value = 0.0
+
+# Bouts bloqués en z : déformations planes.
+[[bcs]]
+set = "bas"
+dof = "uz"
+value = 0.0
+
+[[bcs]]
+set = "haut"
+dof = "uz"
+value = 0.0
+
+[[pressures]]
+set = "interieur"
+value = 100.0
+
+[[pressures]]
+set = "exterieur"
+value = 20.0

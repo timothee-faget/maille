@@ -2,8 +2,8 @@
 //! - `maille solve modele.toml` résout un modèle (fichiers `.msh` et `.toml`) et écrit les
 //!   résultats (`.vtu` et `.pvd`), voir `files.rs` ;
 //! - `maille view resultats.pvd` affiche des résultats, voir `files.rs` ;
-//! - `maille mesh dessin.dxf --size h` maille un dessin DXF 2D, `maille mesh piece.stl` une surface
-//!   STL 3D, voir `mesh.rs` ;
+//! - `maille mesh dessin.dxf --size h` maille un dessin DXF 2D, `maille mesh piece.stl [--size h]`
+//!   une surface STL 3D, voir `mesh.rs` ;
 //! - les cas d'exemple ci-dessous, comparés à la solution analytique.
 //!
 //! Cas d'exemple :
@@ -49,8 +49,9 @@ Usage :
                                               (--size LxH, --angles lacet,tangage, --field k, --deformed, --cut x=0.5)
   maille mesh <dessin.dxf> --size <h> [--quadratic] [-o <maillage.msh>]
                                               maille un dessin DXF 2D (calque = nom de bord)
-  maille mesh <piece.stl> [--feature-angle <degrés>] [--quadratic] [-o <maillage.msh>]
-                                              maille une surface STL 3D (solid = nom de bord)
+  maille mesh <piece.stl> [--size <h>] [--feature-angle <degrés>] [--quadratic] [-o <maillage.msh>]
+                                              maille une surface STL 3D (solid = nom de bord) ;
+                                              sans --size, à la finesse des triangles du STL
 
 Cas d'exemple, comparés à la solution analytique :
   maille console | kirsch | cylindre | trempe | cylindre-thermo | cylindre-plastique
