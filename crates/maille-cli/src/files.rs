@@ -109,7 +109,10 @@ fn solve_file(model_path: &Path, output: Option<&Path>) -> Result<Vec<PathBuf>, 
             format!("_{k:04}.vtu")
         });
         let arrays = vtk::result_arrays(&loaded.mesh, field)?;
-        write(&path, &vtk::write_vtu(&mesh, &loaded.units, &arrays)?)?;
+        write(
+            &path,
+            &vtk::write_vtu(&mesh, &loaded.units, loaded.large_strain, &arrays)?,
+        )?;
         entries.push(Entry {
             time: *time,
             file: path
@@ -269,6 +272,7 @@ fn to_nodal(r: &VtuResults) -> Result<NodalResults, Failure> {
         stresses,
         temperatures,
         plastic_strains: array("plastic_strain", 1).unwrap_or_default().to_vec(),
+        large_strain: r.large_strain,
     })
 }
 
@@ -292,6 +296,7 @@ mod tests {
             cells: vec![vec![0, 1, 2]],
             arrays,
             units: None,
+            large_strain: false,
         }
     }
 

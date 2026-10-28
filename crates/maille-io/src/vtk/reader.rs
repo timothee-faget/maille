@@ -226,5 +226,6 @@ pub fn read_results(text: &str) -> Result<VtuResults, IoError> {
         cells: connectivity.chunks(width).map(<[usize]>::to_vec).collect(),
         arrays,
         units,
+        large_strain: text.contains("<!-- kinematics: large -->"),
     })
 }

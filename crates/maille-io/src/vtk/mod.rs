@@ -30,6 +30,8 @@ pub struct VtuResults {
     pub arrays: Vec<PointArray>,
     /// Le commentaire `units` écrit par `write_vtu`, s'il y est.
     pub units: Option<String>,
+    /// Le commentaire `kinematics: large` de `write_vtu` est là : grandes déformations.
+    pub large_strain: bool,
 }
 
 /// Un `.vtu` d'un `.pvd` : le temps de l'Increment et le nom du fichier.

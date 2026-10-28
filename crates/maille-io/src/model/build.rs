@@ -2,10 +2,10 @@
 
 use std::collections::BTreeMap;
 
-use maille_core::material::Material;
+use maille_core::material::{Hyperelasticity, Material};
 use maille_core::mesh::{Dof, Element, Mesh, PlaneState, Tet10, Tet4, Tri3, Tri6};
 use maille_core::model::{
-    Amplitude, Analysis, Bc, Convection, HeatSource, Load, Model, Pressure, Step,
+    Amplitude, Analysis, Bc, Convection, HeatSource, Kinematics, Load, Model, Pressure, Step,
 };
 
 use super::schema::*;
@@ -137,11 +137,35 @@ pub fn build(
         None => Run::Linear,
         Some(def) => step(def, file.analysis, mesh.nodes.len())?,
     };
+    let large_strain = file.kinematics == Some(KinematicsDef::Large);
+    if large_strain {
+        if file.analysis != AnalysisKind::Static {
+            return Err(invalid(
+                "kinematics = \"large\" demande analysis = \"static\"".to_string(),
+            ));
+        }
+        if !matches!(run, Run::QuasiStatic { .. }) {
+            return Err(invalid(
+                "kinematics = \"large\" demande une section [step] avec kind = \"quasi_static\" : les grandes déformations se calculent par incréments"
+                    .to_string(),
+            ));
+        }
+        model = model.with_kinematics(Kinematics::Large)?;
+    } else if let Some((name, _)) = file
+        .materials
+        .iter()
+        .find(|(_, def)| def.hyperelasticity.is_some())
+    {
+        return Err(invalid(format!(
+            "matériau « {name} » : `hyperelasticity` demande kinematics = \"large\" (la loi n'existe qu'en grandes déformations)"
+        )));
+    }
     Ok(Loaded {
         units: file.units.clone(),
         mesh: core_mesh,
         model,
         run,
+        large_strain,
     })
 }
 
@@ -229,6 +253,9 @@ fn material(name: &str, def: &MaterialDef) -> Result<Material, IoError> {
             )))
         }
         (None, None) => {}
+    }
+    if let Some(HyperelasticityDef::NeoHookean) = def.hyperelasticity {
+        m = m.with_hyperelasticity(Hyperelasticity::NeoHookean);
     }
     Ok(m)
 }

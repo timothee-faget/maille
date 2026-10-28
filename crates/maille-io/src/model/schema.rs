@@ -5,6 +5,7 @@
 //! units = "N, mm, MPa"            # obligatoire, texte libre, recopié dans les résultats
 //! mesh  = "tube.msh"
 //! analysis = "static"             # ou "thermal"
+//! kinematics = "small"            # ou "large" : grandes déformations (statique, avec [step])
 //!
 //! [materials.acier]
 //! young = 210e3
@@ -38,6 +39,8 @@ pub struct ModelFile {
     /// Nom du fichier de maillage `.msh`, ouvert par le CLI.
     pub mesh: String,
     pub analysis: AnalysisKind,
+    /// Cinématique du calcul statique, petites déformations par défaut.
+    pub kinematics: Option<KinematicsDef>,
     #[serde(default)]
     pub materials: BTreeMap<String, MaterialDef>,
     #[serde(default)]
@@ -66,6 +69,19 @@ pub enum AnalysisKind {
     Thermal,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum KinematicsDef {
+    Small,
+    Large,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HyperelasticityDef {
+    NeoHookean,
+}
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MaterialDef {
@@ -79,6 +95,8 @@ pub struct MaterialDef {
     pub yield_stress: Option<f64>,
     /// Module d'écrouissage H, 0 par défaut (parfaitement plastique).
     pub hardening: Option<f64>,
+    /// Loi hyperélastique, grandes déformations seulement ; Saint-Venant–Kirchhoff sans elle.
+    pub hyperelasticity: Option<HyperelasticityDef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
