@@ -782,7 +782,9 @@ impl Chart {
     fn flat(&self, [a, b]: [f64; 2]) -> [f64; 2] {
         match self.kind {
             Kind::Plane { .. } => [a, b],
-            Kind::Round { radius, sin: 0.0, .. } => [radius * a, b],
+            Kind::Round {
+                radius, sin: 0.0, ..
+            } => [radius * a, b],
             Kind::Round {
                 radius, tan, sin, ..
             } => {
