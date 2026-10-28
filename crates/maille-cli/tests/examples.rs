@@ -69,7 +69,12 @@ fn cube() -> MshFile {
 #[ignore = "régénère les .msh d'examples/"]
 fn regenerate_example_meshes() {
     let dir = examples_dir();
-    for (name, size) in [("plaque", "0.5"), ("trempe", "1"), ("tube", "1")] {
+    for (name, size) in [
+        ("plaque", "0.5"),
+        ("trempe", "1"),
+        ("tube", "1"),
+        ("console_gd", "0.5"),
+    ] {
         let out = Command::new(env!("CARGO_BIN_EXE_maille"))
             .args([
                 "mesh",
@@ -162,6 +167,34 @@ fn traction_follows_the_analytic_field() {
         assert!((s[6 * i] - 210.0).abs() < 1e-6, "σx = {}", s[6 * i]);
         assert!(s[6 * i + 1].abs() < 1e-6);
     }
+}
+
+#[test]
+fn large_strain_cantilever_follows_the_elastica() {
+    // PL²/EI = 2 : w/L = 0,4935 et u/L = 0,1606 (Bisshopp et Drucker 1945, Mattiasson 1981)
+    let w = Workdir::new("console-gd");
+    w.solve("console_gd.toml");
+    let (time, r) = w.results("console_gd.pvd", None);
+    assert!((time - 1.0).abs() < 1e-12);
+    assert!(
+        r.large_strain,
+        "le .vtu doit porter la marque des grandes déformations"
+    );
+    let tip = r
+        .nodes
+        .iter()
+        .position(|p| (p.x - 20.0).abs() < 1e-9 && (p.y - 0.5).abs() < 1e-9)
+        .unwrap();
+    let u = array(&r, "displacement");
+    let (w_tip, shortening) = (-u[3 * tip + 1] / 20.0, -u[3 * tip] / 20.0);
+    assert!((w_tip / 0.4935 - 1.0).abs() < 1e-2, "w/L = {w_tip}");
+    assert!(
+        (shortening / 0.1606 - 1.0).abs() < 2e-2,
+        "u/L = {shortening}"
+    );
+    // dix incréments plus l'état de repos
+    let pvd = fs::read_to_string(w.0.join("console_gd.pvd")).unwrap();
+    assert_eq!(read_pvd(&pvd).unwrap().len(), 11);
 }
 
 #[test]

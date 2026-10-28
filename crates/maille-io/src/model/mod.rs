@@ -32,6 +32,8 @@ pub struct Loaded {
     pub mesh: Mesh,
     pub model: Model,
     pub run: Run,
+    /// `kinematics = "large"` : les résultats portent la marque des grandes déformations.
+    pub large_strain: bool,
 }
 
 /// Calcul demandé par le fichier.

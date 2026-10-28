@@ -94,7 +94,13 @@ fn point_data_round_trips_to_the_last_bit() {
             .map(|i| awkward[i % awkward.len()] - i as f64)
             .collect(),
     };
-    let text = write_vtu(&mesh, "N, mm, MPa", &[scalar.clone(), vector.clone()]).unwrap();
+    let text = write_vtu(
+        &mesh,
+        "N, mm, MPa",
+        false,
+        &[scalar.clone(), vector.clone()],
+    )
+    .unwrap();
     assert_eq!(read_point_data(&text, "temperature").unwrap(), scalar);
     assert_eq!(read_point_data(&text, "displacement").unwrap(), vector);
     assert!(text.contains("<!-- units: N, mm, MPa -->"));
@@ -108,7 +114,7 @@ fn cell_types_and_connectivity_follow_vtk() {
         (one_tet(CellKind::Tet4), 10, 4),
         (one_tet(CellKind::Tet10), 24, 10),
     ] {
-        let text = write_vtu(&mesh, "u", &[]).unwrap();
+        let text = write_vtu(&mesh, "u", false, &[]).unwrap();
         let cells = mesh.cells.len();
         assert_eq!(cell_array(&text, "types"), vec![code; cells]);
         assert_eq!(
@@ -137,7 +143,7 @@ fn whole_file_round_trips_for_every_cell_kind() {
             components: 1,
             values: (0..mesh.nodes.len()).map(|i| 0.1 * i as f64).collect(),
         };
-        let text = write_vtu(&mesh, "W, mm, K", std::slice::from_ref(&t)).unwrap();
+        let text = write_vtu(&mesh, "W, mm, K", false, std::slice::from_ref(&t)).unwrap();
         let back = read_results(&text).unwrap();
         assert_eq!(back.kind, mesh.kind);
         assert_eq!(back.cells, mesh.cells);
@@ -150,7 +156,7 @@ fn whole_file_round_trips_for_every_cell_kind() {
 #[test]
 fn whole_file_errors() {
     let mesh = rectangle(false);
-    let text = write_vtu(&mesh, "u", &[]).unwrap();
+    let text = write_vtu(&mesh, "u", false, &[]).unwrap();
     let odd = text.replace(
         "<DataArray type=\"UInt8\" Name=\"types\" format=\"ascii\">\n5",
         "<DataArray type=\"UInt8\" Name=\"types\" format=\"ascii\">\n9",
@@ -177,20 +183,20 @@ fn write_refuses_inconsistent_arrays() {
         values: vec![1.0; n - 1],
         ..good.clone()
     };
-    assert!(vtk_message(write_vtu(&mesh, "u", &[short]).unwrap_err()).contains("valeurs"));
+    assert!(vtk_message(write_vtu(&mesh, "u", false, &[short]).unwrap_err()).contains("valeurs"));
     let mut values = vec![1.0; n];
     values[3] = f64::NAN;
     let nan = PointArray {
         values,
         ..good.clone()
     };
-    assert!(vtk_message(write_vtu(&mesh, "u", &[nan]).unwrap_err()).contains("Node 3"));
+    assert!(vtk_message(write_vtu(&mesh, "u", false, &[nan]).unwrap_err()).contains("Node 3"));
     let named = PointArray {
         name: "a\"b".to_string(),
         ..good
     };
-    assert!(vtk_message(write_vtu(&mesh, "u", &[named]).unwrap_err()).contains("nom"));
-    assert!(vtk_message(write_vtu(&mesh, "a -- b", &[]).unwrap_err()).contains("units"));
+    assert!(vtk_message(write_vtu(&mesh, "u", false, &[named]).unwrap_err()).contains("nom"));
+    assert!(vtk_message(write_vtu(&mesh, "a -- b", false, &[]).unwrap_err()).contains("units"));
 }
 
 #[test]
@@ -201,7 +207,7 @@ fn read_refuses_binary_and_names_what_exists() {
         components: 1,
         values: vec![1.0; mesh.nodes.len()],
     };
-    let text = write_vtu(&mesh, "u", &[t]).unwrap();
+    let text = write_vtu(&mesh, "u", false, &[t]).unwrap();
     let missing = vtk_message(read_point_data(&text, "pression").unwrap_err());
     assert!(
         missing.contains("« pression »") && missing.contains("« temperature »"),
@@ -209,7 +215,7 @@ fn read_refuses_binary_and_names_what_exists() {
     );
     let binary = text.replacen("format=\"ascii\"", "format=\"binary\"", 1);
     assert!(vtk_message(read_point_data(&binary, "temperature").unwrap_err()).contains("ASCII"));
-    let none = write_vtu(&mesh, "u", &[]).unwrap();
+    let none = write_vtu(&mesh, "u", false, &[]).unwrap();
     assert!(vtk_message(read_point_data(&none, "temperature").unwrap_err()).contains("aucune"));
     assert!(vtk_message(read_point_data("<VTKFile/>", "t").unwrap_err()).contains("PointData"));
 }
@@ -449,7 +455,7 @@ fn thermal_then_static_through_files_follows_timoshenko() {
     assert_eq!(thermal.run, Run::Linear);
     let field = thermal.model.solve().unwrap();
     let arrays = result_arrays(&thermal.mesh, &field).unwrap();
-    let vtu = write_vtu(&mesh, &thermal.units, &arrays).unwrap();
+    let vtu = write_vtu(&mesh, &thermal.units, false, &arrays).unwrap();
     let pvd = write_pvd(&[Entry {
         time: 0.0,
         file: "tube_0000.vtu".to_string(),
@@ -545,4 +551,15 @@ fn coupling_with_a_foreign_mesh_is_refused() {
     let e = build(&file, &mesh, Some(&[20.0; 3])).unwrap_err();
     assert!(matches!(e, IoError::Model(_)), "{e:?}");
     assert!(e.to_string().contains("3"), "{e}");
+}
+
+#[test]
+fn large_strain_is_marked_in_the_file_and_read_back() {
+    let mesh = rectangle(false);
+    let plain = write_vtu(&mesh, "u", false, &[]).unwrap();
+    assert!(!read_results(&plain).unwrap().large_strain);
+    let large = write_vtu(&mesh, "u", true, &[]).unwrap();
+    assert!(read_results(&large).unwrap().large_strain);
+    // le commentaire n'empêche pas de relire les unités
+    assert_eq!(read_results(&large).unwrap().units.as_deref(), Some("u"));
 }

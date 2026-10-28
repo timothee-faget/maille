@@ -1,0 +1,51 @@
+# Console élancée en grande flèche : l'elastica d'Euler.
+#
+# La console fait 20 mm × 1 mm, encastrée à gauche, chargée en bout vers le bas. Les grandes
+# déformations (`kinematics = "large"`) suivent la poutre quand elle plie : la flèche en bout atteint
+# presque la moitié de la longueur. Avec P L² / (E I) = 2 (P = 87,5 N, E I = E h³/12 par mm
+# d'épaisseur), l'elastica donne une flèche w / L = 0,4935 et un raccourcissement u / L = 0,1606
+# (Bisshopp et Drucker, 1945). ν = 0 pour que E I soit exactement E h³/12.
+#
+# La charge est répartie en parts égales sur les 5 Nodes du bout (maillage console_gd.msh).
+# Le viewer montre la déformée à l'échelle 1 : c'est la forme réelle de la poutre.
+#
+# Lancer : maille solve console_gd.toml     puis : maille view console_gd.pvd
+
+# Unités cohérentes de votre choix : Maille ne convertit rien. Ici : N, mm, MPa.
+units = "N, mm, MPa"
+mesh = "console_gd.msh"
+analysis = "static"
+kinematics = "large"            # grandes déformations ; "small" (défaut) : petites déformations
+
+[materials.acier]
+young = 210e3
+poisson = 0.0
+# hyperelasticity = "neo_hookean"   # loi du Material en grandes déformations ; sans elle, Saint-Venant–Kirchhoff
+
+[[sections]]
+set = "domaine"
+material = "acier"
+thickness = 1.0
+plane_state = "strain"
+
+[[bcs]]
+set = "gauche"
+dof = "ux"
+value = 0.0
+
+[[bcs]]
+set = "gauche"
+dof = "uy"
+value = 0.0
+
+[[loads]]
+set = "droite"
+dof = "uy"
+value = -17.5
+
+# Les grandes déformations se calculent par incréments : la charge monte de 0 à 100 % en 10 pas.
+# Si Newton ne converge pas, Maille coupe l'incrément en deux, jusqu'à 5 fois.
+[step]
+kind = "quasi_static"
+duration = 1.0
+increments = 10

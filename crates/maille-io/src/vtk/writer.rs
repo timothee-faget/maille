@@ -39,8 +39,15 @@ fn push_array<T: std::fmt::Display>(
     let _ = writeln!(out, "\n</DataArray>");
 }
 
-/// Écrit le maillage et ses grandeurs aux Nodes. `units` est recopié en commentaire XML en tête.
-pub fn write_vtu(mesh: &MshFile, units: &str, arrays: &[PointArray]) -> Result<String, IoError> {
+/// Écrit le maillage et ses grandeurs aux Nodes. `units` est recopié en commentaire XML en tête ;
+/// `large_strain` ajoute le commentaire `kinematics: large` (grandes déformations : les contraintes
+/// sont de Cauchy et le viewer montre la déformée à l'échelle 1).
+pub fn write_vtu(
+    mesh: &MshFile,
+    units: &str,
+    large_strain: bool,
+    arrays: &[PointArray],
+) -> Result<String, IoError> {
     if units.contains("--") || units.contains('\n') || units.contains('\r') {
         return Err(vtk_error(
             "`units` ne peut pas contenir « -- » ni de saut de ligne".to_string(),
@@ -75,6 +82,9 @@ pub fn write_vtu(mesh: &MshFile, units: &str, arrays: &[PointArray]) -> Result<S
     let mut out = String::new();
     let _ = writeln!(out, "<?xml version=\"1.0\"?>");
     let _ = writeln!(out, "<!-- units: {units} -->");
+    if large_strain {
+        let _ = writeln!(out, "<!-- kinematics: large -->");
+    }
     let _ = writeln!(
         out,
         "<VTKFile type=\"UnstructuredGrid\" version=\"1.0\" byte_order=\"LittleEndian\">"

@@ -28,6 +28,7 @@ maille view trempe.pvd 50         # un incrément précis, depuis 0
 | `trempe` | thermique transitoire, 200 incréments | série de Fourier |
 | `tube_thermique` puis `tube_contraintes` | couplage thermo-mécanique (lancer dans cet ordre) | Timoshenko et Goodier |
 | `tube_pression` | pression sur un bord, déformations planes | Lamé |
+| `console_gd` | grandes déformations (`kinematics = "large"`) : console élancée, l'elastica ; Tri6 | elastica d'Euler (Bisshopp et Drucker) |
 | `cube` | 3D, Tet4 (viewer 3D ou ParaView) | champ linéaire |
 | `tube3d` | 3D depuis un STL : `maille mesh tube3d.stl --size 2 --quadratic` d'abord, Tet10 | Lamé |
 | `sphere` | 3D depuis un STEP (faces sphériques exactes) : `maille mesh sphere.step --size 2 --quadratic` d'abord, Tet10 | Lamé (sphère) |
@@ -142,21 +143,23 @@ Une clé inconnue ou mal écrite est une erreur, avec la ligne et la colonne. Le
 | Clé | Rôle |
 |---|---|
 | `units`, `mesh`, `analysis` | obligatoires ; `analysis` vaut `"static"` ou `"thermal"` |
-| `[materials.nom]` | `young`, `poisson`, `conductivity`, `density`, `specific_heat`, `expansion`, et `yield_stress` + `hardening` pour la plasticité de von Mises |
+| `kinematics` | `"small"` (défaut) ou `"large"` : grandes déformations (Lagrangien total), analyse statique avec `[step]` `kind = "quasi_static"` ; triangles en déformations planes et tétraèdres, sans plasticité ni `[temperatures]` |
+| `[materials.nom]` | `young`, `poisson`, `conductivity`, `density`, `specific_heat`, `expansion`, `yield_stress` + `hardening` pour la plasticité de von Mises, et `hyperelasticity = "neo_hookean"` (grandes déformations ; Saint-Venant–Kirchhoff sans elle) |
 | `[[sections]]` | `set`, `material` ; triangles : `thickness` (1 par défaut) et `plane_state` (`"stress"` ou `"strain"`, obligatoire en statique). Tout Element a exactement une section |
 | `[[bcs]]` | `set` de Nodes, `dof` (`ux`, `uy`, `uz` en statique ; `t` en thermique), `value` |
 | `[[loads]]` | comme `[[bcs]]` : une force **par Node** (pas la force totale) |
 | `[[heat_sources]]` | `set` d'Elements, `value` (puissance par volume) |
 | `[[convections]]` | `set` de bord, `film` (h) et `sink` (T∞) |
-| `[[pressures]]` | `set` de bord, `value` : une pression positive comprime (contre la normale sortante), négative elle tire. Statique, triangles et tétraèdres |
+| `[[pressures]]` | `set` de bord, `value` : une pression positive comprime (contre la normale sortante), négative elle tire. Statique, triangles et tétraèdres ; en grandes déformations, elle reste normale à la face déformée |
 | `[temperatures]` | couplage : `from` (un `.pvd` thermique sur le même maillage), `increment`, `reference` (T_ref) |
 | `[step]` | absent : calcul linéaire. Sinon `kind`, `duration`, `increments` |
 
 `[step]` :
 - `kind = "transient"` (analyse thermique) : `initial_temperature` obligatoire, `theta` optionnel
   (1 = Euler implicite, 0,5 = Crank-Nicolson) ;
-- `kind = "quasi_static"` (analyse statique, plasticité) : `amplitude = [[0, 0], [1, 1]]` multiplie
-  les charges et les valeurs des BC (rampe de 0 à 1 par défaut). Le premier point est (0, 0).
+- `kind = "quasi_static"` (analyse statique, plasticité, grandes déformations) : `amplitude = [[0, 0], [1, 1]]` multiplie
+  les charges et les valeurs des BC (rampe de 0 à 1 par défaut). Le premier point est (0, 0). Si Newton
+  ne converge pas, l'incrément est coupé en deux, jusqu'à 5 fois ; seuls les incréments de la Step sont écrits.
 
 Pas encore possible : une valeur de BC qui varie le long d'un bord.
 
@@ -166,7 +169,9 @@ Un `.vtu` par incrément, plus un `.pvd` qui donne le temps de chacun (un calcul
 seul `.vtu` et un `.pvd`). Format ASCII, lisible par ParaView. Grandeurs aux Nodes :
 
 - statique : `displacement`, `reaction`, `stress` (xx, yy, zz, xy, yz, xz, lissées), `von_mises`,
-  et `plastic_strain` pour un calcul plastique ;
+  et `plastic_strain` pour un calcul plastique. En grandes déformations, `stress` et `von_mises` sont
+  de Cauchy (configuration déformée), et le `.vtu` porte le commentaire `kinematics: large` : le viewer
+  montre alors la déformée à l'échelle 1, sans amplification ;
 - thermique : `temperature`, `reaction` (puissance aux Nodes imposés).
 
 ## Régénérer les maillages

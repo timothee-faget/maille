@@ -87,6 +87,8 @@ pub struct Scene {
     temperatures: Vec<f64>,
     /// Déformation plastique cumulée p aux Nodes, vide hors calcul élasto-plastique.
     plastic_strains: Vec<f64>,
+    /// Grandes déformations (`NodalResults::large_strain`).
+    large_strain: bool,
     /// Triangles à remplir (indices de Nodes) : 1 par Tri3, 4 par Tri6 (antihoraires) ; pour des
     /// tétraèdres, la peau, normales sortantes.
     pub triangles: Vec<[u32; 3]>,
@@ -112,6 +114,8 @@ pub struct NodalResults {
     pub stresses: Vec<Stress>,
     pub temperatures: Vec<f64>,
     pub plastic_strains: Vec<f64>,
+    /// Grandes déformations : la déformée se montre à l'échelle 1 (aucune amplification).
+    pub large_strain: bool,
 }
 
 /// Ajoute les triangles à remplir et le contour d'un triangle de 3 (Tri3) ou 6 Nodes (Tri6).
@@ -262,6 +266,7 @@ impl Scene {
             } else {
                 nodal_equivalent_plastic_strains(mesh, field)?
             },
+            large_strain: false,
             triangles,
             edges,
             solids,
@@ -296,6 +301,7 @@ impl Scene {
             stresses: r.stresses.clone(),
             temperatures: r.temperatures.clone(),
             plastic_strains: r.plastic_strains.clone(),
+            large_strain: r.large_strain,
             triangles,
             edges,
             solids,
@@ -363,8 +369,11 @@ impl Scene {
     }
 
     /// Facteur d'amplification tel que le plus grand déplacement vaille 10 % de la taille du Mesh.
-    /// Nul si rien ne bouge.
+    /// Nul si rien ne bouge. 1 en grandes déformations : la déformée est déjà celle du calcul.
     pub fn deformation_scale(&self) -> f64 {
+        if self.large_strain {
+            return 1.0;
+        }
         let (lo, hi) = self.bounds(0.0);
         let size = (0..3).map(|k| hi[k] - lo[k]).fold(0.0, f64::max);
         let max_u = self
@@ -537,6 +546,40 @@ mod tests {
         for (got, expected) in p.iter().zip([0.005, 0.01, 0.005, 0.0]) {
             assert!((got - expected).abs() < 1e-15, "{p:?}");
         }
+    }
+
+    #[test]
+    fn large_strain_shows_the_deformed_shape_at_scale_one() {
+        let nodes = vec![[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 2.0, 0.0]];
+        let zero = |p: &[f64; 3]| Stress {
+            x: p[0],
+            y: p[1],
+            z: p[2],
+            sigma_xx: 0.0,
+            sigma_yy: 0.0,
+            sigma_zz: 0.0,
+            tau_xy: 0.0,
+            tau_yz: 0.0,
+            tau_xz: 0.0,
+        };
+        let displacements = vec![[0.0; 3], [0.5, 0.0, 0.0], [0.0, -0.25, 0.0]];
+        let results = |large_strain| NodalResults {
+            stresses: nodes.iter().map(zero).collect(),
+            nodes: nodes.clone(),
+            cells: vec![vec![0, 1, 2]],
+            displacements: displacements.clone(),
+            large_strain,
+            ..NodalResults::default()
+        };
+        // petites déformations : le plus grand déplacement vaut un dixième du Mesh
+        let small = Scene::from_nodal(&results(false)).unwrap();
+        assert!((small.deformation_scale() - 0.4).abs() < 1e-12);
+        // grandes déformations : x + u, sans amplification
+        let large = Scene::from_nodal(&results(true)).unwrap();
+        assert!((large.deformation_scale() - 1.0).abs() < 1e-15);
+        let moved = large.positions(large.deformation_scale());
+        assert_eq!(moved[1], [2.5, 0.0, 0.0]);
+        assert_eq!(moved[2], [0.0, 1.75, 0.0]);
     }
 
     #[test]

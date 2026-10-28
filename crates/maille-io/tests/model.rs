@@ -677,3 +677,87 @@ fn pressure_needs_a_boundary_and_a_static_analysis() {
         IoError::Model(MailleError::PressureStaticOnly)
     );
 }
+
+#[test]
+fn large_strain_keys_build_a_quasi_static_model() {
+    let mesh = rectangle(4.0, 2.0, 0.8, false);
+    let toml = |kinematics: &str, material: &str, step: &str| {
+        format!(
+            r#"
+units = "N, mm, MPa"
+mesh = "plaque.msh"
+analysis = "static"
+{kinematics}
+[materials.caoutchouc]
+young = 10.0
+poisson = 0.3
+{material}
+[[sections]]
+set = "domaine"
+material = "caoutchouc"
+plane_state = "strain"
+[[bcs]]
+set = "gauche"
+dof = "ux"
+value = 0.0
+[[bcs]]
+set = "bas"
+dof = "uy"
+value = 0.0
+[[bcs]]
+set = "droite"
+dof = "ux"
+value = 2.0
+{step}
+"#
+        )
+    };
+    let step = "[step]\nkind = \"quasi_static\"\nduration = 1.0\nincrements = 4\n";
+
+    // Saint-Venant–Kirchhoff, puis néo-Hookéen : le même modèle, deux lois, deux contraintes
+    let svk = load(&toml("kinematics = \"large\"", "", step), &mesh);
+    let neo = load(
+        &toml(
+            "kinematics = \"large\"",
+            "hyperelasticity = \"neo_hookean\"",
+            step,
+        ),
+        &mesh,
+    );
+    assert!(svk.large_strain && neo.large_strain);
+    let stress = |loaded: &Loaded| match &loaded.run {
+        Run::QuasiStatic { step, amplitude } => {
+            let history = loaded.model.solve_quasi_static(step, amplitude).unwrap();
+            history[4].field.stresses[0][0].sigma_xx
+        }
+        other => panic!("{other:?}"),
+    };
+    assert!((stress(&svk) - stress(&neo)).abs() > 1e-3);
+
+    // petites déformations par défaut, ou écrites
+    assert!(!load(&toml("", "", step), &mesh).large_strain);
+    assert!(!load(&toml("kinematics = \"small\"", "", step), &mesh).large_strain);
+
+    // les cas refusés disent quoi corriger
+    let no_step = error(&toml("kinematics = \"large\"", "", ""), &mesh).to_string();
+    assert!(no_step.contains("quasi_static"), "{no_step}");
+    let law = error(&toml("", "hyperelasticity = \"neo_hookean\"", step), &mesh).to_string();
+    assert!(law.contains("caoutchouc") && law.contains("large"), "{law}");
+    let bad = parse(&toml("kinematics = \"enorme\"", "", step)).unwrap_err();
+    assert!(bad.to_string().contains("enorme"), "{bad}");
+    let bad = parse(&toml("", "hyperelasticity = \"mooney\"", step)).unwrap_err();
+    assert!(bad.to_string().contains("mooney"), "{bad}");
+}
+
+#[test]
+fn large_strain_needs_a_static_analysis() {
+    let toml = format!(
+        "{}\n[step]\nkind = \"quasi_static\"\nduration = 1.0\nincrements = 2\n",
+        THERMAL.replace(
+            "analysis = \"thermal\"",
+            "analysis = \"thermal\"\nkinematics = \"large\""
+        )
+    );
+    let msg = error(&toml, &plate()).to_string();
+    assert!(msg.contains("static"), "{msg}");
+}
