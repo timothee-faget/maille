@@ -476,6 +476,69 @@ fn pouces() {
     assert_eq!(read_brep(&s.text()).unwrap().1, "m");
 }
 
+#[test]
+fn sphere_et_tore() {
+    // le sens de la face dit si la sphère est bombée : celle du cylindre arrondi l'est, l'intérieur
+    // d'une coque ne l'est pas
+    let mut s = Step::default();
+    seamed_cylinder(&mut s, 2.0, 3.0);
+    let top = s
+        .lines
+        .iter()
+        .rposition(|l| l.starts_with("PLANE("))
+        .unwrap();
+    let frame = s.placement([0.0, 0.0, 3.0]);
+    s.lines[top] = format!("SPHERICAL_SURFACE('',#{frame},2.)");
+    let (b, _) = read_brep(&s.text()).unwrap();
+    assert_eq!(
+        b.faces[2].surface,
+        FaceSurface::Sphere {
+            center: [0.0, 0.0, 3.0],
+            radius: 2.0,
+            convex: true,
+        }
+    );
+    // le bout arrondi se maille : 12π + 16π/3
+    let exact = 12.0 * PI + 16.0 * PI / 3.0;
+    let e = (exact - meshed_volume(&b, 0.5)) / exact;
+    assert!(
+        e > 0.0 && e < 2.0 * (0.5f64 / 2.0).powi(2) / 8.0,
+        "écart {e:e}"
+    );
+    let face = s
+        .lines
+        .iter()
+        .rposition(|l| l.starts_with("ADVANCED_FACE('haut'"))
+        .unwrap();
+    s.lines[face] = s.lines[face].replace(".T.)", ".F.)");
+    let (b, _) = read_brep(&s.text()).unwrap();
+    assert!(matches!(
+        b.faces[2].surface,
+        FaceSurface::Sphere { convex: false, .. }
+    ));
+    // tore : la lecture prend ses rayons (la géométrie est contrôlée au maillage)
+    let mut s = Step::default();
+    let faces = cuboid(&mut s, [1.0; 3], true);
+    s.solid(&faces);
+    let plane = s
+        .lines
+        .iter()
+        .position(|l| l.starts_with("PLANE("))
+        .unwrap();
+    s.lines[plane] = s.lines[plane]
+        .replace("PLANE(", "TOROIDAL_SURFACE(")
+        .replace(")", ",5.,1.5)");
+    let (b, _) = read_brep(&s.text()).unwrap();
+    assert!(matches!(
+        b.faces[0].surface,
+        FaceSurface::Torus {
+            major: 5.0,
+            minor: 1.5,
+            ..
+        }
+    ));
+}
+
 fn message(text: &str) -> String {
     read_brep(text).unwrap_err().to_string()
 }
@@ -531,11 +594,12 @@ fn refus_avec_message() {
         .iter()
         .position(|l| l.starts_with("CYLINDRICAL_SURFACE("))
         .unwrap();
-    s.lines[cylinder] = s.lines[cylinder].replace("CYLINDRICAL_SURFACE", "SPHERICAL_SURFACE");
+    s.lines[cylinder] =
+        s.lines[cylinder].replace("CYLINDRICAL_SURFACE", "SURFACE_OF_LINEAR_EXTRUSION");
     let m = message(&s.text());
     assert!(
         m.contains(&format!(
-            "ligne {} : face sur une surface SPHERICAL_SURFACE",
+            "ligne {} : face sur une surface SURFACE_OF_LINEAR_EXTRUSION",
             cylinder + 7
         )),
         "{m}"

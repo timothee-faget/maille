@@ -95,7 +95,7 @@ fn regenerate_example_meshes() {
 struct Workdir(PathBuf);
 
 impl Workdir {
-    /// Copie des `.toml`, `.msh` et `.dxf` d'`examples/` dans un dossier temporaire : les résultats n'y
+    /// Copie des `.toml`, `.msh`, `.dxf`, `.stl` et `.step` d'`examples/` dans un dossier temporaire : les résultats n'y
     /// salissent pas le dépôt.
     fn new(test: &str) -> Self {
         let dir = std::env::temp_dir().join(format!("maille-{test}-{}", std::process::id()));
@@ -105,7 +105,7 @@ impl Workdir {
             let path = entry.unwrap().path();
             if matches!(
                 path.extension().and_then(|e| e.to_str()),
-                Some("toml" | "msh" | "dxf" | "stl")
+                Some("toml" | "msh" | "dxf" | "stl" | "step")
             ) {
                 fs::copy(&path, dir.join(path.file_name().unwrap())).unwrap();
             }
@@ -334,6 +334,57 @@ fn tube3d_meshed_from_its_stl_follows_lame() {
     }
     let rms = (sum / count as f64).sqrt() / scale;
     assert!(worst_u < 2.5e-3, "u_r : {worst_u:.2e}");
+    assert!(rms < 6e-3, "σ RMS : {rms:.2e}");
+}
+
+/// `sphere.step` (huitième de sphère creuse, faces sphériques exactes) maillé à la taille h en
+/// Tet10 par la CLI, puis `sphere.toml` : pressions intérieure et extérieure, plans de coupe en
+/// appui glissant. Lamé pour la sphère, à l'erreur de géométrie près : les sommets sont sur les
+/// sphères, les triangles en dessous. Mesuré : u_r à 1,32e-2 près, σ à 4,2e-3 près en RMS à h = 2 ;
+/// 3,6e-3 et 1,2e-3 à h = 1 (ordre 2, environ 2,6 fois la flèche (h / Ri)² / 8 d'un cylindre : la
+/// sphère est courbée dans les deux sens).
+#[test]
+fn sphere_meshed_from_its_step_follows_lame() {
+    let w = Workdir::new("sphere");
+    let out = w.maille(&["mesh", "sphere.step", "--size", "2", "--quadratic"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    w.solve("sphere.toml");
+    let (_, r) = w.results("sphere.pvd", None);
+    assert_eq!(r.kind, CellKind::Tet10);
+    let (u, s) = (array(&r, "displacement"), array(&r, "stress"));
+    let (pi, po, ri, ro, e, nu): (f64, f64, f64, f64, f64, f64) =
+        (100.0, 20.0, 10.0, 20.0, 210e3, 0.3);
+    let span = ro.powi(3) - ri.powi(3);
+    let c = (pi * ri.powi(3) - po * ro.powi(3)) / span;
+    let d = (pi - po) * ri.powi(3) * ro.powi(3) / span;
+    let ur = |r: f64| (1.0 - 2.0 * nu) / e * c * r + (1.0 + nu) / (2.0 * e) * d / (r * r);
+    let scale = pi;
+    let (mut worst_u, mut sum, mut count) = (0.0_f64, 0.0, 0);
+    for (i, p) in r.nodes.iter().enumerate() {
+        let radius = (p.x * p.x + p.y * p.y + p.z * p.z).sqrt();
+        let n = [p.x / radius, p.y / radius, p.z / radius];
+        let got_u = (0..3).map(|k| u[3 * i + k] * n[k]).sum::<f64>();
+        worst_u = worst_u.max((got_u - ur(radius)).abs() / ur(ri));
+        // σ dans l'ordre xx, yy, zz, xy, yz, xz : σ_rr = nᵀ σ n, σ_θθ = (tr σ − σ_rr) / 2
+        let t = &s[6 * i..6 * i + 6];
+        let sigma = [[t[0], t[3], t[5]], [t[3], t[1], t[4]], [t[5], t[4], t[2]]];
+        let rr: f64 = (0..3)
+            .flat_map(|a| (0..3).map(move |b| (a, b)))
+            .map(|(a, b)| n[a] * sigma[a][b] * n[b])
+            .sum();
+        let hoop = (t[0] + t[1] + t[2] - rr) / 2.0;
+        let r3 = radius.powi(3);
+        for (g, x) in [(rr, c - d / r3), (hoop, c + d / (2.0 * r3))] {
+            sum += (g - x) * (g - x);
+            count += 1;
+        }
+    }
+    let rms = (sum / count as f64).sqrt() / scale;
+    assert!(worst_u < 1.6e-2, "u_r : {worst_u:.2e}");
     assert!(rms < 6e-3, "σ RMS : {rms:.2e}");
 }
 

@@ -1,8 +1,10 @@
 //! Maillage des faces d'une `Brep` à la taille h, première étape de `tetrahedralize_brep`. Chaque
 //! arête est découpée une seule fois, en 3D sur sa courbe : en morceaux d'au plus h, et d'au plus un
-//! seizième de tour là où elle tourne. Chaque face est déroulée à plat sans déformer les longueurs
-//! (plan, cylindre et cône sont développables), maillée par le mailleur 2D avec ses contours, puis
-//! remise sur sa surface. Sur une face courbe, la taille est en plus bornée par un seizième de tour
+//! seizième de tour là où elle tourne. Chaque face est mise à plat, maillée par le mailleur 2D avec
+//! ses contours, puis remise sur sa surface : plan, cylindre et cône se déroulent sans déformer les
+//! longueurs ; la sphère (projection stéréographique) et le tore (coordonnées isothermes) gardent
+//! les angles, donc la qualité des triangles, et la taille h y est divisée par l'échelle locale de
+//! la carte. Sur une face courbe, la taille est en plus bornée par un seizième de tour
 //! (flèche des cordes d'environ 2 % du rayon). Comme pour les facettes (`remesh`), un morceau de
 //! bord coupé par le mailleur 2D rejoint l'arête, en un point de sa courbe, et les faces qui la
 //! bordent sont remaillées avec lui : la surface reste fermée.
@@ -45,31 +47,27 @@ pub(crate) fn triangulate(brep: &Brep, size: f64, grading: f64) -> Result<Surfac
     let grading = positive("gradation", grading)?;
     let invalid = |problem: String| MailleError::InvalidBrep { problem };
     let tolerance = ON_SURFACE * diagonal(&brep.vertices);
+    check_indices(brep)?;
+    let brep = &prepare_closed(brep)?;
 
     // carte de chaque face, sommets sur sa surface ; taille de la face, bornée par un seizième de
-    // tour sur son plus petit rayon (le long de ses arêtes, le cône rétrécit)
-    let charts = brep
+    // tour sur son plus petit rayon de courbure (le long de ses arêtes, le cône rétrécit)
+    let mut charts = brep
         .faces
         .iter()
         .map(|f| Chart::new(&f.surface, &f.name))
         .collect::<Result<Vec<_>, _>>()?;
     let mut face_sizes = vec![size; brep.faces.len()];
     for ((face, chart), h) in brep.faces.iter().zip(&charts).zip(&mut face_sizes) {
+        match chart.kind {
+            Kind::Sphere { radius, .. } => *h = h.min(radius * TAU / SIDES),
+            Kind::Torus { major, minor, .. } => *h = h.min(minor.min(major - minor) * TAU / SIDES),
+            _ => {}
+        }
         for &(e, _) in face.loops.iter().flatten() {
-            let edge = brep.edges.get(e).ok_or_else(|| {
-                invalid(format!(
-                    "face « {} » : arête {e} absente (la pièce en a {})",
-                    face.name,
-                    brep.edges.len()
-                ))
-            })?;
+            let edge = &brep.edges[e];
             for v in [edge.start, edge.end] {
-                let p = *brep.vertices.get(v).ok_or_else(|| {
-                    invalid(format!(
-                        "arête {e} : sommet {v} absent (la pièce en a {})",
-                        brep.vertices.len()
-                    ))
-                })?;
+                let p = brep.vertices[v];
                 let gap = chart.gap(p);
                 if gap > tolerance {
                     return Err(invalid(format!(
@@ -96,7 +94,22 @@ pub(crate) fn triangulate(brep: &Brep, size: f64, grading: f64) -> Result<Surfac
             }
         }
     }
-    let brep = &add_seams(brep, &charts, tolerance)?;
+    let brep = &add_seams(brep, &charts)?;
+    // une face sphérique est vue depuis l'opposé de son milieu
+    for (face, chart) in brep.faces.iter().zip(&mut charts) {
+        let ring: Vec<[f64; 3]> = face.loops[0]
+            .iter()
+            .flat_map(|&(e, reversed)| {
+                (0..16).map(move |i| {
+                    let t = i as f64 / 16.0;
+                    brep.edges[e]
+                        .curve
+                        .point(if reversed { 1.0 - t } else { t })
+                })
+            })
+            .collect();
+        chart.aim(&ring, &face.name)?;
+    }
 
     // taille d'une arête : la plus petite de ses faces
     let mut sizes = vec![size; brep.edges.len()];
@@ -142,7 +155,14 @@ pub(crate) fn triangulate(brep: &Brep, size: f64, grading: f64) -> Result<Surfac
         if chains.iter().map(Vec::len).sum::<usize>() > MAX_GROWTH * initial {
             return Err(invalid(RUNAWAY.to_string()));
         }
-        let (triangles, origins) = mesh_face(brep, f, charts[f], &chains, &sizes, &points, grading)
+        let (triangles, origins) = mesh_face(
+            brep,
+            f,
+            charts[f],
+            (&chains, &sizes, &points),
+            face_sizes[f],
+            grading,
+        )
             .map_err(|e| match e {
                 MailleError::MeshingFailed => invalid(format!(
                     "la face « {} » ne se laisse pas mailler à la taille h (contour qui se recoupe une fois déroulé, ou coin très aigu)",
@@ -170,13 +190,15 @@ pub(crate) fn triangulate(brep: &Brep, size: f64, grading: f64) -> Result<Surfac
                 },
             });
         }
-        // du dernier morceau au premier, pour que les rangs k restent justes ; le point d'une arête
-        // courbe n'est pas sur la corde où le mailleur 2D l'a posé : la face est remaillée aussi
+        // du dernier morceau au premier, pour que les rangs k restent justes. La face est remaillée
+        // aussi si le point n'est pas sur la corde où le mailleur 2D l'a posé (arête courbe) ou si
+        // l'arête est sa couture : l'autre côté de la couture n'a pas encore le point
         for ((edge, k), mut new) in splits.into_iter().rev() {
             new.sort_by(|a, b| a.0.total_cmp(&b.0));
             chains[edge].splice(k + 1..k + 1, new);
             let curved = !matches!(brep.edges[edge].curve, EdgeCurve::Line { .. });
-            pending.extend(faces_of[edge].iter().filter(|&&g| g != f || curved));
+            let seam = faces_of[edge].iter().filter(|&&g| g == f).count() > 1;
+            pending.extend(faces_of[edge].iter().filter(|&&g| g != f || curved || seam));
         }
         meshes[f] = triangles
             .into_iter()
@@ -217,18 +239,141 @@ pub(crate) fn triangulate(brep: &Brep, size: f64, grading: f64) -> Result<Surfac
     Ok(out)
 }
 
+/// Indices des arêtes et des sommets dans les bornes.
+fn check_indices(brep: &Brep) -> Result<(), MailleError> {
+    let invalid = |problem: String| MailleError::InvalidBrep { problem };
+    for face in &brep.faces {
+        for &(e, _) in face.loops.iter().flatten() {
+            if e >= brep.edges.len() {
+                return Err(invalid(format!(
+                    "face « {} » : arête {e} absente (la pièce en a {})",
+                    face.name,
+                    brep.edges.len()
+                )));
+            }
+        }
+    }
+    for (e, edge) in brep.edges.iter().enumerate() {
+        for v in [edge.start, edge.end] {
+            if v >= brep.vertices.len() {
+                return Err(invalid(format!(
+                    "arête {e} : sommet {v} absent (la pièce en a {})",
+                    brep.vertices.len()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Faces fermées prêtes pour leur carte. Sur une sphère, la couture (arête parcourue dans les deux
+/// sens par la face) n'est pas un bord : elle est retirée avec les contours qu'elle vide, et une
+/// sphère entière, sans plus aucun contour, est coupée en deux hémisphères par un équateur, sous
+/// le même nom. Un tore entier sans arête (OCCT l'écrit avec un seul contour réduit à un sommet)
+/// reçoit ses deux coutures, un parallèle et un méridien, orientées pour que la matière soit dans
+/// le tube. Une autre face sans contour est refusée.
+fn prepare_closed(brep: &Brep) -> Result<Brep, MailleError> {
+    let mut out = brep.clone();
+    let mut halves = Vec::new();
+    for f in 0..out.faces.len() {
+        let face = &mut out.faces[f];
+        if let FaceSurface::Sphere { .. } = face.surface {
+            let uses: Vec<(usize, bool)> = face.loops.iter().flatten().copied().collect();
+            let seam = |e: usize| uses.contains(&(e, false)) && uses.contains(&(e, true));
+            for lp in &mut face.loops {
+                lp.retain(|&(e, _)| !seam(e));
+            }
+            face.loops.retain(|lp| !lp.is_empty());
+        }
+        if !out.faces[f].loops.is_empty() {
+            continue;
+        }
+        match out.faces[f].surface {
+            FaceSurface::Sphere { center, radius, .. } => {
+                out.vertices
+                    .push([center[0] + radius, center[1], center[2]]);
+                let v = out.vertices.len() - 1;
+                let equator = full_circle(
+                    &mut out,
+                    v,
+                    center,
+                    [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                    radius,
+                );
+                // vu de dehors, l'hémisphère nord est à gauche de l'équateur antihoraire
+                out.faces[f].loops = vec![vec![(equator, false)]];
+                let mut south = out.faces[f].clone();
+                south.loops = vec![vec![(equator, true)]];
+                halves.push(south);
+            }
+            FaceSurface::Torus {
+                center,
+                axis,
+                major,
+                minor,
+            } => {
+                let l = norm(axis);
+                let axis = axis.map(|x| x / l);
+                let (u, w) = basis(axis);
+                let at = |r: f64| std::array::from_fn(|k| center[k] + r * u[k]);
+                out.vertices.push(at(major + minor));
+                let v = out.vertices.len() - 1;
+                let parallel = full_circle(&mut out, v, center, [u, w], major + minor);
+                let meridian = full_circle(&mut out, v, at(major), [u, axis], minor);
+                // (θ, φ) croissants : sens direct autour de la normale qui sort du tube
+                out.faces[f].loops = vec![vec![
+                    (parallel, false),
+                    (meridian, false),
+                    (parallel, true),
+                    (meridian, true),
+                ]];
+            }
+            _ => {
+                return Err(MailleError::InvalidBrep {
+                    problem: format!("face « {} » sans contour", out.faces[f].name),
+                })
+            }
+        }
+    }
+    out.faces.extend(halves);
+    Ok(out)
+}
+
+/// Cercle complet de centre `center` dans le plan (u, v), du sommet `v` au même sommet.
+fn full_circle(
+    brep: &mut Brep,
+    vertex: usize,
+    center: [f64; 3],
+    [u, v]: [[f64; 3]; 2],
+    r: f64,
+) -> usize {
+    brep.edges.push(BrepEdge {
+        start: vertex,
+        end: vertex,
+        curve: EdgeCurve::Arc {
+            center,
+            u,
+            v,
+            radii: [r, r],
+            start_angle: 0.0,
+            sweep: TAU,
+        },
+    });
+    brep.edges.len() - 1
+}
+
 /// Couture d'une face de révolution fermée sans couture (bordée de deux contours qui font le tour
-/// de l'axe, deux cercles par exemple, comme l'écrivent certains modeleurs) : une arête droite le
-/// long d'une génératrice, entre deux sommets des deux contours au même angle, et les deux
-/// contours fondus en un seul qui la parcourt dans les deux sens, comme la couture d'OCCT. Si aucun
-/// sommet du second contour n'est à l'angle du premier sommet du premier, une arête du second y est
-/// coupée en deux (la face voisine suit).
-fn add_seams(brep: &Brep, charts: &[Chart], tolerance: f64) -> Result<Brep, MailleError> {
+/// de l'axe, deux cercles par exemple, comme l'écrivent certains modeleurs) : une arête le long
+/// d'une génératrice (un méridien sur un tore), et les deux contours fondus en un seul qui la
+/// parcourt dans les deux sens, comme la couture d'OCCT. La génératrice est prise au milieu du plus
+/// grand intervalle d'angle sans sommet, loin des détails des contours ; chaque contour y est coupé
+/// (la face voisine suit) et ne doit la croiser qu'une fois.
+fn add_seams(brep: &Brep, charts: &[Chart]) -> Result<Brep, MailleError> {
     let mut out = brep.clone();
     for (f, chart) in charts.iter().enumerate() {
-        let Kind::Round { .. } = chart.kind else {
+        if chart.periods()[0].is_none() {
             continue;
-        };
+        }
         let name = out.faces[f].name.clone();
         let refuse = |why: &str| MailleError::InvalidBrep {
             problem: format!(
@@ -246,49 +391,50 @@ fn add_seams(brep: &Brep, charts: &[Chart], tolerance: f64) -> Result<Brep, Mail
             [a, b] if turns[a] * turns[b] < 0.0 => (a, b),
             _ => return Err(refuse("(un contour fait le tour de l'axe)")),
         };
-        let pair = |out: &Brep| {
-            let lp = &out.faces[f].loops;
-            let mut best = (f64::INFINITY, 0, 0);
-            for (i, ea) in lp[a].iter().enumerate() {
-                for (j, eb) in lp[b].iter().enumerate() {
-                    let (p, q) = (out.vertices[start(out, ea)], out.vertices[start(out, eb)]);
-                    let gap = wrap(chart.coords(p)[0] - chart.coords(q)[0]).abs()
-                        * chart.radial(p).max(chart.radial(q));
-                    if gap < best.0 {
-                        best = (gap, i, j);
-                    }
-                }
+        // angle de la couture : milieu du plus grand intervalle entre les sommets des deux contours
+        let mut angles: Vec<f64> = [a, b]
+            .iter()
+            .flat_map(|&l| out.faces[f].loops[l].iter())
+            .map(|entry| chart.coords(out.vertices[start(&out, entry)])[0])
+            .collect();
+        angles.sort_by(f64::total_cmp);
+        let theta = (0..angles.len())
+            .map(|k| {
+                let next = angles.get(k + 1).copied().unwrap_or(angles[0] + TAU);
+                (next - angles[k], (angles[k] + next) / 2.0)
+            })
+            .max_by(|x, y| x.0.total_cmp(&y.0))
+            .map_or(0.0, |(_, mid)| mid);
+        let mut ends = [0; 2];
+        for (end, l) in ends.iter_mut().zip([a, b]) {
+            let lp = out.faces[f].loops[l].clone();
+            if crossings(&out, &lp, chart, theta) != 1 {
+                return Err(refuse(
+                    "dont un contour recroise la génératrice de la couture",
+                ));
             }
-            best
-        };
-        let (mut gap, mut i, mut j) = pair(&out);
-        if gap > tolerance {
-            let lp = out.faces[f].loops.clone();
-            let theta = chart.coords(out.vertices[start(&out, &lp[a][0])])[0];
-            let (e, t) = lp[b]
+            let (e, t) = lp
                 .iter()
                 .find_map(|&(e, _)| angle_on(&out.edges[e].curve, chart, theta).map(|t| (e, t)))
                 .ok_or_else(|| {
-                    refuse("dont le second contour ne coupe pas la génératrice du premier sommet")
+                    refuse("dont un contour ne croise pas la génératrice de la couture")
                 })?;
             split_edge(&mut out, e, t);
-            (gap, i, j) = pair(&out);
-            if gap > tolerance {
-                return Err(refuse(
-                    "dont les deux contours n'ont pas de sommets sur une même génératrice",
-                ));
-            }
+            *end = out.vertices.len() - 1;
         }
+        let [va, vb] = ends;
         let face = &out.faces[f];
-        let (va, vb) = (
-            start(&out, &face.loops[a][i]),
-            start(&out, &face.loops[b][j]),
-        );
+        let position = |l: usize, v: usize| {
+            face.loops[l]
+                .iter()
+                .position(|entry| start(&out, entry) == v)
+                .unwrap_or(0)
+        };
         let mut merged = face.loops[a].clone();
-        merged.rotate_left(i);
+        merged.rotate_left(position(a, va));
         merged.push((out.edges.len(), false));
         let mut other = face.loops[b].clone();
-        other.rotate_left(j);
+        other.rotate_left(position(b, vb));
         merged.extend(other);
         merged.push((out.edges.len(), true));
         let mut loops = vec![merged];
@@ -298,16 +444,32 @@ fn add_seams(brep: &Brep, charts: &[Chart], tolerance: f64) -> Result<Brep, Mail
                 .map(|l| face.loops[l].clone()),
         );
         out.faces[f].loops = loops;
+        let curve = chart.generator(out.vertices[va], out.vertices[vb]);
         out.edges.push(BrepEdge {
             start: va,
             end: vb,
-            curve: EdgeCurve::Line {
-                from: out.vertices[va],
-                to: out.vertices[vb],
-            },
+            curve,
         });
     }
     Ok(out)
+}
+
+/// Combien de fois un contour croise la génératrice d'angle `theta`.
+fn crossings(brep: &Brep, lp: &[(usize, bool)], chart: &Chart, theta: f64) -> usize {
+    let mut gaps = Vec::new();
+    for &(e, reversed) in lp {
+        for i in 0..SAMPLES {
+            let t = i as f64 / SAMPLES as f64;
+            let t = if reversed { 1.0 - t } else { t };
+            gaps.push(wrap(chart.coords(brep.edges[e].curve.point(t))[0] - theta));
+        }
+    }
+    (0..gaps.len())
+        .filter(|&k| {
+            let (g, h) = (gaps[k], gaps[(k + 1) % gaps.len()]);
+            (g < 0.0) != (h < 0.0) && (g - h).abs() < PI
+        })
+        .count()
 }
 
 /// Sommet de départ d'une arête parcourue dans un contour.
@@ -496,15 +658,17 @@ enum Origin {
     Interior([f64; 3]),
 }
 
+/// Points de chaque arête (paramètre, indice), taille de leurs morceaux, coordonnées des points.
+type EdgePoints<'a> = (&'a [Vec<(f64, usize)>], &'a [f64], &'a [[f64; 3]]);
+
 /// Maille la face `f` déroulée à partir des points actuels de ses arêtes ; renvoie les triangles
 /// (indices locaux) et l'origine de chaque point local.
 fn mesh_face(
     brep: &Brep,
     f: usize,
     mut chart: Chart,
-    chains: &[Vec<(f64, usize)>],
-    sizes: &[f64],
-    points: &[[f64; 3]],
+    (chains, sizes, points): EdgePoints,
+    face_size: f64,
     grading: f64,
 ) -> Result<(Vec<[usize; 3]>, Vec<Origin>), MailleError> {
     let face = &brep.faces[f];
@@ -531,6 +695,10 @@ fn mesh_face(
         rings.push(ring);
     }
     chart.unroll(&mut rings, &face.name)?;
+    // tailles du plan : celles de la surface divisées par l'échelle de la carte
+    for p in rings.iter_mut().flatten() {
+        p.1 /= chart.scale(p.0);
+    }
     let boundary = Boundary::polygons(&rings, &format!("face « {} »", face.name));
     let mut m = Mesher::new(&boundary)?;
     m.acute = acute_corners(&rings);
@@ -539,7 +707,14 @@ fn mesh_face(
         grading,
         ..MeshOptions::default()
     };
-    m.refine(&options, &SizeField::new(&boundary, grading))?;
+    let field = SizeField::new(&boundary, grading);
+    let field = match chart.kind {
+        Kind::Sphere { .. } | Kind::Torus { .. } => {
+            field.limited(move |x| face_size / chart.scale(x))
+        }
+        _ => field,
+    };
+    m.refine(&options, &field)?;
     m.carve()?;
 
     let split: HashMap<usize, (usize, f64)> = m
@@ -564,7 +739,10 @@ fn mesh_face(
     Ok((m.d.inside_triangles(), origins))
 }
 
-/// Carte d'une face : de sa surface au plan du mailleur 2D, sans déformer les longueurs.
+/// Carte d'une face : de sa surface au plan du mailleur 2D. Plan, cylindre et cône se déroulent
+/// sans déformer les longueurs ; la sphère (projection stéréographique) et le tore (coordonnées
+/// isothermes) gardent les angles, et leurs longueurs sont multipliées par `scale` en revenant sur
+/// la surface.
 #[derive(Debug, Clone, Copy)]
 struct Chart {
     kind: Kind,
@@ -594,6 +772,28 @@ enum Kind {
         radius: f64,
         tan: f64,
         sin: f64,
+    },
+    /// Sphère projetée depuis le point c − R n sur le plan de son centre (repère e1, e2) :
+    /// coordonnées R (q·e1, q·e2) / (1 + q·n), q = (p − c) / R. `n` vise le milieu de la face.
+    Sphere {
+        center: [f64; 3],
+        radius: f64,
+        convex: bool,
+        n: [f64; 3],
+        e1: [f64; 3],
+        e2: [f64; 3],
+    },
+    /// Tore : point c + (R + r cos φ) (cos θ u + sin θ w) + r sin φ axe, coordonnées (θ, ψ) avec
+    /// dψ = r dφ / (R + r cos φ), où la métrique est (R + r cos φ)² (dθ² + dψ²) ; mis à plat en
+    /// (R θ, R ψ). `k` = √(R² − r²).
+    Torus {
+        center: [f64; 3],
+        u: [f64; 3],
+        w: [f64; 3],
+        axis: [f64; 3],
+        major: f64,
+        minor: f64,
+        k: f64,
     },
 }
 
@@ -672,6 +872,49 @@ impl Chart {
                     sin: half_angle.sin(),
                 }
             }
+            FaceSurface::Sphere {
+                center,
+                radius,
+                convex,
+            } => {
+                if !(radius.is_finite() && radius > 0.0) {
+                    return Err(invalid("rayon de la sphère non strictement positif"));
+                }
+                let n = [0.0, 0.0, 1.0];
+                let (e1, e2) = basis(n);
+                Kind::Sphere {
+                    center: point(center)?,
+                    radius,
+                    convex,
+                    n,
+                    e1,
+                    e2,
+                }
+            }
+            FaceSurface::Torus {
+                center,
+                axis,
+                major,
+                minor,
+            } => {
+                if !(minor.is_finite() && minor > 0.0 && major.is_finite()) {
+                    return Err(invalid("petit rayon du tore non strictement positif"));
+                }
+                if minor >= major {
+                    return Err(invalid("tore croisé (petit rayon au moins égal au grand : la surface se recoupe sur l'axe), pas pris en charge"));
+                }
+                let axis = unit(axis, "axe du tore nul ou non fini")?;
+                let (u, w) = basis(axis);
+                Kind::Torus {
+                    center: point(center)?,
+                    u,
+                    w,
+                    axis,
+                    major,
+                    minor,
+                    k: (major * major - minor * minor).sqrt(),
+                }
+            }
         };
         Ok(Self {
             kind,
@@ -680,7 +923,98 @@ impl Chart {
         })
     }
 
-    /// Coordonnées (x, y) d'un plan, (θ, v) d'un cylindre ou d'un cône, θ dans ]−π, π].
+    /// Périodes des deux coordonnées de `coords` : θ (2π) d'un cylindre, d'un cône ou d'un tore,
+    /// ψ du tore (2π r / k).
+    fn periods(&self) -> [Option<f64>; 2] {
+        match self.kind {
+            Kind::Plane { .. } | Kind::Sphere { .. } => [None, None],
+            Kind::Round { .. } => [Some(TAU), None],
+            Kind::Torus { minor, k, .. } => [Some(TAU), Some(TAU * minor / k)],
+        }
+    }
+
+    /// Vise le milieu d'une face sphérique : `n` suit l'aire orientée du contour extérieur `ring`
+    /// (points de la sphère). Vue de dehors, la face est à gauche du contour : l'aire pointe vers
+    /// elle si la face est bombée (`convex`), à l'opposé pour une cavité.
+    fn aim(&mut self, ring: &[[f64; 3]], name: &str) -> Result<(), MailleError> {
+        let Kind::Sphere {
+            center,
+            ref mut n,
+            ref mut e1,
+            ref mut e2,
+            radius,
+            convex,
+        } = self.kind
+        else {
+            return Ok(());
+        };
+        let mut area = [0.0; 3];
+        for i in 0..ring.len() {
+            let c = cross(
+                sub(ring[i], center),
+                sub(ring[(i + 1) % ring.len()], center),
+            );
+            area = std::array::from_fn(|k| area[k] + c[k]);
+        }
+        let l = norm(area);
+        let refuse = || {
+            MailleError::InvalidBrep {
+            problem: format!("face « {name} » : face sphérique qui couvre presque toute la sphère, pas encore prise en charge"),
+        }
+        };
+        if l.is_nan() || l <= 1e-9 * radius * radius {
+            return Err(refuse());
+        }
+        let side = if convex { 1.0 } else { -1.0 };
+        *n = area.map(|x| side * x / l);
+        (*e1, *e2) = basis(*n);
+        // le point de projection ne doit pas toucher la face
+        if ring
+            .iter()
+            .any(|&p| 1.0 + dot(sub(p, center), *n) / radius < 1e-3)
+        {
+            return Err(refuse());
+        }
+        Ok(())
+    }
+
+    /// Génératrice de la surface de `p` à `q`, deux points au même angle θ : un segment sur un
+    /// cylindre ou un cône, le plus court arc de méridien sur un tore.
+    fn generator(&self, p: [f64; 3], q: [f64; 3]) -> EdgeCurve {
+        let Kind::Torus {
+            center,
+            axis,
+            major,
+            minor,
+            ..
+        } = self.kind
+        else {
+            return EdgeCurve::Line { from: p, to: q };
+        };
+        // repère du méridien : direction radiale de p, axe du tore
+        let d = sub(p, center);
+        let z = dot(d, axis);
+        let radial: [f64; 3] = std::array::from_fn(|k| d[k] - z * axis[k]);
+        let l = norm(radial);
+        let radial = radial.map(|x| x / l);
+        let middle: [f64; 3] = std::array::from_fn(|k| center[k] + major * radial[k]);
+        let angle = |x: [f64; 3]| {
+            let d = sub(x, middle);
+            dot(d, axis).atan2(dot(d, radial))
+        };
+        let (a, b) = (angle(p), angle(q));
+        EdgeCurve::Arc {
+            center: middle,
+            u: radial,
+            v: axis,
+            radii: [minor, minor],
+            start_angle: a,
+            sweep: wrap(b - a),
+        }
+    }
+
+    /// Coordonnées (x, y) d'un plan, (θ, v) d'un cylindre ou d'un cône, θ dans ]−π, π] ;
+    /// projection d'une sphère ; (θ, ψ) d'un tore, ψ dans ]−π r / k, π r / k].
     fn coords(&self, p: [f64; 3]) -> [f64; 2] {
         match self.kind {
             Kind::Plane { origin, e1, e2, .. } => {
@@ -693,14 +1027,47 @@ impl Chart {
                 let d = sub(p, origin);
                 [dot(d, w).atan2(dot(d, u)), dot(d, axis)]
             }
+            Kind::Sphere {
+                center,
+                radius,
+                n,
+                e1,
+                e2,
+                ..
+            } => {
+                let q = sub(p, center).map(|x| x / radius);
+                let d = 1.0 + dot(q, n);
+                [radius * dot(q, e1) / d, radius * dot(q, e2) / d]
+            }
+            Kind::Torus {
+                center,
+                u,
+                w,
+                axis,
+                major,
+                minor,
+                k,
+            } => {
+                let d = sub(p, center);
+                let (x, y) = (dot(d, u), dot(d, w));
+                let phi = dot(d, axis).atan2(x.hypot(y) - major);
+                let psi = 2.0 * minor / k
+                    * (((major - minor) / (major + minor)).sqrt() * (phi / 2.0).tan()).atan();
+                [y.atan2(x), psi]
+            }
         }
     }
 
-    /// Distance de p à l'axe d'un cylindre ou d'un cône.
+    /// Distance de p à l'axe d'un cylindre, d'un cône ou d'un tore.
     fn radial(&self, p: [f64; 3]) -> f64 {
         match self.kind {
-            Kind::Plane { .. } => 0.0,
-            Kind::Round { origin, axis, .. } => {
+            Kind::Plane { .. } | Kind::Sphere { .. } => 0.0,
+            Kind::Round { origin, axis, .. }
+            | Kind::Torus {
+                center: origin,
+                axis,
+                ..
+            } => {
                 let d = sub(p, origin);
                 let a = dot(d, axis);
                 norm(std::array::from_fn(|k| d[k] - a * axis[k]))
@@ -722,42 +1089,91 @@ impl Chart {
                 let v = dot(sub(p, origin), axis);
                 (self.radial(p) - (radius + v * tan)).abs() / (1.0 + tan * tan).sqrt()
             }
+            Kind::Sphere { center, radius, .. } => (norm(sub(p, center)) - radius).abs(),
+            Kind::Torus {
+                center,
+                axis,
+                major,
+                minor,
+                ..
+            } => {
+                let z = dot(sub(p, center), axis);
+                ((self.radial(p) - major).hypot(z) - minor).abs()
+            }
         }
     }
 
-    /// Déroule les contours, donnés par `coords` : angle rendu continu le long de chaque contour
-    /// (une couture apparaît deux fois, à θ et à θ + 2π), trous ramenés dans l'intervalle d'angle
-    /// du contour extérieur, mise à plat, puis miroir si le contour extérieur tourne en sens
-    /// horaire. Refuse un contour qui fait le tour de l'axe : la face n'a pas de couture.
+    /// Longueur sur la surface d'une unité de longueur du plan, au point x du plan.
+    fn scale(&self, [x, y]: [f64; 2]) -> f64 {
+        match self.kind {
+            Kind::Plane { .. } | Kind::Round { .. } => 1.0,
+            Kind::Sphere { radius, .. } => 2.0 / (1.0 + (x * x + y * y) / (radius * radius)),
+            Kind::Torus { major, minor, .. } => {
+                (major + minor * self.tube_angle(y / major).cos()) / major
+            }
+        }
+    }
+
+    /// Angle φ autour du tube d'un tore, de sa coordonnée ψ (à 2π près).
+    fn tube_angle(&self, psi: f64) -> f64 {
+        let Kind::Torus {
+            major, minor, k, ..
+        } = self.kind
+        else {
+            return 0.0;
+        };
+        let period = TAU * minor / k;
+        let psi = psi - period * (psi / period).round();
+        2.0 * (((major + minor) / (major - minor)).sqrt() * (k * psi / (2.0 * minor)).tan()).atan()
+    }
+
+    /// Déroule les contours, donnés par `coords` : chaque coordonnée périodique (angle) est rendue
+    /// continue le long de chaque contour (une couture apparaît deux fois, à θ et à θ + 2π), les
+    /// trous sont ramenés dans l'intervalle du contour extérieur, puis mise à plat et miroir si le
+    /// contour extérieur tourne en sens horaire. Refuse un contour qui fait le tour d'une période :
+    /// la face n'a pas de couture.
     fn unroll(
         &mut self,
         rings: &mut [Vec<([f64; 2], f64)>],
         name: &str,
     ) -> Result<(), MailleError> {
-        if let Kind::Round { sin, .. } = self.kind {
-            let (mut lo, mut hi) = (0.0, 0.0);
+        let mut range = [[0.0; 2]; 2];
+        for (c, period) in self.periods().into_iter().enumerate() {
+            let Some(period) = period else {
+                continue;
+            };
             for (l, ring) in rings.iter_mut().enumerate() {
                 for i in 1..ring.len() {
-                    ring[i].0[0] = ring[i - 1].0[0] + wrap(ring[i].0[0] - ring[i - 1].0[0]);
+                    ring[i].0[c] =
+                        ring[i - 1].0[c] + wrap_by(ring[i].0[c] - ring[i - 1].0[c], period);
                 }
-                let (first, last) = (ring[0].0[0], ring[ring.len() - 1].0[0]);
-                if (last + wrap(first - last) - first).abs() > PI {
+                let (first, last) = (ring[0].0[c], ring[ring.len() - 1].0[c]);
+                if (last + wrap_by(first - last, period) - first).abs() > period / 2.0 {
+                    let around = if c == 0 {
+                        "de l'axe"
+                    } else {
+                        "du tube du tore"
+                    };
                     return Err(MailleError::InvalidBrep {
-                        problem: format!("face « {name} » : un contour fait le tour de l'axe (face fermée sans couture), pas encore pris en charge"),
+                        problem: format!("face « {name} » : un contour fait le tour {around} (face fermée sans couture), pas encore pris en charge"),
                     });
                 }
-                let angles = ring.iter().map(|p| p.0[0]);
+                let values = ring.iter().map(|p| p.0[c]);
                 if l == 0 {
-                    lo = angles.clone().fold(f64::INFINITY, f64::min);
-                    hi = angles.fold(f64::NEG_INFINITY, f64::max);
+                    range[c] = [
+                        values.clone().fold(f64::INFINITY, f64::min),
+                        values.fold(f64::NEG_INFINITY, f64::max),
+                    ];
                 } else {
-                    let shift = TAU * ((lo - first) / TAU).ceil();
+                    let shift = period * ((range[c][0] - first) / period).ceil();
                     for p in ring.iter_mut() {
-                        p.0[0] += shift;
+                        p.0[c] += shift;
                     }
                 }
             }
-            self.shift = (lo + hi) / 2.0 * sin;
+        }
+        if let Kind::Round { sin, .. } = self.kind {
+            self.shift = (range[0][0] + range[0][1]) / 2.0 * sin;
         }
         for p in rings.iter_mut().flatten() {
             p.0 = self.flat(p.0);
@@ -778,10 +1194,10 @@ impl Chart {
         Ok(())
     }
 
-    /// Point du plan déroulé (sans le miroir) des coordonnées (x, y) ou (θ continu, v).
+    /// Point du plan déroulé (sans le miroir) des coordonnées de `coords`, angles rendus continus.
     fn flat(&self, [a, b]: [f64; 2]) -> [f64; 2] {
         match self.kind {
-            Kind::Plane { .. } => [a, b],
+            Kind::Plane { .. } | Kind::Sphere { .. } => [a, b],
             Kind::Round {
                 radius, sin: 0.0, ..
             } => [radius * a, b],
@@ -792,6 +1208,7 @@ impl Chart {
                 let phi = a * sin - self.shift;
                 [s * phi.cos(), s * phi.sin()]
             }
+            Kind::Torus { major, .. } => [major * a, major * b],
         }
     }
 
@@ -820,15 +1237,51 @@ impl Chart {
                 let (c, s) = (rho * theta.cos(), rho * theta.sin());
                 std::array::from_fn(|k| origin[k] + c * u[k] + s * w[k] + v * axis[k])
             }
+            Kind::Sphere {
+                center,
+                radius,
+                n,
+                e1,
+                e2,
+                ..
+            } => {
+                let (a, b) = (x / radius, y / radius);
+                let s = a * a + b * b;
+                std::array::from_fn(|k| {
+                    center[k]
+                        + radius * (2.0 * a * e1[k] + 2.0 * b * e2[k] + (1.0 - s) * n[k])
+                            / (1.0 + s)
+                })
+            }
+            Kind::Torus {
+                center,
+                u,
+                w,
+                axis,
+                major,
+                minor,
+                ..
+            } => {
+                let theta = x / major;
+                let phi = self.tube_angle(y / major);
+                let rho = major + minor * phi.cos();
+                let (c, s, z) = (rho * theta.cos(), rho * theta.sin(), minor * phi.sin());
+                std::array::from_fn(|k| center[k] + c * u[k] + s * w[k] + z * axis[k])
+            }
         }
     }
 }
 
 /// Angle ramené dans ]−π, π].
 fn wrap(a: f64) -> f64 {
-    let a = a.rem_euclid(TAU);
-    if a > PI {
-        a - TAU
+    wrap_by(a, TAU)
+}
+
+/// Écart ramené dans ]−période / 2, période / 2].
+fn wrap_by(a: f64, period: f64) -> f64 {
+    let a = a.rem_euclid(period);
+    if a > period / 2.0 {
+        a - period
     } else {
         a
     }
@@ -1041,8 +1494,35 @@ pub(super) mod tests {
     /// Surface maillée : fermée (volume de signe positif), sommets de chaque Patch sur la surface
     /// de sa face, rayon circonscrit au plus h/√3.
     fn check(brep: &Brep, h: f64) -> Surface {
+        check_within(brep, h, 1.0 + 1e-9)
+    }
+
+    /// Comme `check`, le rayon circonscrit borné par `slack` h/√3 : sur une carte qui déforme
+    /// les longueurs (sphère, tore), l'échelle varie un peu sur un triangle.
+    fn check_within(brep: &Brep, h: f64, slack: f64) -> Surface {
         let s = triangulate(brep, h, 0.3).unwrap();
         super::super::tetrahedralize::check(&s).unwrap();
+        // conforme : chaque arête bordée par deux triangles, une fois dans chaque sens (pas de
+        // sommet posé au milieu d'une arête d'en face)
+        let mut sides: HashMap<(usize, usize), i32> = HashMap::new();
+        for t in &s.triangles {
+            for k in 0..3 {
+                let (a, b) = (t[k], t[(k + 1) % 3]);
+                *sides.entry((a.min(b), a.max(b))).or_default() += if a < b { 1 } else { -1 };
+            }
+        }
+        let mut uses: HashMap<(usize, usize), usize> = HashMap::new();
+        for t in &s.triangles {
+            for k in 0..3 {
+                let (a, b) = (t[k], t[(k + 1) % 3]);
+                *uses.entry((a.min(b), a.max(b))).or_default() += 1;
+            }
+        }
+        assert!(
+            uses.values().all(|&n| n == 2),
+            "arête bordée une seule fois"
+        );
+        assert!(sides.values().all(|&n| n == 0), "orientation");
         for p in &s.patches {
             let face = brep.faces.iter().find(|f| f.name == p.name).unwrap();
             let chart = Chart::new(&face.surface, &face.name).unwrap();
@@ -1054,7 +1534,7 @@ pub(super) mod tests {
                 let [a, b, c] = s.triangles[t].map(|v| s.vertices[v]);
                 let l = [norm(sub(b, a)), norm(sub(c, b)), norm(sub(a, c))];
                 let radius = l[0] * l[1] * l[2] / (4.0 * triangle_area(&s, s.triangles[t]));
-                assert!(radius <= h / 3f64.sqrt() * (1.0 + 1e-9), "rayon {radius}");
+                assert!(radius <= h / 3f64.sqrt() * slack, "rayon {radius}");
             }
         }
         s
@@ -1099,7 +1579,7 @@ pub(super) mod tests {
         b.edges.pop();
         let s = check(&b, 0.3);
         let with_seam = check(&round(1.0, 1.0, 2.0), 0.3);
-        assert!((s.volume() - with_seam.volume()).abs() < 1e-12);
+        assert!((s.volume() - with_seam.volume()).abs() < 1e-3 * TAU);
         // cercle du haut qui commence un quart de tour plus loin : il est coupé à l'angle 0
         b.vertices[1] = [0.0, 1.0, 2.0];
         if let EdgeCurve::Arc { start_angle, .. } = &mut b.edges[1].curve {
@@ -1132,6 +1612,17 @@ pub(super) mod tests {
         assert!(e > 0.0 && e < 0.02, "volume : écart {e:e}");
         let e = (lateral - patch_area(&s, "cote")) / lateral;
         assert!(e > 0.0 && e < 0.02, "aire : écart {e:e}");
+    }
+
+    #[test]
+    fn couture_coupee_d_un_seul_cote() {
+        // tronc de cône très ouvert : le mailleur 2D coupe la couture d'un seul de ses deux côtés,
+        // la face est remaillée pour que l'autre côté ait le point (sinon, sommet au milieu d'une
+        // arête d'en face)
+        let (r0, r1, h) = (1.0, 3.0, 0.5);
+        let s = check(&round(r0, r1, h), 0.05);
+        let exact = PI * h / 3.0 * (r0 * r0 + r0 * r1 + r1 * r1);
+        assert!((exact - s.volume()) / exact < 1e-3);
     }
 
     #[test]
@@ -1255,6 +1746,230 @@ pub(super) mod tests {
         crate::mesher::tetrahedralize_brep(&chamfer(), &options).unwrap();
     }
 
+    fn arc(
+        b: &mut Brep,
+        ends: [usize; 2],
+        center: [f64; 3],
+        uv: [[f64; 3]; 2],
+        r: f64,
+        sweep: f64,
+    ) -> usize {
+        b.edges.push(BrepEdge {
+            start: ends[0],
+            end: ends[1],
+            curve: EdgeCurve::Arc {
+                center,
+                u: uv[0],
+                v: uv[1],
+                radii: [r, r],
+                start_angle: 0.0,
+                sweep,
+            },
+        });
+        b.edges.len() - 1
+    }
+
+    /// Sphère de rayon r comme l'écrit OCCT : une face, une couture (demi-méridien d'un pôle à
+    /// l'autre) parcourue dans les deux sens, les pôles en contours réduits à un sommet (omis).
+    fn sphere(r: f64) -> Brep {
+        let mut b = empty();
+        b.vertices = vec![[0.0, 0.0, -r], [0.0, 0.0, r]];
+        b.edges.push(BrepEdge {
+            start: 0,
+            end: 1,
+            curve: EdgeCurve::Arc {
+                center: [0.0; 3],
+                u: [1.0, 0.0, 0.0],
+                v: [0.0, 0.0, 1.0],
+                radii: [r, r],
+                start_angle: -PI / 2.0,
+                sweep: PI,
+            },
+        });
+        let sphere = FaceSurface::Sphere {
+            center: [0.0; 3],
+            radius: r,
+            convex: true,
+        };
+        face(&mut b, "boule", sphere, vec![vec![(0, false), (0, true)]]);
+        b
+    }
+
+    /// Huitième de coque sphérique entre les rayons `ri` et `ro` : faces `interieur`, `exterieur`
+    /// et les plans `x0`, `y0`, `z0`.
+    pub(in crate::mesher) fn octant(ri: f64, ro: f64) -> Brep {
+        let mut b = empty();
+        let (x, y, z) = ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]);
+        for r in [ri, ro] {
+            b.vertices
+                .extend([[r, 0.0, 0.0], [0.0, r, 0.0], [0.0, 0.0, r]]);
+        }
+        let mut arcs = [[0; 3]; 2];
+        for (k, r) in [ri, ro].into_iter().enumerate() {
+            let [vx, vy, vz] = [3 * k, 3 * k + 1, 3 * k + 2];
+            arcs[k] = [
+                arc(&mut b, [vx, vy], [0.0; 3], [x, y], r, PI / 2.0),
+                arc(&mut b, [vy, vz], [0.0; 3], [y, z], r, PI / 2.0),
+                arc(&mut b, [vz, vx], [0.0; 3], [z, x], r, PI / 2.0),
+            ];
+        }
+        let [lx, ly, lz] = [0, 1, 2].map(|k| line(&mut b, k, k + 3));
+        let [[xy_i, yz_i, zx_i], [xy_o, yz_o, zx_o]] = arcs;
+        let sphere = |radius: f64, convex: bool| FaceSurface::Sphere {
+            center: [0.0; 3],
+            radius,
+            convex,
+        };
+        let plane = |normal: [f64; 3]| FaceSurface::Plane {
+            origin: [0.0; 3],
+            normal,
+        };
+        face(
+            &mut b,
+            "exterieur",
+            sphere(ro, true),
+            vec![vec![(xy_o, false), (yz_o, false), (zx_o, false)]],
+        );
+        face(
+            &mut b,
+            "interieur",
+            sphere(ri, false),
+            vec![vec![(zx_i, true), (yz_i, true), (xy_i, true)]],
+        );
+        face(
+            &mut b,
+            "z0",
+            plane([0.0, 0.0, -1.0]),
+            vec![vec![(xy_i, false), (ly, false), (xy_o, true), (lx, true)]],
+        );
+        face(
+            &mut b,
+            "x0",
+            plane([-1.0, 0.0, 0.0]),
+            vec![vec![(yz_i, false), (lz, false), (yz_o, true), (ly, true)]],
+        );
+        face(
+            &mut b,
+            "y0",
+            plane([0.0, -1.0, 0.0]),
+            vec![vec![(zx_i, false), (lx, false), (zx_o, true), (lz, true)]],
+        );
+        b
+    }
+
+    /// Tore complet comme l'écrit OCCT : une face, deux coutures (un parallèle et un méridien, par
+    /// le même sommet) parcourues chacune dans les deux sens.
+    fn torus(major: f64, minor: f64) -> Brep {
+        let mut b = empty();
+        b.vertices = vec![[major + minor, 0.0, 0.0]];
+        let parallel = arc(
+            &mut b,
+            [0, 0],
+            [0.0; 3],
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            major + minor,
+            TAU,
+        );
+        let meridian = arc(
+            &mut b,
+            [0, 0],
+            [major, 0.0, 0.0],
+            [[1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+            minor,
+            TAU,
+        );
+        let torus = FaceSurface::Torus {
+            center: [0.0; 3],
+            axis: [0.0, 0.0, 1.0],
+            major,
+            minor,
+        };
+        face(
+            &mut b,
+            "tore",
+            torus,
+            vec![vec![
+                (parallel, false),
+                (meridian, false),
+                (parallel, true),
+                (meridian, true),
+            ]],
+        );
+        b
+    }
+
+    /// Volume inscrit qui converge à l'ordre 2 vers `exact`, aux tailles `sizes`.
+    fn converges(brep: &Brep, exact: f64, sizes: [f64; 2]) -> [f64; 2] {
+        let errors = sizes.map(|h| {
+            let s = check_within(brep, h, 1.15);
+            let e = (exact - s.volume()) / exact;
+            assert!(
+                e > 0.0,
+                "h = {h} : volume {} au-delà de {exact}",
+                s.volume()
+            );
+            e
+        });
+        assert!(errors[1] < errors[0] / 3.0, "{errors:?}");
+        errors
+    }
+
+    #[test]
+    fn sphere_entiere_coupee_en_deux() {
+        let r = 1.5;
+        let errors = converges(&sphere(r), 4.0 / 3.0 * PI * r.powi(3), [0.4, 0.2]);
+        assert!(errors[1] < 0.5 * (0.2f64 / r).powi(2), "{errors:?}");
+        let s = check_within(&sphere(r), 0.4, 1.15);
+        assert_eq!(s.patches.len(), 1);
+    }
+
+    #[test]
+    fn coque_spherique() {
+        let (ri, ro) = (1.0, 2.0);
+        converges(
+            &octant(ri, ro),
+            PI / 6.0 * (ro.powi(3) - ri.powi(3)),
+            [0.3, 0.15],
+        );
+    }
+
+    #[test]
+    fn bout_arrondi() {
+        // cylindre de rayon 1 et de hauteur 2 coiffé d'une demi-sphère : face sphérique bordée par
+        // un seul cercle, la couture et le pôle d'OCCT en moins
+        let mut b = round(1.0, 1.0, 2.0);
+        let top = 1;
+        b.faces[2] = BrepFace {
+            name: "dome".to_string(),
+            surface: FaceSurface::Sphere {
+                center: [0.0, 0.0, 2.0],
+                radius: 1.0,
+                convex: true,
+            },
+            loops: vec![vec![(top, false)]],
+        };
+        converges(&b, 2.0 * PI + 2.0 / 3.0 * PI, [0.3, 0.15]);
+    }
+
+    #[test]
+    fn tore_entier() {
+        let (major, minor) = (3.0, 1.0);
+        let exact = 2.0 * PI * PI * major * minor * minor;
+        converges(&torus(major, minor), exact, [0.4, 0.2]);
+        // sans arête, comme OCCT, et l'axe à l'envers : mêmes coutures, ajoutées
+        let mut b = torus(major, minor);
+        b.edges.clear();
+        b.vertices.clear();
+        b.faces[0].loops.clear();
+        b.faces[0].surface = FaceSurface::Torus {
+            center: [0.0; 3],
+            axis: [0.0, 0.0, -1.0],
+            major,
+            minor,
+        };
+        converges(&b, exact, [0.4, 0.2]);
+    }
+
     #[test]
     fn faces_mal_posees_refusees() {
         // sommet hors de sa surface : cylindre de rayon 1,1 sous des cercles de rayon 1
@@ -1298,5 +2013,15 @@ pub(super) mod tests {
             triangulate(&b, 0.5, 0.3),
             Err(MailleError::InvalidBrep { .. })
         ));
+        // tore croisé
+        let mut b = torus(1.0, 0.5);
+        b.faces[0].surface = FaceSurface::Torus {
+            center: [0.0; 3],
+            axis: [0.0, 0.0, 1.0],
+            major: 1.0,
+            minor: 1.0,
+        };
+        let m = triangulate(&b, 0.5, 0.3).unwrap_err().to_string();
+        assert!(m.contains("tore croisé"), "{m}");
     }
 }

@@ -29,6 +29,7 @@ maille view trempe.pvd 50         # un incrément précis, depuis 0
 | `tube_pression` | pression sur un bord, déformations planes | Lamé |
 | `cube` | 3D, Tet4 (viewer 3D ou ParaView) | champ linéaire |
 | `tube3d` | 3D depuis un STL : `maille mesh tube3d.stl --size 2 --quadratic` d'abord, Tet10 | Lamé |
+| `sphere` | 3D depuis un STEP (faces sphériques exactes) : `maille mesh sphere.step --size 2 --quadratic` d'abord, Tet10 | Lamé (sphère) |
 
 **Viewer 3D.** Un maillage de tétraèdres s'affiche par sa peau, colorée par le champ (touches 1 à 8 :
 von Mises, σxx, σyy, σzz, τxy, τyz, τxz, |u| ; 9 pour p en plasticité). Glisser tourne, Maj + glisser (ou
@@ -94,6 +95,31 @@ surface, mais n'affine pas) : un STL grossier donne un maillage grossier, avec d
 aplatis, et des triangles très effilés (un disque en éventail de centaines de triangles) sont refusés.
 `--size` lève ce refus, puisque la surface est remaillée.
 
+## La pièce : STEP 3D
+
+```sh
+maille mesh sphere.step --size 2 --quadratic  # tétraèdres de taille h = 2 mm, en Tet10
+```
+
+Un fichier STEP texte (AP203, AP214, AP242) d'**un seul solide** : plusieurs solides (un assemblage),
+une surface ouverte ou un solide à cavités sont refusés, avec un message. Maille lit la vraie forme
+de la pièce : faces planes, cylindriques, coniques, sphériques et toriques ; arêtes en segments,
+arcs de cercle ou d'ellipse et B-splines. Une autre surface (B-spline, extrusion…) est refusée, avec
+sa ligne dans le fichier. `--size` est obligatoire. Il est dans l'**unité de longueur du fichier**,
+que `maille mesh` affiche (`mm`, `m`, `inch`…) : Maille ne convertit rien, le modèle TOML doit être
+dans la même unité. Le **nom de chaque face** dans le fichier est le nom du bord (`face_1`,
+`face_2`… si elle n'en a pas), et le Set `domaine` contient tous les tétraèdres.
+
+Chaque face est maillée sur sa surface exacte, en triangles de taille au plus h, puis l'intérieur
+est rempli comme pour un STL (`--size`). Sur une face ou une arête courbe, la taille est en plus
+bornée par un seizième de tour : un trou de rayon r a au moins 16 morceaux, quelle que soit h. Les
+sommets sont sur la vraie surface, les triangles en dessous : l'erreur de géométrie décroît comme
+h². Limites : une pointe où deux faces se rejoignent tangentes (le chanfrein d'un écrou contre un de
+ses pans) peut refuser les petites tailles h, et une taille h grossière devant les détails de la
+pièce peut faire échouer le remplissage (le message propose une autre taille h). `sphere.step` est
+écrit à la main : un huitième de sphère creuse de rayons 10 et 20 mm, faces `interieur`,
+`exterieur`, `sym_x`, `sym_y` et `sym_z`.
+
 ## Le maillage : Gmsh `.msh` 4.1 ASCII
 
 Produit par [Gmsh](https://gmsh.info) (outil externe) avec `Mesh.MshFileVersion = 4.1` et
@@ -145,7 +171,8 @@ seul `.vtu` et un `.pvd`). Format ASCII, lisible par ParaView. Grandeurs aux Nod
 ## Régénérer les maillages
 
 Les `.msh` 2D d'ici viennent des `.dxf` voisins, par `maille mesh` (le cube, 3D, est écrit à la main ; `cube.stl` en est la surface, pour `maille mesh`). `tube3d.msh`
-n'est pas livré : `maille mesh tube3d.stl --size 2 --quadratic` l'écrit en une seconde :
+n'est pas livré : `maille mesh tube3d.stl --size 2 --quadratic` l'écrit en une seconde, de même que
+`sphere.msh` (`maille mesh sphere.step --size 2 --quadratic`) :
 
 ```sh
 cargo test -p maille-cli --test examples -- --ignored

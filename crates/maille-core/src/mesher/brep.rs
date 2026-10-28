@@ -36,7 +36,7 @@ pub struct BrepFace {
 }
 
 /// Surface d'une face (ce n'est pas la `Surface` triangulée d'un STL). Les directions sont
-/// unitaires ; son sens ne compte pas, la face est orientée par ses contours.
+/// unitaires ; leur sens ne compte pas, la face est orientée par ses contours (sauf `convex`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum FaceSurface {
     /// Plan passant par `origin`, de normale `normal`.
@@ -55,6 +55,22 @@ pub enum FaceSurface {
         axis: [f64; 3],
         radius: f64,
         half_angle: f64,
+    },
+    /// Sphère de centre `center` et de rayon `radius` ; `convex` si la matière est du côté du
+    /// centre (boule, bout arrondi), pas pour une cavité (intérieur d'une coque). C'est le seul
+    /// sens que les contours ne donnent pas : une face sphérique et son complément ont le même bord.
+    Sphere {
+        center: [f64; 3],
+        radius: f64,
+        convex: bool,
+    },
+    /// Tore d'axe (`center`, `axis`) : cercle de rayon `minor` dont le centre décrit le cercle de
+    /// rayon `major` autour de l'axe, dans le plan de `center` ; `minor` < `major`.
+    Torus {
+        center: [f64; 3],
+        axis: [f64; 3],
+        major: f64,
+        minor: f64,
     },
 }
 

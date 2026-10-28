@@ -152,10 +152,10 @@ pub fn tetrahedralize(
 }
 
 /// Maille une pièce B-rep (lue d'un STEP) en tétraèdres à la taille h : ses faces sont maillées
-/// une à une dans leur plan déroulé (bords nommés : les noms des faces), puis l'intérieur est
+/// une à une dans une carte plane (bords nommés : les noms des faces), puis l'intérieur est
 /// raffiné comme avec `tetrahedralize`. La taille h est obligatoire (`InvalidBrep` sans elle) ;
 /// sur une face ou une arête courbe, elle est en plus bornée par un seizième de tour. Plan,
-/// cylindre et cône sont pris en charge. Erreurs de `tetrahedralize`, et `InvalidBrep` si une face
+/// cylindre, cône, sphère et tore sont pris en charge. Erreurs de `tetrahedralize`, et `InvalidBrep` si une face
 /// ne se laisse pas mailler.
 pub fn tetrahedralize_brep(
     brep: &Brep,
