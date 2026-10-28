@@ -1,11 +1,15 @@
 //! Triangulation de Delaunay 3D incrémentale (Bowyer-Watson), sur le modèle du 2D : un
 //! super-tétraèdre couvre le domaine, chaque point inséré retire la cavité des tétraèdres dont la
-//! sphère circonscrite le contient et la retriangule en étoile autour de lui. Pas encore de faces
-//! contraintes : la récupération du bord vient ensuite.
+//! sphère circonscrite le contient et la retriangule en étoile autour de lui. Une fois le bord
+//! récupéré, ses faces deviennent des murs que la cavité ne traverse pas, et chaque tétraèdre sait
+//! s'il est dans le domaine : le raffinement de l'intérieur insère alors des points sans toucher
+//! au bord (`insert_inside`).
 
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 
 use super::predicates::{distance3, insphere, orient3d};
+use super::surface::{cross, dot, sub};
 use crate::error::MailleError;
 
 /// Les 4 premiers points sont les sommets du super-tétraèdre.
@@ -20,12 +24,14 @@ const FACE: [[usize; 3]; 4] = [[1, 3, 2], [0, 2, 3], [0, 3, 1], [0, 1, 2]];
 
 /// Tétraèdre positif (`orient3d(v0, v1, v2, v3) > 0`). `n[i]` est le voisin à travers la face
 /// opposée au sommet i, `None` sur le bord du super-tétraèdre. Un tétraèdre retiré reste dans le
-/// tableau (`alive = false`) pour ne pas renuméroter les autres.
+/// tableau (`alive = false`) pour ne pas renuméroter les autres. `inside` : dans le domaine
+/// (fixé par `classify`, hérité par les tétraèdres d'une cavité).
 #[derive(Debug, Clone, Copy)]
 struct Tet {
     v: [usize; 4],
     n: [Option<usize>; 4],
     alive: bool,
+    inside: bool,
 }
 
 /// Cavité d'une insertion : tétraèdres retirés, faces de leur bord avec le tétraèdre d'en face,
@@ -44,6 +50,8 @@ pub struct Delaunay3 {
     hint: usize,
     /// Un tétraèdre vivant qui contient chaque point.
     vertex_tet: Vec<usize>,
+    /// Faces (indices bruts triés) que la cavité d'une insertion ne traverse pas.
+    walls: HashSet<[usize; 3]>,
 }
 
 impl Delaunay3 {
@@ -68,9 +76,11 @@ impl Delaunay3 {
                 v: [0, 1, 2, 3],
                 n: [None; 4],
                 alive: true,
+                inside: false,
             }],
             hint: 0,
             vertex_tet: vec![0; SUPER],
+            walls: HashSet::new(),
         }
     }
 
@@ -78,6 +88,32 @@ impl Delaunay3 {
     /// est confondu avec un point existant, hors du super-tétraèdre, ou si l'arrondi rend la
     /// cavité incohérente ; la triangulation n'est alors pas modifiée.
     pub fn insert(&mut self, p: [f64; 3]) -> Result<usize, MailleError> {
+        let (start, cavity) = self.prepare(p)?;
+        self.commit(p, start, cavity)
+    }
+
+    /// Insère `p` s'il est dans le domaine et n'empiète sur aucun mur de sa cavité (n'est pas dans
+    /// la sphère diamétrale d'une face du bord, la plus petite sphère qui passe par ses trois
+    /// sommets) ; `None` sinon, ou si l'arrondi l'empêche, sans rien modifier.
+    pub fn insert_inside(&mut self, p: [f64; 3]) -> Option<usize> {
+        let (start, cavity) = self.prepare(p).ok()?;
+        if !self.tets[start].inside {
+            return None;
+        }
+        let encroached = cavity.1.iter().any(|&(face, _)| {
+            self.walls.contains(&sorted(face)) && {
+                let (c, r) = circumcircle(face.map(|v| self.points[v]));
+                distance3(p, c) < r
+            }
+        });
+        if encroached {
+            return None;
+        }
+        self.commit(p, start, cavity).ok()
+    }
+
+    /// Tétraèdre de départ et cavité de `p`, sans rien modifier.
+    fn prepare(&self, p: [f64; 3]) -> Result<(usize, Cavity), MailleError> {
         let start = self.locate(p)?;
         let scale = self.edge_scale(start);
         if self.tets[start]
@@ -87,13 +123,23 @@ impl Delaunay3 {
         {
             return Err(MailleError::MeshingFailed);
         }
-
         // d'abord sans les tétraèdres dont la sphère passe par p ; si la cavité est incohérente
         // (points cosphériques en nombre), avec eux
-        let (cavity, boundary, edges) = [false, true]
+        let cavity = [false, true]
             .into_iter()
             .find_map(|ties| self.cavity(start, p, ties))
             .ok_or(MailleError::MeshingFailed)?;
+        Ok((start, cavity))
+    }
+
+    /// Remplace la cavité de `p` par l'étoile de ses faces autour de p.
+    fn commit(
+        &mut self,
+        p: [f64; 3],
+        start: usize,
+        (cavity, boundary, edges): Cavity,
+    ) -> Result<usize, MailleError> {
+        let inside = self.tets[start].inside;
         // position de chaque face du bord dans le tétraèdre d'en face : celle du sommet qui n'en fait pas partie
         let outside: Vec<Option<(usize, usize)>> = boundary
             .iter()
@@ -124,6 +170,7 @@ impl Delaunay3 {
                 v: [a, b, c, pi],
                 n,
                 alive: true,
+                inside,
             });
             for v in [a, b, c, pi] {
                 self.vertex_tet[v] = first + k;
@@ -152,7 +199,11 @@ impl Delaunay3 {
             for (i, face) in FACE.iter().enumerate() {
                 match t.n[i] {
                     Some(o) if inside.contains(&o) => {}
-                    Some(o) if self.in_circumsphere(o, p, ties) => {
+                    Some(o)
+                        if self.in_circumsphere(o, p, ties)
+                            && (self.walls.is_empty()
+                                || !self.walls.contains(&sorted(face.map(|j| t.v[j])))) =>
+                    {
                         inside.insert(o);
                         cavity.push(o);
                     }
@@ -196,11 +247,52 @@ impl Delaunay3 {
 
     /// Tétraèdres positifs sans sommet du super-tétraèdre (indices de points insérés). Ils
     /// remplissent l'enveloppe convexe des points, à quelques tétraèdres plats près au bord.
+    #[cfg(test)]
     pub fn tetrahedra(&self) -> Vec<[usize; 4]> {
         self.tets
             .iter()
             .filter(|t| t.alive && t.v.iter().all(|&v| v >= SUPER))
             .map(|t| t.v.map(|v| v - SUPER))
+            .collect()
+    }
+
+    /// Fixe l'appartenance au domaine de chaque tétraèdre sans sommet du super-tétraèdre (les
+    /// autres sont dehors), d'après ses sommets (indices de points insérés).
+    pub fn classify(&mut self, inside: impl Fn([usize; 4]) -> bool) {
+        for t in &mut self.tets {
+            t.inside = t.alive && t.v.iter().all(|&v| v >= SUPER) && inside(t.v.map(|v| v - SUPER));
+        }
+    }
+
+    /// Les faces (a, b, c) (points insérés) deviennent des murs, que la cavité d'une insertion ne
+    /// traverse pas.
+    pub fn set_walls(&mut self, faces: impl IntoIterator<Item = [usize; 3]>) {
+        self.walls = faces
+            .into_iter()
+            .map(|f| sorted(f.map(|v| v + SUPER)))
+            .collect();
+    }
+
+    /// Nombre d'emplacements de tétraèdres, retirés compris.
+    pub fn tet_slots(&self) -> usize {
+        self.tets.len()
+    }
+
+    /// Tétraèdres créés par la dernière insertion.
+    pub fn new_tets(&self) -> Range<usize> {
+        self.hint..self.tets.len()
+    }
+
+    /// Sommets (points insérés) du tétraèdre `t` s'il est vivant et dans le domaine.
+    pub fn inside_tet(&self, t: usize) -> Option<[usize; 4]> {
+        let tet = self.tets[t];
+        (tet.alive && tet.inside).then(|| tet.v.map(|v| v - SUPER))
+    }
+
+    /// Tétraèdres vivants du domaine (indices de points insérés).
+    pub fn inside_tetrahedra(&self) -> Vec<[usize; 4]> {
+        (0..self.tets.len())
+            .filter_map(|t| self.inside_tet(t))
             .collect()
     }
 
@@ -277,6 +369,22 @@ impl Delaunay3 {
         }
         Err(MailleError::MeshingFailed)
     }
+}
+
+fn sorted(mut v: [usize; 3]) -> [usize; 3] {
+    v.sort_unstable();
+    v
+}
+
+/// Centre et rayon du cercle circonscrit d'un triangle de l'espace.
+pub(super) fn circumcircle([a, b, c]: [[f64; 3]; 3]) -> ([f64; 3], f64) {
+    let (u, v) = (sub(b, a), sub(c, a));
+    let w = cross(u, v);
+    let (uu, vv, ww) = (dot(u, u), dot(v, v), dot(w, w));
+    let (x, y) = (cross(v, w), cross(w, u));
+    let d: [f64; 3] = std::array::from_fn(|k| (uu * x[k] + vv * y[k]) / (2.0 * ww));
+    let center = std::array::from_fn(|k| a[k] + d[k]);
+    (center, dot(d, d).sqrt())
 }
 
 #[cfg(test)]
@@ -409,5 +517,40 @@ mod tests {
         ));
         assert_eq!(d.tets.len(), before);
         assert_eq!(d.point_count(), 2);
+    }
+
+    #[test]
+    fn insertion_dedans_respecte_les_murs() {
+        let mut d = Delaunay3::new([0.0; 3], [1.0; 3]);
+        for i in 0..8 {
+            d.insert([(i & 1) as f64, ((i >> 1) & 1) as f64, ((i >> 2) & 1) as f64])
+                .unwrap();
+        }
+        d.classify(|_| true);
+        // murs : les faces du dessous (z = 0, points 0 à 3), portées par un seul tétraèdre
+        let mut count: HashMap<[usize; 3], usize> = HashMap::new();
+        for t in d.inside_tetrahedra() {
+            for f in FACE {
+                *count.entry(sorted(f.map(|k| t[k]))).or_default() += 1;
+            }
+        }
+        d.set_walls(
+            count
+                .into_iter()
+                .filter(|&(f, c)| c == 1 && f.iter().all(|&v| v < 4))
+                .map(|(f, _)| f),
+        );
+        let before = d.tets.len();
+        // dehors, puis tout près du dessous (dans la sphère diamétrale d'une face, de rayon √2 / 2
+        // autour de son milieu) : refusés sans rien changer ; au-delà, accepté
+        assert_eq!(d.insert_inside([2.0, 0.5, 0.5]), None);
+        assert_eq!(d.insert_inside([0.3, 0.4, 0.01]), None);
+        assert_eq!(d.tets.len(), before);
+        assert_eq!(d.insert_inside([0.5, 0.5, 0.6]), None);
+        assert_eq!(d.insert_inside([0.5, 0.5, 0.8]), Some(8));
+        check(&d, super_volume(&d));
+        let v = real_volume(&d);
+        assert!((v - 1.0).abs() < 1e-12, "volume du cube : {v}");
+        assert_eq!(d.inside_tetrahedra().len(), d.tetrahedra().len());
     }
 }

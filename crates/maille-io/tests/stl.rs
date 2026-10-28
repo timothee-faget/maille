@@ -5,7 +5,7 @@ use std::f64::consts::PI;
 
 use std::collections::HashMap;
 
-use maille_core::mesher::{tetrahedralize, Tetrahedralization};
+use maille_core::mesher::{tetrahedralize, TetOptions, Tetrahedralization};
 use maille_io::stl::{read_surface, Surface};
 use maille_io::IoError;
 
@@ -315,7 +315,7 @@ fn boite_tetraedres_conformes() {
         30.0,
     )
     .unwrap();
-    let t = tetrahedralize(&s).unwrap();
+    let t = tetrahedralize(&s, &TetOptions::default()).unwrap();
     check_tetrahedralization(&s, &t);
     let names: Vec<_> = t.boundary_names().collect();
     assert_eq!(
@@ -341,7 +341,7 @@ fn solids_nommes_donnent_les_bords() {
         .map(|(n, f)| (*n, f.as_slice()))
         .collect();
     let s = read_surface(&ascii(&solids), 30.0).unwrap();
-    let t = tetrahedralize(&s).unwrap();
+    let t = tetrahedralize(&s, &TetOptions::default()).unwrap();
     check_tetrahedralization(&s, &t);
     assert!(t
         .boundary("gauche")
@@ -361,7 +361,7 @@ fn solids_nommes_donnent_les_bords() {
 #[test]
 fn cylindre_tetraedres_conformes() {
     let s = read_surface(&ascii(&[("cyl", &cylinder(64))]), 30.0).unwrap();
-    let t = tetrahedralize(&s).unwrap();
+    let t = tetrahedralize(&s, &TetOptions::default()).unwrap();
     check_tetrahedralization(&s, &t);
     assert_eq!(t.boundary_names().count(), 3);
 }
@@ -370,7 +370,7 @@ fn cylindre_tetraedres_conformes() {
 fn prisme_en_l_non_convexe() {
     let s = read_surface(&ascii(&[("l", &l_prism())]), 30.0).unwrap();
     assert!(near(s.volume(), 3.0));
-    let t = tetrahedralize(&s).unwrap();
+    let t = tetrahedralize(&s, &TetOptions::default()).unwrap();
     check_tetrahedralization(&s, &t);
 }
 
@@ -378,7 +378,7 @@ fn prisme_en_l_non_convexe() {
 #[test]
 fn cylindre_fin_de_128_cotes() {
     let s = read_surface(&ascii(&[("cyl", &cylinder(128))]), 30.0).unwrap();
-    let t = tetrahedralize(&s).unwrap();
+    let t = tetrahedralize(&s, &TetOptions::default()).unwrap();
     check_tetrahedralization(&s, &t);
 }
 
@@ -386,7 +386,9 @@ fn cylindre_fin_de_128_cotes() {
 #[test]
 fn eventail_trop_effile_refuse() {
     let s = read_surface(&ascii(&[("cyl", &cylinder(200))]), 30.0).unwrap();
-    let m = tetrahedralize(&s).unwrap_err().to_string();
+    let m = tetrahedralize(&s, &TetOptions::default())
+        .unwrap_err()
+        .to_string();
     assert!(m.contains("ne se laisse pas récupérer"), "{m}");
 }
 
@@ -394,7 +396,9 @@ fn eventail_trop_effile_refuse() {
 fn surface_inutilisable_refusee() {
     let mut s = read_surface(&ascii(&[("b", &flat(&cuboid(1., 1., 1., [0.; 3])))]), 30.0).unwrap();
     s.triangles[0][0] = 99;
-    let m = tetrahedralize(&s).unwrap_err().to_string();
+    let m = tetrahedralize(&s, &TetOptions::default())
+        .unwrap_err()
+        .to_string();
     assert!(m.contains("sommet qui n'existe pas"), "{m}");
 }
 
@@ -408,7 +412,7 @@ fn tetraedres_quadratiques_gardent_volume_et_bords() {
         .map(|(n, f)| (*n, f.as_slice()))
         .collect();
     let s = read_surface(&ascii(&solids), 30.0).unwrap();
-    let linear = tetrahedralize(&s).unwrap();
+    let linear = tetrahedralize(&s, &TetOptions::default()).unwrap();
     let t = linear.clone().to_quadratic();
     let edges: std::collections::HashSet<_> = linear
         .tetrahedra
@@ -442,7 +446,7 @@ fn tetraedres_quadratiques_gardent_volume_et_bords() {
 fn fichier_msh_des_tetraedres_se_relit() {
     use maille_io::msh::{self, CellKind, MshFile, DOMAIN_SET};
     let s = read_surface(&ascii(&[("b", &flat(&cuboid(1., 1., 1., [0.; 3])))]), 30.0).unwrap();
-    let t = tetrahedralize(&s).unwrap();
+    let t = tetrahedralize(&s, &TetOptions::default()).unwrap();
     let file = MshFile::from_tetrahedralization(&t).unwrap();
     let back = msh::read(&msh::write(&file).unwrap()).unwrap();
     assert_eq!(back.kind, CellKind::Tet4);

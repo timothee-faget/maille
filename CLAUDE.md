@@ -79,7 +79,9 @@ Mailleur 3D (M10) : **Surface** (surface fermée d'une pièce : sommets soudés,
 mailleur 3D ; elle vit dans `maille_core::mesher` et `maille_io::stl` la réexporte), **Patch** (morceau nommé de la Surface :
 un `solid` du STL ou une zone limitée par des arêtes vives, `surface_1`, `surface_2`… ; son nom devient le Set des BC),
 **Tetrahedralization** (sortie du mailleur 3D : Nodes, tétraèdres, bords nommés ; ce n'est pas un Mesh, comme la
-Triangulation en 2D). `TetOptions` n'existe pas.
+Triangulation en 2D). **TetOptions** (M10b : `size` = taille h optionnelle, `grading` ; `tetrahedralize(&surface, &options)`) :
+avec une taille h, la surface est remaillée facette par facette puis l'intérieur raffiné ; `None` garde la finesse du STL.
+Une **facette** est un morceau plan et connexe d'un Patch (interne au mailleur, ce n'est pas un Set).
 Solveur (M8) : **SolverKind** (`Auto` / `Direct` / `Iterative`, `Model::with_solver`) : le Cholesky en ligne de ciel (direct) ou les gradients conjugués préconditionnés par un Cholesky incomplet IC(0) (itératif). Ce n'est pas un trait : deux solveurs, un `enum`.
 Pression (M7b) : **Pressure** (pression uniforme sur une face d'Element, `with_pressures`, statique ; positive, elle comprime). Distincte de la **Convection** (thermique) et du **Load** (force par Node).
 Fichiers (M7) : **Set** (ensemble nommé de Nodes, de faces ou d'Elements : un groupe physique de Gmsh), **MshFile**

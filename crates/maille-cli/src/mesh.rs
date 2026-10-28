@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use maille_core::mesher::{tetrahedralize, triangulate, MeshOptions};
+use maille_core::mesher::{tetrahedralize, triangulate, MeshOptions, TetOptions};
 use maille_io::msh::{self, MshFile, DOMAIN_SET};
 use maille_io::{dxf, stl};
 
@@ -105,7 +105,7 @@ fn from_dxf(path: &Path, size: f64, quadratic: bool) -> Result<MshFile, Failure>
 
 fn from_stl(path: &Path, feature_angle: f64, quadratic: bool) -> Result<MshFile, Failure> {
     let surface = stl::read_surface(&read_bytes(path)?, feature_angle)?;
-    let tetrahedra = tetrahedralize(&surface)?;
+    let tetrahedra = tetrahedralize(&surface, &TetOptions::default())?;
     Ok(if quadratic {
         MshFile::from_tetrahedralization(&tetrahedra.to_quadratic())?
     } else {
