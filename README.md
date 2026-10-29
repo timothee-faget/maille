@@ -22,7 +22,8 @@ Chaque élément et chaque physique sont validés contre une solution analytique
   sphériques et toriques)
 - Viewer natif 2D et 3D (wgpu), avec plan de coupe et capture en image PNG
 
-Le projet est en cours de développement : l'API n'est pas stable.
+Jalons M0 à M12b terminés (version 0.12.0). Le projet est en cours de développement : l'API n'est pas stable, et
+il n'y a pas encore d'interface graphique.
 
 ## Démarrer
 
@@ -35,7 +36,7 @@ cd examples
 ```
 
 Le flux de travail (CAO DXF, STL ou STEP, maillage Gmsh `.msh`, modèle `.toml`, résultats VTK lisibles par
-ParaView) et les exemples
+ParaView) et les exemples (dont `console_gd`, `hertz` et `balle` pour les grandes déformations et le contact)
 sont décrits dans [`examples/README.md`](examples/README.md).
 
 Des cas d'exemple, qui maillent leur géométrie, comparent le résultat à la solution analytique, puis ouvrent le
