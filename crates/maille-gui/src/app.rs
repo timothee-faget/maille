@@ -8,15 +8,21 @@ use eframe::egui::{
     self, Align2, Color32, CornerRadius, Frame, Margin, Pos2, Rect, RichText, Sense, Stroke, Vec2,
 };
 use eframe::egui_wgpu::wgpu;
+use egui_lucide::Lucide;
 use maille_viewer::{Cut, ResultsView};
 
 use crate::results;
 use crate::state::{Action, Item, Space, State, Status, Tool};
+use crate::triad;
 
 /// Fond des panneaux : sombre et translucide, la vue reste lisible derrière.
 const PANEL: Color32 = Color32::from_rgba_premultiplied(26, 28, 34, 224);
 const GAP: f32 = 12.0;
-const TOOLBAR_WIDTH: f32 = 112.0;
+const TOOLBAR_WIDTH: f32 = 36.0;
+const ICON_SIZE: f32 = 18.0;
+/// Marge du trièdre d'orientation au coin bas droit de la vue, et sa taille.
+const TRIAD_MARGIN: f32 = 56.0;
+const TRIAD_LENGTH: f32 = 34.0;
 const INSPECTOR_WIDTH: f32 = 250.0;
 /// Facteur de zoom par pixel de défilement, comme `maille view`.
 const SCROLL_ZOOM: f64 = 1.005;
@@ -141,6 +147,7 @@ impl App {
             Color32::WHITE,
         );
 
+        draw_triad(ui, rect, open.view.orientation());
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
         let delta = response.drag_delta();
         if delta != Vec2::ZERO {
@@ -194,10 +201,23 @@ impl App {
                             Item::Tool(t) => (t.label(), self.state.tool() == t),
                             Item::Action(a) => (a.label(), false),
                         };
-                        let button = egui::Button::new(label)
-                            .selected(selected)
-                            .min_size(Vec2::new(TOOLBAR_WIDTH, 0.0));
-                        if ui.add(button).clicked() {
+                        let button = match item {
+                            Item::Action(Action::View(axis)) => egui::Button::new(
+                                RichText::new(["X", "Y", "Z"][axis])
+                                    .color(AXIS_COLORS[axis])
+                                    .strong(),
+                            ),
+                            _ => egui::Button::image(
+                                icon(item)
+                                    .size(ICON_SIZE)
+                                    .color(Color32::from_gray(228))
+                                    .stroke_width(1.75)
+                                    .image(),
+                            ),
+                        }
+                        .selected(selected)
+                        .min_size(Vec2::splat(TOOLBAR_WIDTH));
+                        if ui.add(button).on_hover_text(label).clicked() {
                             clicked = Some(item);
                         }
                     }
@@ -205,24 +225,43 @@ impl App {
             });
         });
         match clicked {
-            Some(Item::Tool(t)) => self.state.set_tool(t),
+            Some(Item::Tool(t)) => self.state.pick(t),
             Some(Item::Action(a)) => self.act(a),
             None => {}
         }
     }
 
     fn inspector(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        if !self.state.inspector {
+            return;
+        }
         let tool = self.state.tool();
         let mut to_open = None;
+        let mut hide = false;
         panel(
             "inspector",
             Align2::RIGHT_CENTER,
-            [-(GAP * 2.0 + TOOLBAR_WIDTH + 18.0), 0.0],
+            [-(GAP * 2.0 + TOOLBAR_WIDTH + 22.0), 0.0],
         )
         .show(ctx, |ui| {
             floating().show(ui, |ui| {
                 ui.set_width(INSPECTOR_WIDTH);
-                ui.heading(tool.label());
+                ui.horizontal(|ui| {
+                    ui.heading(tool.label());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let close = egui::Button::image(
+                            Lucide::PanelRightClose
+                                .size(ICON_SIZE)
+                                .color(Color32::from_gray(200))
+                                .image(),
+                        )
+                        .frame(false);
+                        let tip = "Masquer (un clic sur l'outil le remontre)";
+                        if ui.add(close).on_hover_text(tip).clicked() {
+                            hide = true;
+                        }
+                    });
+                });
                 ui.separator();
                 match tool {
                     Tool::Navigate => {
@@ -259,6 +298,9 @@ impl App {
                 }
             });
         });
+        if hide {
+            self.state.inspector = false;
+        }
         if let Some(path) = to_open {
             self.load(&path, frame);
         }
@@ -315,6 +357,80 @@ impl App {
         if close {
             self.state.cards = false;
         }
+    }
+}
+
+/// Couleurs des axes x, y, z (rouge, vert, bleu, comme partout).
+const AXIS_COLORS: [Color32; 3] = [
+    Color32::from_rgb(226, 80, 80),
+    Color32::from_rgb(90, 190, 100),
+    Color32::from_rgb(80, 130, 235),
+];
+
+/// Icône d'un élément de la barre d'outils.
+fn icon(item: Item) -> Lucide {
+    match item {
+        Item::Tool(t) => match t {
+            Tool::Navigate => Lucide::MousePointer2,
+            Tool::Import => Lucide::FileInput,
+            Tool::MeshSize => Lucide::Grid3x3,
+            Tool::FaceSets => Lucide::Square,
+            Tool::VertexSets => Lucide::Dot,
+            Tool::ManageSets => Lucide::Layers,
+            Tool::Quality => Lucide::Gauge,
+            Tool::Material => Lucide::Package,
+            Tool::Support => Lucide::Anchor,
+            Tool::Load => Lucide::ArrowDownToLine,
+            Tool::Thermal => Lucide::Flame,
+            Tool::Contact => Lucide::CircleDot,
+            Tool::StepAmplitude => Lucide::ChartLine,
+            Tool::Run => Lucide::Play,
+            Tool::Open => Lucide::FolderOpen,
+            Tool::Field => Lucide::Palette,
+            Tool::Deformation => Lucide::Spline,
+            Tool::Cut => Lucide::Scissors,
+            Tool::Probe => Lucide::Crosshair,
+            Tool::Increments => Lucide::Clock,
+            Tool::Curve => Lucide::ChartSpline,
+            Tool::Capture => Lucide::Camera,
+        },
+        Item::Action(Action::Fit) => Lucide::Maximize,
+        // les vues X, Y, Z portent leur lettre, pas une icône
+        Item::Action(Action::View(_)) => Lucide::Axis3d,
+    }
+}
+
+/// Trièdre d'orientation au coin bas droit de la vue : x rouge, y vert, z bleu, les axes qui
+/// s'éloignent en plus pâle. Il suit la caméra : on voit toujours d'où l'on regarde.
+fn draw_triad(ui: &egui::Ui, rect: Rect, (right, up, eye): ([f64; 3], [f64; 3], [f64; 3])) {
+    let painter = ui.painter();
+    let center = rect.right_bottom() - Vec2::splat(TRIAD_MARGIN);
+    painter.circle_filled(center, TRIAD_LENGTH + 14.0, Color32::from_black_alpha(18));
+    for axis in triad::axes(right, up, eye) {
+        let index = ["X", "Y", "Z"]
+            .iter()
+            .position(|n| *n == axis.name)
+            .unwrap_or(0);
+        let color = if axis.toward < -0.05 {
+            AXIS_COLORS[index].gamma_multiply(0.45)
+        } else {
+            AXIS_COLORS[index]
+        };
+        let tip = center + Vec2::new(axis.screen[0] as f32, axis.screen[1] as f32) * TRIAD_LENGTH;
+        painter.line_segment([center, tip], Stroke::new(2.5, color));
+        // un axe qui pointe droit vers nous n'a pas de direction : la lettre reste sur le centre
+        let at = if (tip - center).length() < 4.0 {
+            tip
+        } else {
+            tip + (tip - center).normalized() * 9.0
+        };
+        painter.text(
+            at,
+            Align2::CENTER_CENTER,
+            axis.name,
+            egui::FontId::proportional(13.0),
+            color,
+        );
     }
 }
 

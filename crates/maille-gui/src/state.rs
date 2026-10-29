@@ -192,6 +192,8 @@ pub struct State {
     tools: [Tool; 3],
     /// Cartes du parcours affichées (désactivables).
     pub cards: bool,
+    /// Inspecteur de l'outil actif affiché (masquable, pour voir la pièce en entier).
+    pub inspector: bool,
     pub progress: Progress,
 }
 
@@ -201,6 +203,7 @@ impl Default for State {
             space: Space::Results,
             tools: [Tool::Navigate; 3],
             cards: true,
+            inspector: true,
             progress: Progress::default(),
         }
     }
@@ -211,8 +214,20 @@ impl State {
         self.tools[self.space.index()]
     }
 
+    /// Active un outil et montre son inspecteur.
     pub fn set_tool(&mut self, tool: Tool) {
         self.tools[self.space.index()] = tool;
+        self.inspector = true;
+    }
+
+    /// Clic sur un outil de la barre : un autre outil s'active ; l'outil déjà actif masque ou remontre
+    /// son inspecteur.
+    pub fn pick(&mut self, tool: Tool) {
+        if tool == self.tool() {
+            self.inspector = !self.inspector;
+        } else {
+            self.set_tool(tool);
+        }
     }
 
     /// Change d'espace en gardant l'outil que chacun avait.
@@ -285,6 +300,29 @@ mod tests {
         assert_eq!(s.tool(), Tool::Cut);
         s.go(Space::Mesh);
         assert_eq!(s.tool(), Tool::Import);
+    }
+
+    #[test]
+    fn the_active_tool_hides_and_shows_its_inspector() {
+        let mut s = State::default();
+        s.set_tool(Tool::Cut);
+        assert!(s.inspector);
+        s.pick(Tool::Cut);
+        assert!(
+            !s.inspector && s.tool() == Tool::Cut,
+            "le même outil masque"
+        );
+        s.pick(Tool::Cut);
+        assert!(s.inspector, "le même outil remontre");
+        s.inspector = false;
+        s.pick(Tool::Field);
+        assert!(
+            s.inspector && s.tool() == Tool::Field,
+            "un autre outil remontre"
+        );
+        s.inspector = false;
+        s.set_tool(Tool::Open);
+        assert!(s.inspector, "une carte qui active un outil remontre");
     }
 
     #[test]

@@ -84,6 +84,12 @@ impl ResultsView {
         self.renderer.set_camera(&self.display.camera);
     }
 
+    /// Base de la caméra dans les coordonnées de la pièce : (droite, haut, œil), où `œil` va de la pièce
+    /// vers l'observateur. Sert à dessiner le trièdre d'orientation.
+    pub fn orientation(&self) -> ([f64; 3], [f64; 3], [f64; 3]) {
+        self.display.camera.axes()
+    }
+
     /// Recadre la pièce, sans changer la direction de vue.
     pub fn fit(&mut self) {
         self.display.refit(&self.renderer);

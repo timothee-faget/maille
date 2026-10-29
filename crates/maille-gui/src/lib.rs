@@ -5,6 +5,7 @@
 mod app;
 pub mod results;
 pub mod state;
+mod triad;
 
 use std::error::Error;
 use std::path::PathBuf;
@@ -22,7 +23,11 @@ pub fn run(open: Option<PathBuf>) -> Result<(), Box<dyn Error>> {
     eframe::run_native(
         "Maille",
         options,
-        Box::new(move |_| Ok(Box::new(app::App::new(open)))),
+        Box::new(move |cc| {
+            // les icônes sont des SVG
+            egui_extras::install_image_loaders(&cc.egui_ctx);
+            Ok(Box::new(app::App::new(open)))
+        }),
     )
     .map_err(|e| format!("l'interface n'a pas pu démarrer : {e}").into())
 }

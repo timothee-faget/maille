@@ -10,3 +10,5 @@ eframe = { version = "0.37.0", default-features = false, features = ["default_fo
 maille-core = { path = "../maille-core" }
 maille-io = { path = "../maille-io" }
 maille-viewer = { path = "../maille-viewer" }
+egui-lucide = "0.2.0"
+egui_extras = { version = "0.37.0", default-features = false, features = ["svg"] }
