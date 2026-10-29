@@ -59,7 +59,14 @@ pub fn solve(args: &[String]) -> Result<(), Failure> {
 fn solve_file(model_path: &Path, output: Option<&Path>) -> Result<Vec<PathBuf>, Failure> {
     let dir = model_path.parent().unwrap_or(Path::new("."));
     let file = model::parse(&read(model_path)?)?;
-    let mesh = msh::read(&read(&dir.join(&file.mesh))?)?;
+    // le maillage manque : la recette [meshing] le fabrique (sinon `mesh` est lu tel quel)
+    let mesh_path = dir.join(&file.mesh);
+    if let (false, Some(def)) = (mesh_path.exists(), &file.meshing) {
+        let made = crate::mesh::from_recipe(dir, def)?;
+        write(&mesh_path, &msh::write(&made)?)?;
+        println!("{} fabriqué d'après [meshing]", mesh_path.display());
+    }
+    let mesh = msh::read(&read(&mesh_path)?)?;
 
     let stem = model_path.file_stem().ok_or("nom de modèle invalide")?;
     let prefix = output.map_or_else(|| dir.join(stem), Path::to_path_buf);

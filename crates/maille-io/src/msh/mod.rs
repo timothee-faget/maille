@@ -16,6 +16,7 @@ use maille_core::mesher::{BoundarySet, Tetrahedralization, Triangulation};
 
 use crate::IoError;
 
+pub use numbering::face_positions;
 pub use reader::read;
 pub use writer::write;
 

@@ -49,6 +49,8 @@ Usage :
   maille view <resultats.pvd|.vtu> [indice]   affiche un incrément (le dernier par défaut)
   maille view <résultats> --png <image.png>   écrit une image au lieu d'ouvrir une fenêtre
                                               (--size LxH, --angles lacet,tangage, --field k, --deformed, --cut x=0.5)
+  maille mesh <modele.toml> [-o <maillage.msh>]
+                                              maille depuis la section [meshing] du modèle (Sets compris)
   maille mesh <dessin.dxf> --size <h> [--quadratic] [-o <maillage.msh>]
                                               maille un dessin DXF 2D (calque = nom de bord)
   maille mesh <piece.stl> [--size <h>] [--feature-angle <degrés>] [--quadratic] [-o <maillage.msh>]

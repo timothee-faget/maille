@@ -624,9 +624,11 @@ fn stl_mesh_command_reports_errors() {
         "attend un nombre",
     );
     fail(&["mesh", "cube.stl", "--feature-angle", "0"], "angle vif");
+    // un modèle sans recette [meshing] : rien à suivre
+    fail(&["mesh", "cube.toml"], "pas de section [meshing]");
     fail(
-        &["mesh", "cube.toml"],
-        "extension « .toml » non prise en charge",
+        &["mesh", "cube.msh"],
+        "extension « .msh » non prise en charge",
     );
     fail(&["mesh", "absent.stl"], "absent.stl");
     // une face manque : surface ouverte
@@ -828,7 +830,7 @@ fn the_gui_meshes_exactly_like_the_mesh_command() {
             let Imported::Cad(cad) = import(&w.0.join(name)).unwrap() else {
                 panic!("{name} : une géométrie était attendue");
             };
-            let built = mesh(&cad, cad.suggested, quadratic).unwrap();
+            let built = mesh(&cad, cad.suggested, quadratic, &Default::default()).unwrap();
             let output = format!("{name}-{quadratic}.msh");
             let h = cad.suggested.to_string();
             let mut args = vec!["mesh", name, "--size", &h, "-o", &output];
@@ -848,6 +850,57 @@ fn the_gui_meshes_exactly_like_the_mesh_command() {
             );
         }
     }
+}
+
+/// Un modèle avec `[meshing]` : sans `.msh`, `maille solve` le fabrique d'après la recette (un Set
+/// regroupe deux bords) et retrouve la solution analytique de la traction ; `maille mesh modele.toml`
+/// remaille toujours.
+#[test]
+fn a_meshing_recipe_makes_the_msh_and_the_traction_stays_exact() {
+    let w = Workdir::new("recette");
+    let text = fs::read_to_string(w.0.join("traction.toml")).unwrap();
+    // les bords gauche et bas portent chacun un blocage : un Set « bloques » les regroupe pour la BC
+    // en y, la BC en x reste sur « gauche »
+    let text = text.replace("mesh = \"plaque.msh\"", "mesh = \"recette.msh\"")
+        + "\n[meshing]\nsource = \"plaque.dxf\"\nsize = 0.5\n\n[meshing.sets]\nbords_y = [\"bas\"]\nverticaux = [\"gauche\", \"droite\"]\n";
+    let text = text.replace("set = \"bas\"", "set = \"bords_y\"");
+    fs::write(w.0.join("recette.toml"), text).unwrap();
+    assert!(!w.0.join("recette.msh").exists());
+
+    w.solve("recette.toml");
+    assert!(w.0.join("recette.msh").exists(), "le .msh est fabriqué");
+    let (_, r) = w.results("recette.pvd", None);
+    let (u, s) = (array(&r, "displacement"), array(&r, "stress"));
+    for (i, p) in r.nodes.iter().enumerate() {
+        assert!((u[3 * i] - 0.001 * p.x).abs() < 1e-9);
+        assert!((s[6 * i] - 210.0).abs() < 1e-6, "σx = {}", s[6 * i]);
+    }
+    let written =
+        maille_io::msh::read(&fs::read_to_string(w.0.join("recette.msh")).unwrap()).unwrap();
+    assert!(written.sets.contains_key("verticaux") && written.sets.contains_key("bords_y"));
+
+    // maille mesh modele.toml : remaille toujours, et refuse les options en ligne
+    fs::write(w.0.join("recette.msh"), "vide").unwrap();
+    let out = w.maille(&["mesh", "recette.toml"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(fs::read_to_string(w.0.join("recette.msh"))
+        .unwrap()
+        .contains("$MeshFormat"));
+    let out = w.maille(&["mesh", "recette.toml", "--size", "1"]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("[meshing]"));
+    let out = w.maille(&["mesh", "traction.toml"]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("pas de section [meshing]"));
+    // un .msh déjà là n'est pas refait par solve
+    fs::write(w.0.join("recette.msh"), "vide").unwrap();
+    let out = w.maille(&["solve", "recette.toml"]);
+    assert!(
+        !out.status.success(),
+        "un .msh illisible reste une erreur, il n'est pas remplacé"
+    );
 }
 
 #[test]

@@ -27,6 +27,8 @@ pub struct Display {
     /// Vrai tant que l'utilisateur n'a ni zoomé ni déplacé : la vue se recadre avec la fenêtre.
     pub follow_window: bool,
     pub cut: Option<Cut>,
+    /// Triangles surlignés (sélection), par-dessus le Mesh non déformé.
+    pub highlight: Vec<[[f64; 3]; 3]>,
 }
 
 impl Display {
@@ -39,6 +41,7 @@ impl Display {
             deformed: false,
             follow_window: true,
             cut: None,
+            highlight: Vec::new(),
         }
     }
 
@@ -127,6 +130,14 @@ impl Display {
             &surface.values.iter().map(|&v| v as f32).collect::<Vec<_>>(),
             surface.triangles.as_flattened(),
             &lines.iter().map(to_f32).collect::<Vec<_>>(),
+        );
+        renderer.set_highlight(
+            &self
+                .highlight
+                .iter()
+                .flatten()
+                .map(to_f32)
+                .collect::<Vec<_>>(),
         );
         renderer.set_range((lo, hi));
         renderer.set_camera(&self.camera);

@@ -314,6 +314,52 @@ mod tests {
     }
 
     #[test]
+    fn a_highlighted_triangle_is_orange_and_the_rest_is_untouched() {
+        let shot = Shot::default();
+        let Some(mut view) = embedded(&cube_results(), [shot.width, shot.height]) else {
+            return;
+        };
+        let (cx, cy) = center(&shot);
+        let before = view.pixels();
+        // moitié basse droite de la face avant (z = +1, vue de face)
+        view.set_highlight(vec![[[-1.0, -1.0, 1.0], [1.0, -1.0, 1.0], [1.0, 1.0, 1.0]]]);
+        let after = view.pixels();
+        // hors des diagonales de la face, que les arêtes du maillage tracent en gris
+        let inside = pixel(&after, &shot, cx + 30, cy + 8);
+        assert!(
+            inside[0] > 240 && (150..235).contains(&inside[1]) && inside[2] < 20,
+            "orange attendu : {inside:?}"
+        );
+        // moitié haute gauche : inchangée
+        let (x, y) = (cx - 30, cy - 8);
+        assert_eq!(pixel(&after, &shot, x, y), pixel(&before, &shot, x, y));
+        // le retirer rend l'image d'origine
+        view.set_highlight(Vec::new());
+        assert_eq!(view.pixels(), before);
+    }
+
+    #[test]
+    fn a_point_is_projected_where_it_is_drawn() {
+        let shot = Shot::default();
+        let Some(view) = embedded(&cube_results(), [shot.width, shot.height]) else {
+            return;
+        };
+        // le centre du cube est au centre de la partie que la légende laisse libre
+        let (cx, cy) = center(&shot);
+        let p = view.project([0.0, 0.0, 0.0]);
+        assert!(
+            (p[0] - f64::from(cx)).abs() < 1.0 && (p[1] - f64::from(cy)).abs() < 1.0,
+            "{p:?}"
+        );
+        // y monte, x va à droite, un point devant est plus proche (profondeur plus petite)
+        let right = view.project([1.0, 0.0, 0.0]);
+        let up = view.project([0.0, 1.0, 0.0]);
+        let near = view.project([0.0, 0.0, 1.0]);
+        assert!(right[0] > p[0] && up[1] < p[1]);
+        assert!(near[2] < p[2]);
+    }
+
+    #[test]
     fn the_field_rank_is_checked() {
         let shot = Shot {
             quantity: 20,

@@ -1,6 +1,7 @@
 //! L'espace Maillage sans fenêtre : importer un fichier CAO (DXF, STL, STEP) ou un `.msh`, le mailler
 //! avec la même recette que `maille mesh`, regarder la qualité. `app` ne fait que l'afficher.
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -31,22 +32,114 @@ pub enum Imported {
     Mesh(PathBuf, Box<Built>),
 }
 
-/// Maillage obtenu, avec sa qualité.
+/// Maillage obtenu, avec sa qualité et ses Sets.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Built {
     pub file: MshFile,
     /// Unité de longueur annoncée par un STEP.
     pub unit: Option<String>,
     pub quality: Quality,
+    /// Entités de la géométrie que le mailleur a nommées (calque, `solid` ou `surface_N`, face) : ce
+    /// qu'on peut désigner à l'écran, triées.
+    pub entities: Vec<String>,
+    /// Sets utilisateur : nom → entités regroupées, ce qui s'écrit dans `[meshing] sets`.
+    pub user: BTreeMap<String, Vec<String>>,
 }
 
 impl Built {
+    /// Maillage tel que le mailleur ou un `.msh` le donne : tous ses Sets sont des entités.
     pub fn new(file: MshFile, unit: Option<String>) -> Self {
         let quality = quality::of(&file);
+        let entities = file
+            .sets
+            .keys()
+            .filter(|name| *name != DOMAIN_SET)
+            .cloned()
+            .collect();
         Self {
             file,
             unit,
             quality,
+            entities,
+            user: BTreeMap::new(),
+        }
+    }
+
+    /// Crée un Set qui regroupe `members` (des entités de la géométrie). Erreur si le nom est vide ou
+    /// déjà pris, ou si une entité n'existe pas.
+    pub fn add_set(&mut self, name: &str, members: &[String]) -> Result<(), IoError> {
+        if name.trim().is_empty() {
+            return Err(IoError::InvalidModel {
+                problem: "le Set n'a pas de nom : en écrire un, par exemple « encastrement »"
+                    .to_string(),
+            });
+        }
+        // seules les entités se regroupent : un Set utilisateur n'est pas une entité
+        let entities: BTreeMap<String, Vec<String>> =
+            BTreeMap::from([(name.trim().to_string(), members.to_vec())]);
+        let mut grouped = self.file.clone();
+        grouped
+            .sets
+            .retain(|k, _| self.entities.contains(k) || k == DOMAIN_SET);
+        meshing::combine_sets(&mut grouped, &entities)?;
+        let name = name.trim().to_string();
+        if self.file.sets.contains_key(&name) {
+            return Err(IoError::DuplicateSetName { name });
+        }
+        if let Some(set) = grouped.sets.remove(&name) {
+            self.file.sets.insert(name.clone(), set);
+        }
+        self.user.insert(name, members.to_vec());
+        Ok(())
+    }
+
+    /// Retire un Set utilisateur ; faux si ce n'en est pas un (une entité ne se supprime pas).
+    pub fn remove_set(&mut self, name: &str) -> bool {
+        if self.user.remove(name).is_none() {
+            return false;
+        }
+        self.file.sets.remove(name);
+        true
+    }
+
+    /// Renomme un Set utilisateur. Erreur si `name` n'en est pas un ou si le nouveau nom est vide ou
+    /// déjà pris.
+    pub fn rename_set(&mut self, name: &str, new_name: &str) -> Result<(), IoError> {
+        let new_name = new_name.trim();
+        if new_name.is_empty() {
+            return Err(IoError::InvalidModel {
+                problem: "le Set n'a pas de nom : en écrire un".to_string(),
+            });
+        }
+        if new_name == name {
+            return Ok(());
+        }
+        if self.file.sets.contains_key(new_name) || new_name == DOMAIN_SET {
+            return Err(IoError::DuplicateSetName {
+                name: new_name.to_string(),
+            });
+        }
+        if !self.user.contains_key(name) {
+            return Err(IoError::InvalidModel {
+                problem: format!(
+                    "« {name} » n'est pas un Set créé ici : seuls ceux-là se renomment"
+                ),
+            });
+        }
+        let members = self.user.remove(name).unwrap_or_default();
+        let set = self.file.sets.remove(name).unwrap_or_default();
+        self.user.insert(new_name.to_string(), members);
+        self.file.sets.insert(new_name.to_string(), set);
+        Ok(())
+    }
+
+    /// Entités de la géométrie que désigne un Set : lui-même pour une entité, ses membres pour un Set
+    /// utilisateur.
+    pub fn entities_of(&self, set: &str) -> Vec<String> {
+        match self.user.get(set) {
+            Some(members) => members.clone(),
+            None if self.entities.iter().any(|e| e == set) => vec![set.to_string()],
+            None => Vec::new(),
         }
     }
 
@@ -105,15 +198,41 @@ pub fn import(path: &Path) -> Result<Imported, Box<dyn Error>> {
     }))
 }
 
-/// Maille la géométrie à la taille `size` : la même recette que `maille mesh`, donc le même maillage.
-pub fn mesh(cad: &Cad, size: f64, quadratic: bool) -> Result<Built, IoError> {
+/// Maille la géométrie à la taille `size` : la même recette que `maille mesh`, donc le même maillage,
+/// puis regroupe les entités des Sets utilisateur `user` (ils survivent au remaillage).
+pub fn mesh(
+    cad: &Cad,
+    size: f64,
+    quadratic: bool,
+    user: &BTreeMap<String, Vec<String>>,
+) -> Result<Built, IoError> {
     let recipe = Recipe {
         size: Some(size),
         quadratic,
         ..Recipe::default()
     };
     let meshed = meshing::mesh(cad.source, &cad.bytes, &recipe)?;
-    Ok(Built::new(meshed.file, meshed.unit))
+    let mut built = Built::new(meshed.file, meshed.unit);
+    meshing::combine_sets(&mut built.file, user)?;
+    built.user = user.clone();
+    Ok(built)
+}
+
+/// La recette du maillage telle que le TOML du modèle l'écrit : `[meshing]` avec les Sets
+/// utilisateur. La source est donnée relativement au dossier du modèle.
+pub fn recipe(
+    source: &str,
+    size: f64,
+    quadratic: bool,
+    user: &BTreeMap<String, Vec<String>>,
+) -> maille_io::model::MeshingDef {
+    maille_io::model::MeshingDef {
+        source: source.to_string(),
+        size: Some(size),
+        quadratic: quadratic.then_some(true),
+        feature_angle: None,
+        sets: user.clone(),
+    }
 }
 
 /// Écrit le maillage à côté de la source, comme `maille mesh` (`<source>.msh`) ; rend le chemin.
@@ -163,7 +282,7 @@ mod tests {
         let c = cad("plaque.dxf");
         assert_eq!(c.source, Source::Dxf);
         assert!(c.suggested > 0.0);
-        let built = mesh(&c, c.suggested, false).unwrap();
+        let built = mesh(&c, c.suggested, false, &BTreeMap::new()).unwrap();
         assert_eq!(built.file.kind, CellKind::Tri3);
         assert_eq!(
             built.sets().len(),
@@ -182,7 +301,7 @@ mod tests {
     #[test]
     fn the_quadratic_recipe_gives_second_order_elements() {
         let c = cad("plaque.dxf");
-        let built = mesh(&c, c.suggested, true).unwrap();
+        let built = mesh(&c, c.suggested, true, &BTreeMap::new()).unwrap();
         assert_eq!(built.file.kind, CellKind::Tri6);
         assert!(summary(&built).contains("ordre 2"));
     }
@@ -206,7 +325,7 @@ mod tests {
             assert!(c.suggested > 0.0, "{name}");
         }
         let cube = cad("cube.stl");
-        let built = mesh(&cube, cube.suggested, false).unwrap();
+        let built = mesh(&cube, cube.suggested, false, &BTreeMap::new()).unwrap();
         assert_eq!(built.file.kind, CellKind::Tet4);
         assert!(built.quality.elements > 0 && built.quality.min > 0.0);
     }
@@ -219,6 +338,95 @@ mod tests {
         assert!(e.contains("impossible de lire"), "{e}");
     }
 
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_user_set_is_added_renamed_and_removed() {
+        let c = cad("plaque.dxf");
+        let mut built = mesh(&c, c.suggested, false, &BTreeMap::new()).unwrap();
+        let before = built.file.sets.len();
+        built
+            .add_set("verticaux", &names(&["gauche", "droite"]))
+            .unwrap();
+        assert_eq!(built.file.sets.len(), before + 1);
+        assert_eq!(built.user["verticaux"], names(&["gauche", "droite"]));
+        // une entité de plus dans les Sets de bord : l'ensemble des entités ne change pas
+        assert_eq!(built.entities.len(), before - 1);
+        assert_eq!(built.entities_of("verticaux"), names(&["gauche", "droite"]));
+        assert_eq!(built.entities_of("bas"), names(&["bas"]));
+        assert!(built.entities_of("inconnu").is_empty());
+
+        built.rename_set("verticaux", "cotes").unwrap();
+        assert!(
+            built.file.sets.contains_key("cotes") && !built.file.sets.contains_key("verticaux")
+        );
+        assert!(built.user.contains_key("cotes"));
+        assert!(
+            built.rename_set("bas", "autre").is_err(),
+            "une entité ne se renomme pas"
+        );
+
+        assert!(built.remove_set("cotes"));
+        assert!(!built.file.sets.contains_key("cotes") && built.user.is_empty());
+        assert!(!built.remove_set("bas"), "une entité ne se supprime pas");
+        assert!(built.file.sets.contains_key("bas"));
+    }
+
+    #[test]
+    fn a_bad_set_is_refused_and_leaves_the_mesh_alone() {
+        let c = cad("plaque.dxf");
+        let mut built = mesh(&c, c.suggested, false, &BTreeMap::new()).unwrap();
+        let before = built.clone();
+        assert!(built.add_set("  ", &names(&["bas"])).is_err());
+        assert!(built.add_set("x", &[]).is_err());
+        assert!(built.add_set("x", &names(&["fantome"])).is_err());
+        assert!(
+            built.add_set("bas", &names(&["haut"])).is_err(),
+            "nom d'entité déjà pris"
+        );
+        built.add_set("a", &names(&["bas"])).unwrap();
+        assert!(
+            built.add_set("a", &names(&["haut"])).is_err(),
+            "nom déjà pris"
+        );
+        assert!(
+            built.add_set("b", &names(&["a"])).is_err(),
+            "un Set ne regroupe que des entités"
+        );
+        assert!(built.rename_set("a", "bas").is_err());
+        assert!(built.rename_set("a", " ").is_err());
+        built.remove_set("a");
+        assert_eq!(built, before);
+    }
+
+    #[test]
+    fn user_sets_survive_remeshing_and_write_into_the_recipe() {
+        let c = cad("plaque.dxf");
+        let user: BTreeMap<String, Vec<String>> =
+            BTreeMap::from([("verticaux".to_string(), names(&["gauche", "droite"]))]);
+        let coarse = mesh(&c, c.suggested, false, &user).unwrap();
+        let fine = mesh(&c, c.suggested / 2.0, true, &user).unwrap();
+        for built in [&coarse, &fine] {
+            let (g, d) = (&built.file.sets["gauche"], &built.file.sets["droite"]);
+            assert_eq!(
+                built.file.sets["verticaux"].faces.len(),
+                g.faces.len() + d.faces.len()
+            );
+            assert_eq!(built.user, user);
+        }
+        assert!(fine.file.nodes.len() > coarse.file.nodes.len());
+        // la recette qui s'écrira dans le TOML du modèle
+        let def = recipe("plaque.dxf", c.suggested, true, &user);
+        assert_eq!(
+            (def.source.as_str(), def.quadratic),
+            ("plaque.dxf", Some(true))
+        );
+        assert_eq!(def.sets, user);
+        assert_eq!(recipe("plaque.dxf", 1.0, false, &user).quadratic, None);
+    }
+
     #[test]
     fn saving_writes_the_msh_next_to_the_source() {
         let dir = std::env::temp_dir().join(format!("maille-gui-save-{}", std::process::id()));
@@ -228,7 +436,7 @@ mod tests {
             Imported::Cad(c) => c,
             other => panic!("{other:?}"),
         };
-        let built = mesh(&c, c.suggested, false).unwrap();
+        let built = mesh(&c, c.suggested, false, &BTreeMap::new()).unwrap();
         let path = save(&c, &built).unwrap();
         assert_eq!(path, dir.join("plaque.msh"));
         let again = msh::read(&fs::read_to_string(&path).unwrap()).unwrap();

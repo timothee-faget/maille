@@ -66,3 +66,29 @@ value = 0.0
     let again: ModelFile = parse(&text).unwrap();
     assert_eq!(original, again);
 }
+
+/// La recette `[meshing]` se relit à l'identique, Sets compris.
+#[test]
+fn the_meshing_recipe_round_trips() {
+    let original = parse(
+        r#"
+units = "N, mm, MPa"
+mesh = "piece.msh"
+analysis = "static"
+
+[meshing]
+source = "piece.step"
+size = 2.0
+quadratic = true
+
+[meshing.sets]
+appui = ["face_8"]
+encastrement = ["face_3", "face_5"]
+"#,
+    )
+    .unwrap();
+    let def = original.meshing.as_ref().unwrap();
+    assert_eq!(def.sets["encastrement"], ["face_3", "face_5"]);
+    let again = parse(&write(&original).unwrap()).unwrap();
+    assert_eq!(original, again);
+}

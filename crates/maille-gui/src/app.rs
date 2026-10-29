@@ -16,6 +16,7 @@ use maille_viewer::{Cut, NodalResults, ResultsView};
 use crate::mesh_space::{self, Built, Cad, Imported};
 use crate::quality::POOR;
 use crate::results;
+use crate::sets::{self, PickFace};
 use crate::state::{Action, Item, Space, State, Status, Tool};
 use crate::triad;
 
@@ -52,6 +53,15 @@ struct MeshUi {
     quadratic: bool,
     /// Dernier message de l'espace (maillage écrit…).
     note: Option<String>,
+    /// Faces de bord désignables à la souris, et entités choisies (outil « Faces → Set »).
+    pick_faces: Vec<PickFace>,
+    selection: Vec<String>,
+    /// Nom du Set à créer, et Set examiné dans « Sets » (avec le nouveau nom qu'on lui tape).
+    set_name: String,
+    inspected: Option<String>,
+    rename: String,
+    /// Entités surlignées dans la vue en ce moment.
+    shown: Vec<String>,
 }
 
 /// Ce que l'inspecteur demande à l'application, une fois les panneaux dessinés.
@@ -60,6 +70,9 @@ enum Todo {
     Import(PathBuf),
     Remesh,
     Save,
+    CreateSet,
+    DeleteSet(String),
+    RenameSet(String, String),
 }
 
 pub struct App {
@@ -89,6 +102,12 @@ impl App {
                 size: 1.0,
                 quadratic: false,
                 note: None,
+                pick_faces: Vec::new(),
+                selection: Vec::new(),
+                set_name: String::new(),
+                inspected: None,
+                rename: String::new(),
+                shown: Vec::new(),
             },
             path: String::new(),
             mesh_path: String::new(),
@@ -168,7 +187,13 @@ impl App {
         let Some(Imported::Cad(cad)) = &self.mesh.imported else {
             return;
         };
-        match mesh_space::mesh(cad, self.mesh.size, self.mesh.quadratic) {
+        let user = self
+            .mesh
+            .built
+            .as_ref()
+            .map(|b| b.user.clone())
+            .unwrap_or_default();
+        match mesh_space::mesh(cad, self.mesh.size, self.mesh.quadratic, &user) {
             Ok(built) => {
                 let path = cad.path.clone();
                 self.mesh.note = None;
@@ -191,6 +216,9 @@ impl App {
                 }
                 self.state.progress.meshed = true;
                 self.state.progress.sets = built.sets().len();
+                self.mesh.pick_faces = sets::pickable(&built);
+                self.mesh.selection.clear();
+                self.mesh.shown.clear();
                 self.mesh.built = Some(built);
             }
             Err(e) => self.error = Some(e.to_string()),
@@ -215,7 +243,8 @@ impl App {
     }
 
     /// Dessine la vue dans la zone libre et lit la souris. Sans résultats : une invitation.
-    fn viewport(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
+    /// Rend le pixel et le Maj d'un clic dans la vue, pour désigner une entité.
+    fn viewport(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) -> Option<([f64; 2], bool)> {
         let rect = ui.max_rect();
         let ppp = ui.ctx().pixels_per_point();
         let invitation = match self.state.space {
@@ -235,7 +264,7 @@ impl App {
                 egui::FontId::proportional(18.0),
                 Color32::from_gray(110),
             );
-            return;
+            return None;
         };
         let pixels = [
             (rect.width() * ppp).round().max(1.0) as u32,
@@ -268,17 +297,24 @@ impl App {
             open.view
                 .drag([f64::from(delta.x * ppp), f64::from(delta.y * ppp)], pan);
         }
+        let pixel = |at: Pos2| {
+            [
+                f64::from((at.x - rect.min.x) * ppp),
+                f64::from((at.y - rect.min.y) * ppp),
+            ]
+        };
         if response.hovered() {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             if let (true, Some(at)) = (scroll != 0.0, response.hover_pos()) {
-                let cursor = [
-                    f64::from((at.x - rect.min.x) * ppp),
-                    f64::from((at.y - rect.min.y) * ppp),
-                ];
                 open.view
-                    .zoom_at(SCROLL_ZOOM.powf(f64::from(scroll * ppp)), cursor);
+                    .zoom_at(SCROLL_ZOOM.powf(f64::from(scroll * ppp)), pixel(at));
             }
         }
+        if response.clicked() {
+            let shift = ui.input(|i| i.modifiers.shift);
+            return response.interact_pointer_pos().map(|at| (pixel(at), shift));
+        }
+        None
     }
 
     fn spaces(&mut self, ctx: &egui::Context) {
@@ -409,6 +445,21 @@ impl App {
                         }
                     }
                     Tool::Quality => quality_tool(ui, &self.mesh),
+                    Tool::FaceSets => {
+                        if let Some(t) = face_sets_tool(ui, &mut self.mesh) {
+                            todo = Some(t);
+                        }
+                    }
+                    Tool::ManageSets => {
+                        if let Some(t) = manage_sets_tool(ui, &mut self.mesh) {
+                            todo = Some(t);
+                        }
+                    }
+                    Tool::VertexSets => {
+                        ui.label(
+                            "Les Sets de sommets arrivent avec les Sets sur le maillage (M13b).",
+                        );
+                    }
                     Tool::Field | Tool::Deformation | Tool::Cut => match self.results.as_mut() {
                         Some(open) => results_tool(ui, tool, open),
                         None => {
@@ -436,8 +487,106 @@ impl App {
             Some(Todo::Import(path)) => self.import(&path, frame),
             Some(Todo::Remesh) => self.remesh(frame),
             Some(Todo::Save) => self.save(),
+            Some(Todo::CreateSet) => self.create_set(),
+            Some(Todo::DeleteSet(name)) => self.edit_set(&name, None),
+            Some(Todo::RenameSet(name, new_name)) => self.edit_set(&name, Some(&new_name)),
             None => {}
         }
+    }
+
+    /// Clic dans la vue avec l'outil « Faces → Set » : désigne l'entité sous le curseur (Maj : l'ajoute
+    /// ou la retire de la sélection ; un clic dans le vide vide la sélection).
+    fn pick_at(&mut self, cursor: [f64; 2], add: bool) {
+        let on_geometry = matches!(self.mesh.imported, Some(Imported::Cad(_)));
+        if !(on_geometry && self.state.space == Space::Mesh && self.state.tool() == Tool::FaceSets)
+        {
+            return;
+        }
+        let (Some(open), Some(built)) = (&self.mesh_view, &self.mesh.built) else {
+            return;
+        };
+        let hit = sets::pick(
+            built,
+            &self.mesh.pick_faces,
+            &|p| open.view.project(p),
+            cursor,
+        )
+        .map(str::to_string);
+        let selection = &mut self.mesh.selection;
+        match hit {
+            Some(name) if add => match selection.iter().position(|n| *n == name) {
+                Some(k) => {
+                    selection.remove(k);
+                }
+                None => selection.push(name),
+            },
+            Some(name) => *selection = vec![name],
+            None if !add => selection.clear(),
+            None => {}
+        }
+    }
+
+    /// Met la surbrillance de la vue du maillage à jour : la sélection pour « Faces → Set », le Set
+    /// examiné pour « Sets », rien sinon.
+    fn sync_highlight(&mut self) {
+        let wanted: Vec<String> = match (self.state.space, self.state.tool(), &self.mesh.built) {
+            (Space::Mesh, Tool::FaceSets, _) => self.mesh.selection.clone(),
+            (Space::Mesh, Tool::ManageSets, Some(built)) => self
+                .mesh
+                .inspected
+                .as_deref()
+                .map(|name| built.entities_of(name))
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        if wanted == self.mesh.shown {
+            return;
+        }
+        if let (Some(open), Some(built)) = (self.mesh_view.as_mut(), &self.mesh.built) {
+            open.view.set_highlight(sets::highlight(built, &wanted));
+        }
+        self.mesh.shown = wanted;
+    }
+
+    /// Crée un Set avec la sélection et le nom tapé.
+    fn create_set(&mut self) {
+        let Some(built) = self.mesh.built.as_mut() else {
+            return;
+        };
+        match built.add_set(&self.mesh.set_name, &self.mesh.selection) {
+            Ok(()) => {
+                self.mesh.note = Some(format!("Set « {} » créé.", self.mesh.set_name.trim()));
+                self.mesh.set_name.clear();
+                self.mesh.selection.clear();
+                self.state.progress.sets = built.sets().len();
+                self.error = None;
+            }
+            Err(e) => self.error = Some(e.to_string()),
+        }
+    }
+
+    /// Supprime ou renomme un Set créé ici.
+    fn edit_set(&mut self, name: &str, new_name: Option<&str>) {
+        let Some(built) = self.mesh.built.as_mut() else {
+            return;
+        };
+        match new_name {
+            None => {
+                built.remove_set(name);
+                if self.mesh.inspected.as_deref() == Some(name) {
+                    self.mesh.inspected = None;
+                }
+                self.error = None;
+            }
+            Some(new_name) => match built.rename_set(name, new_name) {
+                Ok(()) => {
+                    self.mesh.inspected = Some(new_name.trim().to_string());
+                    self.error = None;
+                }
+                Err(e) => self.error = Some(e.to_string()),
+            },
+        }
+        self.state.progress.sets = built.sets().len();
     }
 
     /// Écrit le maillage à côté de la source, comme `maille mesh`.
@@ -587,6 +736,102 @@ fn format_name(cad: &Cad) -> &'static str {
         Source::Stl => "surface STL",
         Source::Step => "pièce STEP",
     }
+}
+
+/// Vrai si une géométrie est importée : les Sets se créent dessus, pas sur un `.msh`.
+fn needs_geometry(ui: &mut egui::Ui, mesh: &MeshUi) -> bool {
+    match (&mesh.imported, &mesh.built) {
+        (Some(Imported::Cad(_)), Some(_)) => false,
+        (Some(Imported::Mesh(..)), _) => {
+            ui.label(
+                "Un .msh n'a pas de géométrie : ses Sets existent déjà, mais on ne peut pas en créer \
+                 (Sets sur le maillage : M13b). Importe le dessin, la surface ou la pièce.",
+            );
+            true
+        }
+        _ => {
+            ui.label("Importe et maille d'abord une géométrie (outil « Importer »).");
+            true
+        }
+    }
+}
+
+/// Inspecteur « Faces → Set » : la sélection faite à la souris, et le nom du Set à créer.
+fn face_sets_tool(ui: &mut egui::Ui, mesh: &mut MeshUi) -> Option<Todo> {
+    if needs_geometry(ui, mesh) {
+        return None;
+    }
+    let mut todo = None;
+    ui.label("Clique une face (3D) ou un bord (2D). Maj + clic : en ajouter ou en retirer.");
+    ui.separator();
+    if mesh.selection.is_empty() {
+        ui.weak("Rien de sélectionné.");
+    } else {
+        ui.label(format!("Sélection : {}", mesh.selection.join(", ")));
+        if ui.button("Effacer la sélection").clicked() {
+            mesh.selection.clear();
+        }
+    }
+    ui.separator();
+    ui.label("Nom du Set :");
+    ui.text_edit_singleline(&mut mesh.set_name);
+    let ready = !mesh.selection.is_empty() && !mesh.set_name.trim().is_empty();
+    if ui
+        .add_enabled(ready, egui::Button::new("Créer le Set"))
+        .clicked()
+    {
+        todo = Some(Todo::CreateSet);
+    }
+    if let Some(note) = &mesh.note {
+        ui.weak(note);
+    }
+    todo
+}
+
+/// Inspecteur « Sets » : les entités de la géométrie et les Sets créés ; cliquer en surligne un.
+fn manage_sets_tool(ui: &mut egui::Ui, mesh: &mut MeshUi) -> Option<Todo> {
+    let Some(built) = &mesh.built else {
+        ui.label("Importe et maille d'abord une géométrie, ou importe un .msh.");
+        return None;
+    };
+    let mut todo = None;
+    let pick = |ui: &mut egui::Ui, name: &str, inspected: &mut Option<String>| {
+        let selected = inspected.as_deref() == Some(name);
+        if ui.selectable_label(selected, name).clicked() {
+            *inspected = (!selected).then(|| name.to_string());
+        }
+    };
+    ui.label("Entités de la géométrie (celles du fichier, pour un .msh) :");
+    for name in &built.entities {
+        pick(ui, name, &mut mesh.inspected);
+    }
+    ui.separator();
+    ui.label("Sets créés :");
+    if built.user.is_empty() {
+        ui.weak("Aucun : utilise l'outil « Faces → Set ».");
+    }
+    for (name, members) in &built.user {
+        pick(ui, name, &mut mesh.inspected);
+        ui.weak(format!("    {}", members.join(", ")));
+    }
+    if let Some(name) = mesh
+        .inspected
+        .clone()
+        .filter(|n| built.user.contains_key(n))
+    {
+        ui.separator();
+        ui.label(format!("« {name} » :"));
+        ui.text_edit_singleline(&mut mesh.rename);
+        ui.horizontal(|ui| {
+            if ui.button("Renommer").clicked() {
+                todo = Some(Todo::RenameSet(name.clone(), mesh.rename.clone()));
+            }
+            if ui.button("Supprimer").clicked() {
+                todo = Some(Todo::DeleteSet(name.clone()));
+            }
+        });
+    }
+    todo
 }
 
 /// Inspecteur de la qualité : ce que le viewer colorie, en chiffres.
@@ -809,9 +1054,14 @@ impl eframe::App for App {
             }
         }
 
+        let mut clicked = None;
         egui::CentralPanel::default()
             .frame(Frame::NONE)
-            .show(ui, |ui| self.viewport(ui, frame));
+            .show(ui, |ui| clicked = self.viewport(ui, frame));
+        if let Some((cursor, add)) = clicked {
+            self.pick_at(cursor, add);
+        }
+        self.sync_highlight();
         self.spaces(&ctx);
         self.card(&ctx);
         self.toolbar(&ctx);
