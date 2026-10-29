@@ -23,6 +23,12 @@ pub fn parse(text: &str) -> Result<ModelFile, IoError> {
     toml::from_str(text).map_err(|e| IoError::Toml(e.to_string()))
 }
 
+/// Écrit un fichier de modèle : `parse(&write(&m)?)` redonne `m`. Les commentaires d'un fichier écrit
+/// à la main ne survivent pas (un `ModelFile` n'en porte pas) ; l'ordre des clés est celui du schéma.
+pub fn write(model: &ModelFile) -> Result<String, IoError> {
+    toml::to_string(model).map_err(|e| IoError::Toml(e.to_string()))
+}
+
 /// Modèle construit, prêt à résoudre.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Loaded {

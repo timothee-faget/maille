@@ -35,10 +35,10 @@
 
 use std::collections::BTreeMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Fichier de modèle.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelFile {
     /// Unités cohérentes de l'utilisateur : le cœur ne convertit rien.
@@ -47,87 +47,101 @@ pub struct ModelFile {
     pub mesh: String,
     pub analysis: AnalysisKind,
     /// Cinématique du calcul statique, petites déformations par défaut.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub kinematics: Option<KinematicsDef>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub materials: BTreeMap<String, MaterialDef>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sections: Vec<SectionDef>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bcs: Vec<ValueDef>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub loads: Vec<ValueDef>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub heat_sources: Vec<HeatSourceDef>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub convections: Vec<ConvectionDef>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pressures: Vec<PressureDef>,
     /// Contacts contre des surfaces rigides : demandent `[step] kind = "quasi_static"`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contacts: Vec<ContactDef>,
     /// Couplage thermo-mécanique : les températures d'un calcul thermique dilatent le modèle
     /// statique. Le CLI lit le fichier `from` et les passe à `build`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub temperatures: Option<TemperaturesDef>,
     /// Sans `[step]` : calcul linéaire.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub step: Option<StepDef>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AnalysisKind {
     Static,
     Thermal,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum KinematicsDef {
     Small,
     Large,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HyperelasticityDef {
     NeoHookean,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MaterialDef {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub young: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub poisson: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub conductivity: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub density: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub specific_heat: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub expansion: Option<f64>,
     /// Active la plasticité de von Mises.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub yield_stress: Option<f64>,
     /// Module d'écrouissage H, 0 par défaut (parfaitement plastique).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub hardening: Option<f64>,
     /// Loi hyperélastique, grandes déformations seulement ; Saint-Venant–Kirchhoff sans elle.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub hyperelasticity: Option<HyperelasticityDef>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SectionDef {
     pub set: String,
     pub material: String,
     /// Triangles seulement, 1 par défaut.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub thickness: Option<f64>,
     /// Triangles seulement ; obligatoire en analyse statique.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub plane_state: Option<PlaneStateDef>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PlaneStateDef {
     Stress,
     Strain,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DofDef {
     Ux,
@@ -137,7 +151,7 @@ pub enum DofDef {
 }
 
 /// BC ou Load : une valeur sur un DOF de chaque Node d'un Set (force par Node, pas force totale).
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ValueDef {
     pub set: String,
@@ -145,14 +159,14 @@ pub struct ValueDef {
     pub value: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HeatSourceDef {
     pub set: String,
     pub value: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConvectionDef {
     pub set: String,
@@ -161,14 +175,14 @@ pub struct ConvectionDef {
 }
 
 /// Pression sur les faces d'un bord (statique) : positive, elle comprime ; négative, elle tire.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PressureDef {
     pub set: String,
     pub value: f64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ContactKind {
     Plane,
@@ -181,54 +195,64 @@ pub enum ContactKind {
 /// - `plane` : `point` et `normal` (vers le corps) ;
 /// - `cylinder` : `point`, `radius` et, en 3D, `axis` ; en 2D, c'est un cercle ;
 /// - `sphere` : `center` et `radius` (3D).
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContactDef {
     pub set: String,
     pub kind: ContactKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub point: Option<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub normal: Option<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub axis: Option<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub center: Option<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub radius: Option<f64>,
     /// Déplacement de la surface rigide quand λ(t) = 1, nul par défaut.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub motion: Option<Vec<f64>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StepKind {
     Transient,
     QuasiStatic,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct StepDef {
     pub kind: StepKind,
     pub duration: f64,
     pub increments: usize,
     /// Transitoire seulement, 1 par défaut (Euler implicite).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub theta: Option<f64>,
     /// Transitoire seulement, obligatoire : température uniforme au départ.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub initial_temperature: Option<f64>,
     /// Quasi-statique seulement : points (t, λ), rampe de 0 à 1 sur la durée par défaut.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub amplitude: Option<Vec<[f64; 2]>>,
 }
 
 /// `[temperatures]` : champ de températures lu dans un fichier de résultats thermiques (`.pvd`).
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TemperaturesDef {
     /// Fichier `.pvd` du calcul thermique, sur le même maillage.
     pub from: String,
     /// `"last"` (par défaut) ou l'indice de l'incrément, depuis 0.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub increment: Option<IncrementDef>,
     /// T_ref : température sans contrainte, dans la même unité que les températures du fichier.
     pub reference: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum IncrementDef {
     Index(usize),
