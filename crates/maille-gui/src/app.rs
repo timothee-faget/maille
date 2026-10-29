@@ -3,6 +3,7 @@
 //! rien : l'état est dans `state`.
 
 use std::error::Error;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use eframe::egui::{
@@ -14,6 +15,8 @@ use maille_io::meshing::Source;
 use maille_viewer::{Cut, NodalResults, ResultsView};
 
 use crate::mesh_space::{self, Built, Cad, Imported};
+use crate::model_space::{self, Diagnostic, Draft, Severity};
+use crate::model_tools::{self, Forms, MeshInfo};
 use crate::quality::POOR;
 use crate::results;
 use crate::sets::{self, PickFace};
@@ -64,6 +67,25 @@ struct MeshUi {
     shown: Vec<String>,
 }
 
+/// Ce dont dépendent les diagnostics du modèle : si rien n'a changé, on ne les refait pas.
+#[derive(Debug, Clone, PartialEq)]
+struct ModelKey {
+    draft: Draft,
+    sets: Vec<String>,
+    user: Vec<String>,
+    nodes: usize,
+    cells: usize,
+}
+
+/// Réglages de l'espace Modèle, tels qu'on les édite.
+struct ModelUi {
+    draft: Draft,
+    forms: Forms,
+    diags: Vec<Diagnostic>,
+    key: Option<ModelKey>,
+    note: Option<String>,
+}
+
 /// Ce que l'inspecteur demande à l'application, une fois les panneaux dessinés.
 enum Todo {
     Open(PathBuf),
@@ -73,6 +95,7 @@ enum Todo {
     CreateSet,
     DeleteSet(String),
     RenameSet(String, String),
+    SaveModel,
 }
 
 pub struct App {
@@ -82,6 +105,7 @@ pub struct App {
     /// La vue du maillage (espaces Maillage et Modèle).
     mesh_view: Option<Open>,
     mesh: MeshUi,
+    model: ModelUi,
     /// Chemins tapés dans les inspecteurs « Ouvrir » et « Importer ».
     path: String,
     mesh_path: String,
@@ -108,6 +132,13 @@ impl App {
                 inspected: None,
                 rename: String::new(),
                 shown: Vec::new(),
+            },
+            model: ModelUi {
+                draft: Draft::default(),
+                forms: Forms::default(),
+                diags: Vec::new(),
+                key: None,
+                note: None,
             },
             path: String::new(),
             mesh_path: String::new(),
@@ -385,6 +416,7 @@ impl App {
         }
         let tool = self.state.tool();
         let mut todo = None;
+        let mut goto = None;
         let mut hide = false;
         panel(
             "inspector",
@@ -460,6 +492,57 @@ impl App {
                             "Les Sets de sommets arrivent avec les Sets sur le maillage (M13b).",
                         );
                     }
+                    Tool::Material | Tool::Support | Tool::Load | Tool::Run => {
+                        match &self.mesh.built {
+                            None => {
+                                ui.label(
+                                    "Importe et maille d'abord une géométrie, ou importe un .msh.",
+                                );
+                            }
+                            Some(built) => {
+                                let sets = built.sets();
+                                let info = MeshInfo {
+                                    sets: &sets,
+                                    kind: built.file.kind,
+                                };
+                                let m = &mut self.model;
+                                match tool {
+                                    Tool::Material => {
+                                        model_tools::material_tool(ui, &mut m.draft, &info)
+                                    }
+                                    Tool::Support => model_tools::support_tool(
+                                        ui,
+                                        &mut m.draft,
+                                        &info,
+                                        &mut m.forms.bc,
+                                    ),
+                                    Tool::Load => model_tools::load_tool(
+                                        ui,
+                                        &mut m.draft,
+                                        &info,
+                                        &mut m.forms,
+                                    ),
+                                    _ => {
+                                        let physics = m.draft.physics(&built.file);
+                                        let (save, go) = model_tools::run_tool(
+                                            ui,
+                                            physics,
+                                            &m.diags,
+                                            m.note.as_deref(),
+                                        );
+                                        if save {
+                                            todo = Some(Todo::SaveModel);
+                                        }
+                                        goto = go;
+                                    }
+                                }
+                                if tool != Tool::Run {
+                                    ui.separator();
+                                    goto = model_tools::diagnostics_ui(ui, &m.diags, Some(tool));
+                                }
+                            }
+                        }
+                    }
                     Tool::Field | Tool::Deformation | Tool::Cut => match self.results.as_mut() {
                         Some(open) => results_tool(ui, tool, open),
                         None => {
@@ -482,7 +565,14 @@ impl App {
         if hide {
             self.state.inspector = false;
         }
+        if let Some(target) = goto {
+            if target == Tool::MeshSize {
+                self.state.go(Space::Mesh);
+            }
+            self.state.set_tool(target);
+        }
         match todo {
+            Some(Todo::SaveModel) => self.save_model(),
             Some(Todo::Open(path)) => self.load(&path, frame),
             Some(Todo::Import(path)) => self.import(&path, frame),
             Some(Todo::Remesh) => self.remesh(frame),
@@ -587,6 +677,86 @@ impl App {
             },
         }
         self.state.progress.sets = built.sets().len();
+    }
+
+    /// Refait les diagnostics du modèle si le brouillon ou le maillage ont changé, et met à jour la
+    /// progression. Rend vrai si quelque chose a changé.
+    fn refresh_model(&mut self) -> bool {
+        let draft = &self.model.draft;
+        let progress = &mut self.state.progress;
+        progress.material = draft.material.is_some();
+        progress.bcs = !draft.bcs.is_empty();
+        progress.loaded = draft.has_loading();
+        let Some(built) = &self.mesh.built else {
+            progress.errors = 1;
+            self.model.diags.clear();
+            self.model.key = None;
+            return false;
+        };
+        let key = ModelKey {
+            draft: draft.clone(),
+            sets: built.file.sets.keys().cloned().collect(),
+            user: built.user.keys().cloned().collect(),
+            nodes: built.file.nodes.len(),
+            cells: built.file.cells.len(),
+        };
+        if self.model.key.as_ref() == Some(&key) {
+            return false;
+        }
+        let user: Vec<&str> = built.user.keys().map(String::as_str).collect();
+        self.model.diags = model_space::diagnose(draft, &built.file, &user);
+        progress.errors = self
+            .model
+            .diags
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .count();
+        self.model.key = Some(key);
+        true
+    }
+
+    /// Écrit le modèle (et le maillage, pour une géométrie) à côté de la source : `<source>_modele.toml`.
+    fn save_model(&mut self) {
+        let Some(built) = &self.mesh.built else {
+            return;
+        };
+        let result = (|| -> Result<PathBuf, Box<dyn Error>> {
+            let (source, msh_path, meshing) = match &self.mesh.imported {
+                Some(Imported::Cad(cad)) => {
+                    let msh_path = mesh_space::save(cad, built)?;
+                    let name = cad
+                        .path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    let recipe =
+                        mesh_space::recipe(&name, self.mesh.size, self.mesh.quadratic, &built.user);
+                    (cad.path.clone(), msh_path, Some(recipe))
+                }
+                Some(Imported::Mesh(path, _)) => (path.clone(), path.clone(), None),
+                None => return Err("rien n'est importé".into()),
+            };
+            let mesh_name = msh_path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let text = self.model.draft.to_toml(&mesh_name, &built.file, meshing)?;
+            let stem = source
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let path = source.with_file_name(format!("{stem}_modele.toml"));
+            fs::write(&path, text)
+                .map_err(|e| format!("impossible d'écrire {} : {e}", path.display()))?;
+            Ok(path)
+        })();
+        match result {
+            Ok(path) => {
+                self.model.note = Some(format!("Écrit : {}", path.display()));
+                self.error = None;
+            }
+            Err(e) => self.error = Some(e.to_string()),
+        }
     }
 
     /// Écrit le maillage à côté de la source, comme `maille mesh`.
@@ -1054,6 +1224,7 @@ impl eframe::App for App {
             }
         }
 
+        self.refresh_model();
         let mut clicked = None;
         egui::CentralPanel::default()
             .frame(Frame::NONE)
@@ -1066,6 +1237,9 @@ impl eframe::App for App {
         self.card(&ctx);
         self.toolbar(&ctx);
         self.inspector(&ctx, frame);
+        if self.refresh_model() {
+            ctx.request_repaint();
+        }
         let shown = match self.state.space {
             Space::Results => &self.results,
             _ => &self.mesh_view,

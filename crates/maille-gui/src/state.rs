@@ -94,6 +94,10 @@ impl Tool {
                 | Tool::FaceSets
                 | Tool::ManageSets
                 | Tool::Quality
+                | Tool::Material
+                | Tool::Support
+                | Tool::Load
+                | Tool::Run
                 | Tool::Open
                 | Tool::Field
                 | Tool::Deformation
@@ -197,6 +201,11 @@ pub struct Progress {
     /// Nombre de Sets de bord du maillage.
     pub sets: usize,
     pub results_open: bool,
+    /// Espace Modèle : un Material, des BC, un chargement, et le nombre de diagnostics bloquants.
+    pub material: bool,
+    pub bcs: bool,
+    pub loaded: bool,
+    pub errors: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -278,12 +287,29 @@ impl State {
                     ),
                 ]
             }
-            Space::Model => vec![
-                step("Choisir un Material", Missing, Tool::Material, false),
-                step("Poser les BC", Missing, Tool::Support, false),
-                step("Poser un chargement", Missing, Tool::Load, false),
-                step("Lancer le calcul", Missing, Tool::Run, false),
-            ],
+            Space::Model => {
+                let p = &self.progress;
+                let done = |ok| if ok { Done } else { Missing };
+                let filled = p.material && p.bcs && p.loaded;
+                let ready = if !filled {
+                    Missing
+                } else if p.errors > 0 {
+                    Status::Warning
+                } else {
+                    Done
+                };
+                vec![
+                    step(
+                        "Choisir un Material",
+                        done(p.material),
+                        Tool::Material,
+                        false,
+                    ),
+                    step("Poser les BC", done(p.bcs), Tool::Support, false),
+                    step("Poser un chargement", done(p.loaded), Tool::Load, false),
+                    step("Prêt à calculer", ready, Tool::Run, false),
+                ]
+            }
             Space::Results => {
                 let open = if self.progress.results_open {
                     Done
@@ -426,6 +452,22 @@ mod tests {
     }
 
     #[test]
+    fn the_model_space_is_ready_when_filled_without_blocking_diagnostics() {
+        let mut s = State::default();
+        assert_eq!(s.space_status(Space::Model), Status::Missing);
+        s.progress.material = true;
+        assert_eq!(s.space_status(Space::Model), Status::Warning);
+        s.progress.bcs = true;
+        s.progress.loaded = true;
+        s.progress.errors = 1;
+        let ready = |s: &State| s.checklist(Space::Model)[3].status;
+        assert_eq!(ready(&s), Status::Warning, "rempli mais bloqué");
+        s.progress.errors = 0;
+        assert_eq!(ready(&s), Status::Done);
+        assert_eq!(s.space_status(Space::Model), Status::Done);
+    }
+
+    #[test]
     fn only_the_tools_of_the_finished_spaces_are_available() {
         for tool in [
             Tool::Cut,
@@ -438,7 +480,7 @@ mod tests {
         ] {
             assert!(tool.available(), "{tool:?}");
         }
-        for tool in [Tool::Probe, Tool::VertexSets, Tool::Material, Tool::Run] {
+        for tool in [Tool::Probe, Tool::VertexSets, Tool::Thermal, Tool::Contact] {
             assert!(!tool.available(), "{tool:?}");
         }
     }
