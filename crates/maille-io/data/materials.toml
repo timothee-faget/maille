@@ -1,0 +1,83 @@
+# Bibliothèque de Materials livrée avec Maille.
+#
+# Toutes les valeurs sont en unités SI (m, kg, s, K) : Pa, kg/m³, W/(m·K), J/(kg·K), 1/K. Maille les
+# convertit vers le système d'unités cohérent du modèle (`maille_io::materials::UnitSystem`).
+# Ce sont des valeurs usuelles à température ambiante : vérifier celles de votre nuance avant de
+# conclure. Un Material sans `yield_stress` n'a pas de limite d'élasticité exploitable en plasticité.
+
+[materials.acier]
+description = "Acier de construction (type S235)"
+young = 210e9
+poisson = 0.3
+density = 7850.0
+conductivity = 45.0
+specific_heat = 460.0
+expansion = 1.2e-5
+yield_stress = 235e6
+
+[materials.inox]
+description = "Acier inoxydable austénitique (type 304)"
+young = 193e9
+poisson = 0.29
+density = 8000.0
+conductivity = 16.0
+specific_heat = 500.0
+expansion = 1.7e-5
+yield_stress = 215e6
+
+[materials.aluminium]
+description = "Alliage d'aluminium (type 6061-T6)"
+young = 69e9
+poisson = 0.33
+density = 2700.0
+conductivity = 167.0
+specific_heat = 896.0
+expansion = 2.36e-5
+yield_stress = 275e6
+
+[materials.cuivre]
+description = "Cuivre recuit"
+young = 120e9
+poisson = 0.34
+density = 8960.0
+conductivity = 390.0
+specific_heat = 385.0
+expansion = 1.7e-5
+yield_stress = 70e6
+
+[materials.titane]
+description = "Alliage de titane (type Ti-6Al-4V)"
+young = 114e9
+poisson = 0.34
+density = 4430.0
+conductivity = 6.7
+specific_heat = 526.0
+expansion = 8.6e-6
+yield_stress = 880e6
+
+[materials.fonte]
+description = "Fonte grise"
+young = 100e9
+poisson = 0.26
+density = 7200.0
+conductivity = 50.0
+specific_heat = 490.0
+expansion = 1.1e-5
+
+[materials.beton]
+description = "Béton ordinaire"
+young = 30e9
+poisson = 0.2
+density = 2400.0
+conductivity = 1.7
+specific_heat = 880.0
+expansion = 1.0e-5
+
+[materials.verre]
+description = "Verre sodocalcique"
+young = 70e9
+poisson = 0.22
+density = 2500.0
+conductivity = 1.0
+specific_heat = 840.0
+expansion = 9.0e-6
