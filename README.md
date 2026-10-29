@@ -21,14 +21,17 @@ Chaque élément et chaque physique sont validés contre une solution analytique
 - Import CAO : dessin DXF 2D, surface STL 3D, pièce STEP 3D (faces planes, cylindriques, coniques,
   sphériques et toriques)
 - Viewer natif 2D et 3D (wgpu), avec plan de coupe et capture en image PNG
+- Interface graphique (egui) : importer une pièce, la mailler, créer des Sets à la souris, remplir le modèle
+  avec des diagnostics en clair, lancer le calcul en tâche de fond, parcourir les résultats (incréments,
+  sonde, courbe, capture) ; le modèle reste un fichier TOML rejouable par `maille solve`
 
-Jalons M0 à M12b terminés (version 0.12.0). Le projet est en cours de développement : l'API n'est pas stable, et
-il n'y a pas encore d'interface graphique.
+Jalons M0 à M13 terminés (version 0.13.0). Le projet est en cours de développement : l'API n'est pas stable.
 
 ## Démarrer
 
 ```sh
 cargo build --release
+./target/release/maille                              # ouvre l'interface graphique
 cd examples
 ../target/release/maille solve traction.toml     # maillage .msh + modèle .toml → résultats .vtu/.pvd
 ../target/release/maille view traction.pvd       # ouvre le viewer
@@ -49,8 +52,9 @@ viewer : `maille console`, `kirsch`, `cylindre`, `trempe`, `cylindre-thermo` et 
 |---|---|
 | `maille-core` | Cœur de calcul pur (maillage, éléments, assemblage, solveur, mailleurs 2D et 3D), sans dépendance ni I/O |
 | `maille-io` | Fichiers : dessin DXF, surface STL, pièce STEP, maillage Gmsh `.msh`, modèle TOML, résultats VTK |
-| `maille-viewer` | Viewer 2D et 3D (wgpu, winit, glyphon) |
-| `maille-cli` | Le binaire `maille` : `solve`, `view`, `mesh` et les cas d'exemple |
+| `maille-viewer` | Viewer 2D et 3D (wgpu, winit, glyphon), embarquable dans l'interface |
+| `maille-gui` | Interface graphique (egui) : espaces Maillage, Modèle et Résultats |
+| `maille-cli` | Le binaire `maille` : l'interface (sans argument), `solve`, `view`, `mesh` et les cas d'exemple |
 
 ## Unités
 
