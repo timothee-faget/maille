@@ -29,6 +29,8 @@ maille view trempe.pvd 50         # un incrément précis, depuis 0
 | `tube_thermique` puis `tube_contraintes` | couplage thermo-mécanique (lancer dans cet ordre) | Timoshenko et Goodier |
 | `tube_pression` | pression sur un bord, déformations planes | Lamé |
 | `console_gd` | grandes déformations (`kinematics = "large"`) : console élancée, l'elastica ; Tri6 | elastica d'Euler (Bisshopp et Drucker) |
+| `hertz` | contact : un cylindre rigide dans un bloc d'acier, déformations planes ; le maillage resserré vient des tests (`hertz.msh`) | Hertz (demi-largeur de contact, pression maximale) |
+| `balle` | grandes déformations et contact : un quart de balle en caoutchouc néo-Hookéen écrasé de 40 % entre deux plans rigides | aucune (démonstration) |
 | `cube` | 3D, Tet4 (viewer 3D ou ParaView) | champ linéaire |
 | `tube3d` | 3D depuis un STL : `maille mesh tube3d.stl --size 2 --quadratic` d'abord, Tet10 | Lamé |
 | `sphere` | 3D depuis un STEP (faces sphériques exactes) : `maille mesh sphere.step --size 2 --quadratic` d'abord, Tet10 | Lamé (sphère) |
@@ -151,6 +153,7 @@ Une clé inconnue ou mal écrite est une erreur, avec la ligne et la colonne. Le
 | `[[heat_sources]]` | `set` d'Elements, `value` (puissance par volume) |
 | `[[convections]]` | `set` de bord, `film` (h) et `sink` (T∞) |
 | `[[pressures]]` | `set` de bord, `value` : une pression positive comprime (contre la normale sortante), négative elle tire. Statique, triangles et tétraèdres ; en grandes déformations, elle reste normale à la face déformée |
+| `[[contacts]]` | contact sans frottement d'un bord contre une surface rigide : `set` (bord du corps), `kind` (`"plane"`, `"cylinder"` ou `"sphere"`), et selon `kind` : `point` + `normal` (plan), `point` + `radius` (cylindre ; en 3D aussi `axis`), `center` + `radius` (sphère, 3D) ; `motion` : déplacement de la surface à λ = 1 (nul par défaut). Les vecteurs ont 2 ou 3 composantes comme le maillage. Demande `analysis = "static"` et `[step] kind = "quasi_static"` ; petites ou grandes déformations. Pénalité automatique |
 | `[temperatures]` | couplage : `from` (un `.pvd` thermique sur le même maillage), `increment`, `reference` (T_ref) |
 | `[step]` | absent : calcul linéaire. Sinon `kind`, `duration`, `increments` |
 
@@ -171,12 +174,15 @@ seul `.vtu` et un `.pvd`). Format ASCII, lisible par ParaView. Grandeurs aux Nod
 - statique : `displacement`, `reaction`, `stress` (xx, yy, zz, xy, yz, xz, lissées), `von_mises`,
   et `plastic_strain` pour un calcul plastique. En grandes déformations, `stress` et `von_mises` sont
   de Cauchy (configuration déformée), et le `.vtu` porte le commentaire `kinematics: large` : le viewer
-  montre alors la déformée à l'échelle 1, sans amplification ;
+  montre alors la déformée à l'échelle 1, sans amplification. Avec des contacts : `contact_force` (force
+  sur le corps) et `contact_pressure` (force par aire tributaire) aux Nodes, et un fichier `<prefixe>_contacts.csv`
+  (`time,contact,fx,fy,fz` : la force sur chaque surface rigide à chaque incrément, d'où la courbe
+  force-enfoncement) ;
 - thermique : `temperature`, `reaction` (puissance aux Nodes imposés).
 
 ## Régénérer les maillages
 
-Les `.msh` 2D d'ici viennent des `.dxf` voisins, par `maille mesh` (le cube, 3D, est écrit à la main ; `cube.stl` en est la surface, pour `maille mesh`). `tube3d.msh`
+Les `.msh` 2D d'ici viennent des `.dxf` voisins, par `maille mesh` (`hertz.msh`, resserré vers le contact, et le cube, 3D, sont écrits par les tests ; `cube.stl` en est la surface, pour `maille mesh`). `tube3d.msh`
 n'est pas livré : `maille mesh tube3d.stl --size 2 --quadratic` l'écrit en une seconde, de même que
 `sphere.msh` (`maille mesh sphere.step --size 2 --quadratic`) :
 

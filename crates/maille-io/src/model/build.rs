@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use maille_core::contact::{Contact, RigidSurface};
 use maille_core::material::{Hyperelasticity, Material};
 use maille_core::mesh::{Dof, Element, Mesh, PlaneState, Tet10, Tet4, Tri3, Tri6};
 use maille_core::model::{
@@ -133,6 +134,30 @@ pub fn build(
         model = model.with_pressures(pressures)?;
     }
 
+    if !file.contacts.is_empty() {
+        let mut contacts = Vec::new();
+        for (i, def) in file.contacts.iter().enumerate() {
+            contacts.push(contact(
+                &format!("contacts[{i}]"),
+                def,
+                mesh,
+                mesh.kind.dim(),
+            )?);
+        }
+        if file.analysis != AnalysisKind::Static
+            || !matches!(
+                file.step.as_ref().map(|s| s.kind),
+                Some(StepKind::QuasiStatic)
+            )
+        {
+            return Err(invalid(
+                "[[contacts]] demande analysis = \"static\" et une section [step] avec kind = \"quasi_static\" : le contact se calcule par incréments"
+                    .to_string(),
+            ));
+        }
+        model = model.with_contacts(contacts)?;
+    }
+
     let run = match &file.step {
         None => Run::Linear,
         Some(def) => step(def, file.analysis, mesh.nodes.len())?,
@@ -258,6 +283,78 @@ fn material(name: &str, def: &MaterialDef) -> Result<Material, IoError> {
         m = m.with_hyperelasticity(Hyperelasticity::NeoHookean);
     }
     Ok(m)
+}
+
+/// Vecteur de 2 (maillage 2D) ou 3 composantes, complété par z = 0 en 2D.
+fn vector3(key: &str, name: &str, values: &[f64], dim: usize) -> Result<[f64; 3], IoError> {
+    if values.len() != dim {
+        return Err(invalid(format!(
+            "{key} : `{name}` a {} composante(s), {dim} attendues (maillage {dim}D)",
+            values.len()
+        )));
+    }
+    Ok(std::array::from_fn(|k| {
+        values.get(k).copied().unwrap_or(0.0)
+    }))
+}
+
+/// `[[contacts]]` : le Contact du cœur. Seules les clés de `kind` sont admises, toutes requises.
+fn contact(key: &str, def: &ContactDef, mesh: &MshFile, dim: usize) -> Result<Contact, IoError> {
+    let (kind, allowed): (&str, &[&str]) = match def.kind {
+        ContactKind::Plane => ("plane", &["point", "normal"]),
+        ContactKind::Cylinder if dim == 3 => ("cylinder", &["point", "axis", "radius"]),
+        ContactKind::Cylinder => ("cylinder", &["point", "radius"]),
+        ContactKind::Sphere => ("sphere", &["center", "radius"]),
+    };
+    let given = [
+        ("point", def.point.is_some()),
+        ("normal", def.normal.is_some()),
+        ("axis", def.axis.is_some()),
+        ("center", def.center.is_some()),
+        ("radius", def.radius.is_some()),
+    ];
+    for (name, present) in given {
+        if present && !allowed.contains(&name) {
+            return Err(invalid(format!(
+                "{key} : `{name}` ne sert pas à kind = \"{kind}\" ({}D) ; clés admises : {}",
+                dim,
+                allowed.join(", ")
+            )));
+        }
+        if !present && allowed.contains(&name) {
+            return Err(invalid(format!(
+                "{key} : kind = \"{kind}\" demande `{name}`"
+            )));
+        }
+    }
+    let get = |name: &str, v: &Option<Vec<f64>>| match v {
+        Some(v) => vector3(key, name, v, dim),
+        None => Ok([0.0; 3]),
+    };
+    let surface = match def.kind {
+        ContactKind::Plane => RigidSurface::Plane {
+            point: get("point", &def.point)?,
+            normal: get("normal", &def.normal)?,
+        },
+        ContactKind::Cylinder => RigidSurface::Cylinder {
+            point: get("point", &def.point)?,
+            axis: if dim == 3 {
+                get("axis", &def.axis)?
+            } else {
+                [0.0, 0.0, 1.0]
+            },
+            radius: def.radius.unwrap_or(0.0),
+        },
+        ContactKind::Sphere => RigidSurface::Sphere {
+            center: get("center", &def.center)?,
+            radius: def.radius.unwrap_or(0.0),
+        },
+    };
+    Ok(Contact {
+        nodes: node_set(mesh, key, &def.set)?.nodes.clone(),
+        surface,
+        motion: get("motion", &def.motion)?,
+    })
 }
 
 fn array<const N: usize>(nodes: &[usize]) -> Result<[usize; N], IoError> {

@@ -1,0 +1,59 @@
+# Contact de Hertz en 2D : un cylindre rigide dans un bloc d'acier.
+#
+# Le cylindre rigide (rayon 10 mm) s'enfonce de 0,08 mm dans un bloc d'acier de 10 × 10 mm, en
+# déformations planes. On ne maille que la moitié du bloc : le bord « axe » (x = 0) est un plan de symétrie.
+# Hertz donne, avec E* = E / (1 − ν²) et P la force par mm d'épaisseur sur le bloc entier :
+# demi-largeur de contact a = √(4 P R / (π E*)), pression maximale p0 = 2 P / (π a).
+# Le maillage se resserre vers le contact (hertz.msh, généré par les tests d'exemples).
+#
+# La force P se lit dans hertz_contacts.csv (colonne fy, pour la moitié du bloc : doubler pour le bloc
+# entier) et la pression dans le champ `contact_pressure` des résultats (ParaView).
+#
+# Lancer : maille solve hertz.toml     puis : maille view hertz.pvd
+
+# Unités cohérentes de votre choix : Maille ne convertit rien. Ici : N, mm, MPa.
+units = "N, mm, MPa"
+mesh = "hertz.msh"
+analysis = "static"
+
+[materials.acier]
+young = 210e3
+poisson = 0.3
+
+[[sections]]
+set = "domaine"
+material = "acier"
+thickness = 1.0
+plane_state = "strain"
+
+# Symétrie en x = 0 ; le côté droit glisse verticalement et le fond horizontalement. Un seul DOF par bord :
+# le Node du coin appartient aux deux bords, et deux BC sur le même DOF seraient refusées.
+[[bcs]]
+set = "axe"
+dof = "ux"
+value = 0.0
+
+[[bcs]]
+set = "droite"
+dof = "ux"
+value = 0.0
+
+[[bcs]]
+set = "bas"
+dof = "uy"
+value = 0.0
+
+# Le cylindre rigide : centre (0, 10) pour qu'il touche le dessus du bloc en (0, 0), et `motion` son
+# déplacement quand λ = 1, ici la fin du calcul.
+[[contacts]]
+set = "dessus"
+kind = "cylinder"
+point = [0.0, 10.0]
+radius = 10.0
+motion = [0.0, -0.08]
+
+# Newton coupe lui-même l'incrément si besoin ; 8 incréments suffisent ici.
+[step]
+kind = "quasi_static"
+duration = 1.0
+increments = 8

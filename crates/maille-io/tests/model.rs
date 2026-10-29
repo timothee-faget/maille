@@ -761,3 +761,123 @@ fn large_strain_needs_a_static_analysis() {
     let msg = error(&toml, &plate()).to_string();
     assert!(msg.contains("static"), "{msg}");
 }
+
+/// Bloc 4 × 2 posé sur un plan : le dessus descend, le dessous touche le plan y = 0.
+fn contact_toml(contact: &str, step: &str) -> String {
+    format!(
+        r#"
+units = "N, mm, MPa"
+mesh = "plaque.msh"
+analysis = "static"
+[materials.acier]
+young = 210e3
+poisson = 0.3
+[[sections]]
+set = "domaine"
+material = "acier"
+plane_state = "strain"
+[[bcs]]
+set = "haut"
+dof = "uy"
+value = -0.01
+[[bcs]]
+set = "gauche"
+dof = "ux"
+value = 0.0
+[[contacts]]
+set = "bas"
+{contact}
+{step}
+"#
+    )
+}
+
+const QUASI: &str = "[step]\nkind = \"quasi_static\"\nduration = 1.0\nincrements = 2\n";
+
+#[test]
+fn contacts_build_a_model_that_pushes_back() {
+    let mesh = rectangle(4.0, 2.0, 0.8, true);
+    let plane = "kind = \"plane\"\npoint = [0.0, 0.0]\nnormal = [0.0, 1.0]\n";
+    let loaded = load(&contact_toml(plane, QUASI), &mesh);
+    let Run::QuasiStatic { step, amplitude } = &loaded.run else {
+        panic!("{:?}", loaded.run)
+    };
+    let history = loaded.model.solve_quasi_static(step, amplitude).unwrap();
+    let last = &history[2].field;
+    // le plan porte le bloc : force vers le bas sur lui, pressions aux Nodes du dessous seulement
+    assert!(last.rigid_forces[0][1] < 0.0, "{:?}", last.rigid_forces);
+    assert!(last.contact_pressures.iter().any(|p| *p > 0.0));
+
+    // un cylindre (cercle) loin du bloc, ou un plan qui bouge : mêmes clés, autres valeurs
+    let circle = "kind = \"cylinder\"\npoint = [2.0, -5.0]\nradius = 5.0\nmotion = [0.0, 0.01]\n";
+    load(&contact_toml(circle, QUASI), &mesh);
+
+    // les champs de contact sont écrits dans les résultats
+    let arrays = maille_io::vtk::result_arrays(&loaded.mesh, last).unwrap();
+    let names: Vec<&str> = arrays.iter().map(|a| a.name.as_str()).collect();
+    assert!(names.contains(&"contact_force") && names.contains(&"contact_pressure"));
+}
+
+#[test]
+fn contact_keys_must_fit_the_kind() {
+    let mesh = rectangle(4.0, 2.0, 0.8, false);
+    let problem =
+        |contact: &str, step: &str| error(&contact_toml(contact, step), &mesh).to_string();
+
+    let extra = problem(
+        "kind = \"plane\"\npoint = [0.0, 0.0]\nnormal = [0.0, 1.0]\nradius = 2.0\n",
+        QUASI,
+    );
+    assert!(
+        extra.contains("radius") && extra.contains("plane"),
+        "{extra}"
+    );
+    let missing = problem("kind = \"plane\"\npoint = [0.0, 0.0]\n", QUASI);
+    assert!(missing.contains("normal"), "{missing}");
+    let length = problem(
+        "kind = \"plane\"\npoint = [0.0, 0.0, 0.0]\nnormal = [0.0, 1.0]\n",
+        QUASI,
+    );
+    assert!(
+        length.contains("point") && length.contains("composante"),
+        "{length}"
+    );
+    let axis = problem(
+        "kind = \"cylinder\"\npoint = [0.0, 0.0]\nradius = 1.0\naxis = [0.0, 0.0, 1.0]\n",
+        QUASI,
+    );
+    assert!(axis.contains("axis"), "{axis}");
+    // la sphère n'existe qu'en 3D : refus du cœur
+    let sphere = error(
+        &contact_toml(
+            "kind = \"sphere\"\ncenter = [0.0, 0.0]\nradius = 1.0\n",
+            QUASI,
+        ),
+        &mesh,
+    );
+    assert!(matches!(
+        sphere,
+        IoError::Model(MailleError::InvalidRigidSurface { .. })
+    ));
+    // un Set inconnu liste les Sets connus
+    let unknown = error(
+        &contact_toml(
+            "kind = \"plane\"\npoint = [0.0, 0.0]\nnormal = [0.0, 1.0]\n",
+            QUASI,
+        )
+        .replace("set = \"bas\"", "set = \"dessous\""),
+        &mesh,
+    )
+    .to_string();
+    assert!(
+        unknown.contains("dessous") && unknown.contains("bas"),
+        "{unknown}"
+    );
+    // le contact se calcule par incréments
+    let plane = "kind = \"plane\"\npoint = [0.0, 0.0]\nnormal = [0.0, 1.0]\n";
+    assert!(problem(plane, "").contains("quasi_static"));
+    assert!(parse(&contact_toml("kind = \"cone\"\n", QUASI))
+        .unwrap_err()
+        .to_string()
+        .contains("cone"));
+}
