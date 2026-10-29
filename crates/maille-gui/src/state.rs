@@ -88,7 +88,14 @@ impl Tool {
     pub fn available(self) -> bool {
         matches!(
             self,
-            Tool::Navigate | Tool::Open | Tool::Field | Tool::Deformation | Tool::Cut
+            Tool::Navigate
+                | Tool::Import
+                | Tool::MeshSize
+                | Tool::Quality
+                | Tool::Open
+                | Tool::Field
+                | Tool::Deformation
+                | Tool::Cut
         )
     }
 }
@@ -178,10 +185,15 @@ pub struct Step {
     pub optional: bool,
 }
 
-/// Où en est le travail de l'utilisateur. Seuls les résultats existent pour l'instant ; les espaces
-/// Maillage et Modèle y ajouteront leurs champs avec leurs outils.
+/// Où en est le travail de l'utilisateur. L'espace Modèle y ajoutera ses champs avec ses outils.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Progress {
+    /// Une géométrie ou un maillage est importé.
+    pub geometry: bool,
+    /// Il y a un maillage (importé tel quel, ou fait par le mailleur).
+    pub meshed: bool,
+    /// Nombre de Sets de bord du maillage.
+    pub sets: usize,
     pub results_open: bool,
 }
 
@@ -245,11 +257,25 @@ impl State {
         };
         use Status::{Done, Missing};
         match space {
-            Space::Mesh => vec![
-                step("Importer une géométrie", Missing, Tool::Import, false),
-                step("Mailler", Missing, Tool::MeshSize, false),
-                step("Créer au moins un Set", Missing, Tool::FaceSets, false),
-            ],
+            Space::Mesh => {
+                let p = &self.progress;
+                let done = |ok| if ok { Done } else { Missing };
+                vec![
+                    step(
+                        "Importer une géométrie ou un maillage",
+                        done(p.geometry),
+                        Tool::Import,
+                        false,
+                    ),
+                    step("Mailler", done(p.meshed), Tool::MeshSize, false),
+                    step(
+                        "Avoir au moins un Set",
+                        done(p.sets > 0),
+                        Tool::FaceSets,
+                        false,
+                    ),
+                ]
+            }
             Space::Model => vec![
                 step("Choisir un Material", Missing, Tool::Material, false),
                 step("Poser les BC", Missing, Tool::Support, false),
@@ -383,8 +409,33 @@ mod tests {
     }
 
     #[test]
-    fn only_the_results_tools_of_this_pull_request_are_available() {
-        assert!(Tool::Cut.available() && Tool::Navigate.available());
-        assert!(!Tool::Import.available() && !Tool::Probe.available());
+    fn the_mesh_space_follows_the_import_the_meshing_and_the_sets() {
+        let mut s = State::default();
+        assert_eq!(s.space_status(Space::Mesh), Status::Missing);
+        s.progress.geometry = true;
+        assert_eq!(s.space_status(Space::Mesh), Status::Warning);
+        s.progress.meshed = true;
+        s.progress.sets = 4;
+        assert_eq!(s.space_status(Space::Mesh), Status::Done);
+        assert!(s
+            .checklist(Space::Mesh)
+            .iter()
+            .all(|st| st.status == Status::Done));
+    }
+
+    #[test]
+    fn only_the_tools_of_the_finished_spaces_are_available() {
+        for tool in [
+            Tool::Cut,
+            Tool::Navigate,
+            Tool::Import,
+            Tool::MeshSize,
+            Tool::Quality,
+        ] {
+            assert!(tool.available(), "{tool:?}");
+        }
+        for tool in [Tool::Probe, Tool::FaceSets, Tool::Material, Tool::Run] {
+            assert!(!tool.available(), "{tool:?}");
+        }
     }
 }

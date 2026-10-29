@@ -43,7 +43,8 @@ const ELEMENTS: usize = 4;
 const USAGE: &str = "maille : calcul par éléments finis, mécanique et thermique
 
 Usage :
-  maille [resultats.pvd|.vtu]                 ouvre l'interface graphique (sur ces résultats, s'il y en a)
+  maille [fichier]                            ouvre l'interface graphique (sur des résultats .pvd/.vtu,
+                                              un dessin .dxf, une surface .stl, une pièce .step ou un maillage .msh)
   maille solve <modele.toml> [-o <préfixe>]   résout un modèle, écrit <préfixe>.pvd et les .vtu
   maille view <resultats.pvd|.vtu> [indice]   affiche un incrément (le dernier par défaut)
   maille view <résultats> --png <image.png>   écrit une image au lieu d'ouvrir une fenêtre
@@ -73,7 +74,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         None => maille_gui::run(None),
-        Some(path) if path.ends_with(".pvd") || path.ends_with(".vtu") => {
+        // un fichier que l'interface sait ouvrir : résultats, géométrie CAO ou maillage
+        Some(path)
+            if [".pvd", ".vtu", ".dxf", ".stl", ".step", ".stp", ".msh"]
+                .iter()
+                .any(|ext| path.to_ascii_lowercase().ends_with(ext)) =>
+        {
             maille_gui::run(Some(path.into()))
         }
         Some("help" | "--help" | "-h") => {

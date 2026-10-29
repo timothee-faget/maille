@@ -811,6 +811,45 @@ fn coupled_tube_with_a_thermal_step_reaches_the_steady_stresses() {
     }
 }
 
+/// L'interface maille comme `maille mesh` : même fichier, octet pour octet, pour un DXF, un STL et un
+/// STEP, aux deux ordres.
+#[test]
+fn the_gui_meshes_exactly_like_the_mesh_command() {
+    use maille_gui::mesh_space::{import, mesh, Imported};
+
+    let w = Workdir::new("gui-maillage");
+    let cases: [(&str, &[bool]); 3] = [
+        ("plaque.dxf", &[false, true]),
+        ("cube.stl", &[false, true]),
+        ("sphere.step", &[false]),
+    ];
+    for (name, orders) in cases {
+        for &quadratic in orders {
+            let Imported::Cad(cad) = import(&w.0.join(name)).unwrap() else {
+                panic!("{name} : une géométrie était attendue");
+            };
+            let built = mesh(&cad, cad.suggested, quadratic).unwrap();
+            let output = format!("{name}-{quadratic}.msh");
+            let h = cad.suggested.to_string();
+            let mut args = vec!["mesh", name, "--size", &h, "-o", &output];
+            if quadratic {
+                args.push("--quadratic");
+            }
+            let out = w.maille(&args);
+            assert!(
+                out.status.success(),
+                "{name} : {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert_eq!(
+                fs::read_to_string(w.0.join(&output)).unwrap(),
+                maille_io::msh::write(&built.file).unwrap(),
+                "{name} (quadratique : {quadratic})"
+            );
+        }
+    }
+}
+
 #[test]
 fn tube_under_pressure_follows_lame() {
     let w = Workdir::new("tube-pression");
