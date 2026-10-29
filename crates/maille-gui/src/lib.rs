@@ -9,6 +9,8 @@ pub mod model_space;
 mod model_tools;
 pub mod quality;
 pub mod results;
+mod results_ui;
+pub mod series;
 pub mod sets;
 pub mod state;
 mod triad;

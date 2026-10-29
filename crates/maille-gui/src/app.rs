@@ -20,6 +20,8 @@ use crate::model_space::{self, Diagnostic, Draft, Severity};
 use crate::model_tools::{self, Forms, MeshInfo};
 use crate::quality::POOR;
 use crate::results;
+use crate::results_ui::{self, Playback};
+use crate::series::Series;
 use crate::sets::{self, PickFace};
 use crate::state::{Action, Item, Space, State, Status, Tool};
 use crate::triad;
@@ -37,8 +39,8 @@ const INSPECTOR_WIDTH: f32 = 250.0;
 const SCROLL_ZOOM: f64 = 1.005;
 
 /// Résultats ouverts : la vue, sa texture côté egui, et le réglage de la coupe qu'on édite.
-struct Open {
-    view: ResultsView,
+pub(crate) struct Open {
+    pub(crate) view: ResultsView,
     texture: egui::TextureId,
     /// Taille de la texture, en pixels.
     size: [u32; 2],
@@ -46,6 +48,8 @@ struct Open {
     cut_axis: Option<usize>,
     cut_fraction: f32,
     cut_flipped: bool,
+    /// Les Increments du calcul, la lecture et la sonde (espace Résultats seulement).
+    pub(crate) play: Option<Playback>,
 }
 
 /// Réglages de l'espace Maillage, tels qu'on les édite.
@@ -181,15 +185,20 @@ impl App {
             self.error = Some("l'interface a besoin de wgpu".to_string());
             return;
         };
-        let loaded = results::open(path, None)
-            .and_then(|r| results::to_nodal(&r))
-            .and_then(|nodal| open_view(gpu, &nodal, path));
+        let loaded = Series::open(path).and_then(|mut series| {
+            let last = series.len() - 1;
+            let nodal = results::to_nodal(series.get(last)?)?;
+            let mut open = open_view(gpu, &nodal, path)?;
+            open.play = Some(Playback::new(series));
+            Ok(open)
+        });
         match loaded {
             Ok(open) => {
                 if let Some(old) = self.results.replace(open) {
                     free_view(gpu, &old);
                 }
                 self.state.progress.results_open = true;
+                self.state.progress.probed = false;
                 self.state.go(Space::Results);
                 self.state.set_tool(Tool::Navigate);
                 self.error = None;
@@ -573,18 +582,30 @@ impl App {
                             }
                         }
                     },
+                    Tool::Probe | Tool::Increments | Tool::Curve | Tool::Capture => {
+                        match self.results.as_mut() {
+                            Some(open) => {
+                                let shown = match tool {
+                                    Tool::Probe => results_ui::probe_tool(ui, open),
+                                    Tool::Increments => results_ui::increments_tool(ui, open),
+                                    Tool::Curve => results_ui::curve_tool(ui, open),
+                                    _ => results_ui::capture_tool(ui, open),
+                                };
+                                if let Err(e) = shown {
+                                    self.error = Some(e.to_string());
+                                }
+                            }
+                            None => {
+                                ui.label("Ouvre d'abord un calcul (outil « Ouvrir »).");
+                            }
+                        }
+                    }
                     Tool::Field | Tool::Deformation | Tool::Cut => match self.results.as_mut() {
                         Some(open) => results_tool(ui, tool, open),
                         None => {
                             ui.label("Ouvre d'abord un calcul (outil « Ouvrir »).");
                         }
                     },
-                    _ => {
-                        ui.label(
-                            "Cet outil n'est pas encore disponible : il arrive dans une \
-                             prochaine étape de M13.",
-                        );
-                    }
                 }
                 if let Some(e) = &self.error {
                     ui.add_space(6.0);
@@ -982,6 +1003,7 @@ fn open_view(gpu: &RenderState, nodal: &NodalResults, path: &Path) -> Result<Ope
         cut_axis: None,
         cut_fraction: 0.5,
         cut_flipped: false,
+        play: None,
     })
 }
 
@@ -1289,6 +1311,7 @@ fn results_tool(ui: &mut egui::Ui, tool: Tool, open: &mut Open) {
                 let mut deformed = open.view.deformed();
                 if ui.checkbox(&mut deformed, "Montrer la déformée").changed() {
                     open.view.set_deformed(deformed);
+                    open.refresh_marker();
                 }
             } else {
                 ui.label("Ce calcul n'a pas de déplacements (thermique).");
@@ -1369,6 +1392,21 @@ impl eframe::App for App {
             .show(ui, |ui| clicked = self.viewport(ui, frame));
         if let Some((cursor, add)) = clicked {
             self.pick_at(cursor, add);
+            if self.state.space == Space::Results && self.state.tool() == Tool::Probe {
+                if let Some(open) = self.results.as_mut() {
+                    open.probe_at(cursor);
+                    self.state.progress.probed =
+                        open.play.as_ref().is_some_and(|p| p.probe.is_some());
+                }
+            }
+        }
+        if let Some(open) = self.results.as_mut() {
+            if let Err(e) = open.tick(&ctx) {
+                self.error = Some(e.to_string());
+                if let Some(play) = open.play.as_mut() {
+                    play.playing = false;
+                }
+            }
         }
         self.sync_highlight();
         self.spaces(&ctx);
