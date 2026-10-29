@@ -1,13 +1,13 @@
 //! L'espace Maillage sans fenêtre : importer un fichier CAO (DXF, STL, STEP) ou un `.msh`, le mailler
 //! avec la même recette que `maille mesh`, regarder la qualité. `app` ne fait que l'afficher.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use maille_io::meshing::{self, Recipe, Source};
-use maille_io::msh::{self, MshFile, DOMAIN_SET};
+use maille_io::msh::{self, MshFile, Set, DOMAIN_SET};
 use maille_io::IoError;
 use maille_viewer::NodalResults;
 
@@ -44,6 +44,9 @@ pub struct Built {
     pub entities: Vec<String>,
     /// Sets utilisateur : nom → entités regroupées, ce qui s'écrit dans `[meshing] sets`.
     pub user: BTreeMap<String, Vec<String>>,
+    /// Sets tirés sur le Mesh (cadre, angle) : ils n'ont pas d'entité de géométrie, vivent dans le
+    /// `.msh` et ne survivent pas à un remaillage.
+    pub mesh_sets: BTreeSet<String>,
 }
 
 impl Built {
@@ -62,7 +65,32 @@ impl Built {
             quality,
             entities,
             user: BTreeMap::new(),
+            mesh_sets: BTreeSet::new(),
         }
+    }
+
+    /// Ajoute un Set tiré sur le Mesh (Nodes, Elements ou faces). Erreur si le nom est vide ou déjà
+    /// pris, ou si le Set est vide.
+    pub fn add_mesh_set(&mut self, name: &str, set: Set) -> Result<(), IoError> {
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return Err(IoError::InvalidModel {
+                problem: "le Set n'a pas de nom : en écrire un, par exemple « encastrement »"
+                    .to_string(),
+            });
+        }
+        if self.file.sets.contains_key(&name) || name == DOMAIN_SET {
+            return Err(IoError::DuplicateSetName { name });
+        }
+        if set.nodes.is_empty() && set.faces.is_empty() && set.elements.is_empty() {
+            return Err(IoError::InvalidModel {
+                problem: "rien n'est sélectionné : trace un cadre ou clique une face d'abord"
+                    .to_string(),
+            });
+        }
+        self.file.sets.insert(name.clone(), set);
+        self.mesh_sets.insert(name);
+        Ok(())
     }
 
     /// Crée un Set qui regroupe `members` (des entités de la géométrie). Erreur si le nom est vide ou
@@ -95,7 +123,7 @@ impl Built {
 
     /// Retire un Set utilisateur ; faux si ce n'en est pas un (une entité ne se supprime pas).
     pub fn remove_set(&mut self, name: &str) -> bool {
-        if self.user.remove(name).is_none() {
+        if self.user.remove(name).is_none() && !self.mesh_sets.remove(name) {
             return false;
         }
         self.file.sets.remove(name);
@@ -119,16 +147,20 @@ impl Built {
                 name: new_name.to_string(),
             });
         }
-        if !self.user.contains_key(name) {
+        if !self.user.contains_key(name) && !self.mesh_sets.contains(name) {
             return Err(IoError::InvalidModel {
                 problem: format!(
                     "« {name} » n'est pas un Set créé ici : seuls ceux-là se renomment"
                 ),
             });
         }
-        let members = self.user.remove(name).unwrap_or_default();
         let set = self.file.sets.remove(name).unwrap_or_default();
-        self.user.insert(new_name.to_string(), members);
+        if self.mesh_sets.remove(name) {
+            self.mesh_sets.insert(new_name.to_string());
+        } else {
+            let members = self.user.remove(name).unwrap_or_default();
+            self.user.insert(new_name.to_string(), members);
+        }
         self.file.sets.insert(new_name.to_string(), set);
         Ok(())
     }
@@ -442,5 +474,37 @@ mod tests {
         let again = msh::read(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(again, built.file);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_set_picked_on_the_mesh_is_added_renamed_removed_and_written_in_the_msh() {
+        let Imported::Mesh(_, mut built) = import(&example("plaque.msh")).unwrap() else {
+            panic!("plaque.msh");
+        };
+        let nodes = crate::mesh_pick::node_set(&[0, 1, 2]);
+        built.add_mesh_set("  appui ", nodes.clone()).unwrap();
+        assert!(built.mesh_sets.contains("appui") && built.sets().contains(&"appui"));
+        assert!(matches!(
+            built.add_mesh_set("appui", nodes.clone()),
+            Err(IoError::DuplicateSetName { .. })
+        ));
+        assert!(built.add_mesh_set("gauche", nodes.clone()).is_err());
+        assert!(built.add_mesh_set("   ", nodes).is_err());
+        assert!(built
+            .add_mesh_set("vide", crate::mesh_pick::node_set(&[]))
+            .is_err());
+
+        // le Set suit le fichier `.msh`
+        let again = msh::read(&msh::write(&built.file).unwrap()).unwrap();
+        assert_eq!(again.sets["appui"].nodes, vec![0, 1, 2]);
+
+        built.rename_set("appui", "base").unwrap();
+        assert!(built.mesh_sets.contains("base") && !built.file.sets.contains_key("appui"));
+        assert!(
+            built.rename_set("gauche", "x").is_err(),
+            "une entité ne se renomme pas"
+        );
+        assert!(built.remove_set("base") && !built.file.sets.contains_key("base"));
+        assert!(!built.remove_set("gauche"));
     }
 }

@@ -16,6 +16,7 @@ use maille_viewer::{Cut, NodalResults, ResultsView};
 
 use crate::compute::{ComputeState, Job, Running};
 use crate::library;
+use crate::mesh_pick::{self, Rect as PickRect};
 use crate::mesh_space::{self, Built, Cad, Imported};
 use crate::model_space::{self, Diagnostic, Draft, Severity};
 use crate::model_tools::{self, Forms, MeshInfo};
@@ -71,6 +72,49 @@ struct MeshUi {
     rename: String,
     /// Entités surlignées dans la vue en ce moment.
     shown: Vec<String>,
+    /// Sélection faite sur le Mesh lui-même par l'outil `tool`, et son numéro de version (le
+    /// surlignage ne se refait que s'il change).
+    region: Option<(Tool, Region)>,
+    region_version: u64,
+    /// Outil « Cadre → Set » : ce que le cadre prend, s'il s'ajoute à la sélection, coin de départ.
+    box_mode: BoxMode,
+    box_add: bool,
+    box_start: Option<[f64; 2]>,
+    /// Outil « Faces → Set » sur un `.msh` : angle (degrés) au-delà duquel la région s'arrête.
+    angle: f64,
+}
+
+/// Ce qu'une sélection sur le Mesh désigne.
+#[derive(Debug, Clone, PartialEq)]
+enum Region {
+    Nodes(Vec<usize>),
+    Elements(Vec<usize>),
+    Faces(maille_io::msh::Set),
+}
+
+impl Region {
+    fn count(&self) -> String {
+        match self {
+            Region::Nodes(n) => format!("{} Nodes", n.len()),
+            Region::Elements(e) => format!("{} Elements", e.len()),
+            Region::Faces(s) => format!("{} faces, {} Nodes", s.faces.len(), s.nodes.len()),
+        }
+    }
+
+    /// Le Set du `.msh` qu'elle donnera.
+    fn to_set(&self) -> maille_io::msh::Set {
+        match self {
+            Region::Nodes(n) => mesh_pick::node_set(n),
+            Region::Elements(e) => mesh_pick::element_set(e),
+            Region::Faces(s) => s.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum BoxMode {
+    Nodes,
+    Elements,
 }
 
 /// Ce dont dépendent les diagnostics du modèle : si rien n'a changé, on ne les refait pas.
@@ -108,6 +152,7 @@ enum Todo {
     Remesh,
     Save,
     CreateSet,
+    CreateMeshSet,
     DeleteSet(String),
     RenameSet(String, String),
     SaveModel,
@@ -148,6 +193,12 @@ impl App {
                 inspected: None,
                 rename: String::new(),
                 shown: Vec::new(),
+                region: None,
+                region_version: 0,
+                box_mode: BoxMode::Nodes,
+                box_add: false,
+                box_start: None,
+                angle: 30.0,
             },
             model: ModelUi {
                 draft: Draft::default(),
@@ -252,10 +303,22 @@ impl App {
             .as_ref()
             .map(|b| b.user.clone())
             .unwrap_or_default();
+        let lost = self
+            .mesh
+            .built
+            .as_ref()
+            .map(|b| b.mesh_sets.iter().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
         match mesh_space::mesh(cad, self.mesh.size, self.mesh.quadratic, &user) {
             Ok(built) => {
                 let path = cad.path.clone();
-                self.mesh.note = None;
+                self.mesh.note = (!lost.is_empty()).then(|| {
+                    format!(
+                        "Le maillage a changé : les Sets tirés sur le Mesh sont perdus ({}).",
+                        lost.join(", ")
+                    )
+                });
+                self.set_region(None);
                 self.error = None;
                 self.show_built(built, &path, frame);
             }
@@ -306,6 +369,9 @@ impl App {
     fn viewport(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) -> Option<([f64; 2], bool)> {
         let rect = ui.max_rect();
         let ppp = ui.ctx().pixels_per_point();
+        // « Cadre → Set » : le glisser trace un cadre au lieu de tourner la vue
+        let box_tool = self.state.space == Space::Mesh && self.state.tool() == Tool::VertexSets;
+        let box_start = self.mesh.box_start;
         let invitation = match self.state.space {
             Space::Results => {
                 "Dépose un fichier .pvd ou .vtu ici,\nou ouvre-le avec l'outil « Ouvrir »"
@@ -350,7 +416,8 @@ impl App {
         draw_triad(ui, rect, open.view.orientation());
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
         let delta = response.drag_delta();
-        if delta != Vec2::ZERO {
+        let boxing = box_tool && response.dragged_by(egui::PointerButton::Primary);
+        if delta != Vec2::ZERO && !boxing {
             let pan = response.dragged_by(egui::PointerButton::Secondary)
                 || ui.input(|i| i.modifiers.shift);
             open.view
@@ -369,11 +436,51 @@ impl App {
                     .zoom_at(SCROLL_ZOOM.powf(f64::from(scroll * ppp)), pixel(at));
             }
         }
-        if response.clicked() {
+        let click = if response.clicked() {
             let shift = ui.input(|i| i.modifiers.shift);
-            return response.interact_pointer_pos().map(|at| (pixel(at), shift));
+            response.interact_pointer_pos().map(|at| (pixel(at), shift))
+        } else {
+            None
+        };
+        // le cadre : départ au début du glisser, rendu à la fin
+        let mut start = box_start;
+        let mut finished = None;
+        if box_tool {
+            let primary = egui::PointerButton::Primary;
+            let here = response.interact_pointer_pos();
+            if response.drag_started_by(primary) {
+                start = here.map(pixel);
+            }
+            if let (Some(s), Some(h)) = (start, here) {
+                let corner = Pos2::new(
+                    rect.min.x + (s[0] / f64::from(ppp)) as f32,
+                    rect.min.y + (s[1] / f64::from(ppp)) as f32,
+                );
+                let band = Rect::from_two_pos(corner, h);
+                ui.painter().rect_filled(
+                    band,
+                    0.0,
+                    Color32::from_rgba_unmultiplied(255, 140, 0, 40),
+                );
+                ui.painter().rect_stroke(
+                    band,
+                    0.0,
+                    egui::Stroke::new(1.5, Color32::from_rgb(255, 140, 0)),
+                    egui::StrokeKind::Inside,
+                );
+                if response.drag_stopped_by(primary) {
+                    finished = Some(PickRect::from_corners(s, pixel(h)));
+                }
+            }
+            if response.drag_stopped_by(primary) {
+                start = None;
+            }
         }
-        None
+        self.mesh.box_start = start;
+        if let Some(band) = finished {
+            self.finish_box(band);
+        }
+        click
     }
 
     fn spaces(&mut self, ctx: &egui::Context) {
@@ -516,9 +623,9 @@ impl App {
                         }
                     }
                     Tool::VertexSets => {
-                        ui.label(
-                            "Les Sets de sommets arrivent avec les Sets sur le maillage (M13b).",
-                        );
+                        if let Some(t) = region_tool(ui, &mut self.mesh, Tool::VertexSets) {
+                            todo = Some(t);
+                        }
                     }
                     Tool::Material
                     | Tool::Support
@@ -638,6 +745,7 @@ impl App {
             Some(Todo::Remesh) => self.remesh(frame),
             Some(Todo::Save) => self.save(),
             Some(Todo::CreateSet) => self.create_set(),
+            Some(Todo::CreateMeshSet) => self.create_mesh_set(),
             Some(Todo::DeleteSet(name)) => self.edit_set(&name, None),
             Some(Todo::RenameSet(name, new_name)) => self.edit_set(&name, Some(&new_name)),
             None => {}
@@ -648,6 +756,13 @@ impl App {
     /// ou la retire de la sélection ; un clic dans le vide vide la sélection).
     fn pick_at(&mut self, cursor: [f64; 2], add: bool) {
         let on_geometry = matches!(self.mesh.imported, Some(Imported::Cad(_)));
+        if self.state.space == Space::Mesh
+            && self.state.tool() == Tool::FaceSets
+            && matches!(self.mesh.imported, Some(Imported::Mesh(..)))
+        {
+            self.pick_skin_at(cursor, add);
+            return;
+        }
         if !(on_geometry && self.state.space == Space::Mesh && self.state.tool() == Tool::FaceSets)
         {
             return;
@@ -673,6 +788,100 @@ impl App {
             Some(name) => *selection = vec![name],
             None if !add => selection.clear(),
             None => {}
+        }
+    }
+
+    /// Clic avec « Faces → Set » sur un `.msh` : la face de la peau sous le curseur, étendue aux voisines
+    /// tant que l'angle reste sous le réglage. Maj : ajoute la région à la sélection.
+    fn pick_skin_at(&mut self, cursor: [f64; 2], add: bool) {
+        let (Some(open), Some(built)) = (&self.mesh_view, &self.mesh.built) else {
+            return;
+        };
+        let skin = mesh_pick::skin(&built.file);
+        let hit = mesh_pick::pick_skin(&built.file, &skin, &|p| open.view.project(p), cursor);
+        let tool = Tool::FaceSets;
+        let region = match hit {
+            Some(i) => {
+                let mut set = mesh_pick::angle_region(&built.file, &skin, i, self.mesh.angle);
+                if let (true, Some((t, Region::Faces(old)))) = (add, &self.mesh.region) {
+                    if *t == tool {
+                        set.faces.extend(&old.faces);
+                        set.nodes.extend(&old.nodes);
+                        set.faces.sort_unstable();
+                        set.faces.dedup();
+                        set.nodes.sort_unstable();
+                        set.nodes.dedup();
+                    }
+                }
+                Some((tool, Region::Faces(set)))
+            }
+            None if add => return,
+            None => None,
+        };
+        self.set_region(region);
+    }
+
+    /// Fin du glisser de « Cadre → Set » : les Nodes ou les Elements du cadre.
+    fn finish_box(&mut self, band: PickRect) {
+        let (Some(open), Some(built)) = (&self.mesh_view, &self.mesh.built) else {
+            return;
+        };
+        let project = |p| open.view.project(p);
+        let tool = Tool::VertexSets;
+        let region = match self.mesh.box_mode {
+            BoxMode::Nodes => {
+                let mut ids = mesh_pick::nodes_in_rect(&built.file, &project, band);
+                if let (true, Some((t, Region::Nodes(old)))) =
+                    (self.mesh.box_add, &self.mesh.region)
+                {
+                    if *t == tool {
+                        ids.extend(old);
+                    }
+                }
+                ids.sort_unstable();
+                ids.dedup();
+                Region::Nodes(ids)
+            }
+            BoxMode::Elements => {
+                let mut ids = mesh_pick::elements_in_rect(&built.file, &project, band);
+                if let (true, Some((t, Region::Elements(old)))) =
+                    (self.mesh.box_add, &self.mesh.region)
+                {
+                    if *t == tool {
+                        ids.extend(old);
+                    }
+                }
+                ids.sort_unstable();
+                ids.dedup();
+                Region::Elements(ids)
+            }
+        };
+        self.set_region(Some((tool, region)));
+    }
+
+    fn set_region(&mut self, region: Option<(Tool, Region)>) {
+        self.mesh.region = region;
+        self.mesh.region_version += 1;
+    }
+
+    /// Crée un Set sur le Mesh avec la sélection et le nom tapé.
+    fn create_mesh_set(&mut self) {
+        let (Some(built), Some((_, region))) = (self.mesh.built.as_mut(), &self.mesh.region) else {
+            return;
+        };
+        match built.add_mesh_set(&self.mesh.set_name, region.to_set()) {
+            Ok(()) => {
+                self.mesh.note = Some(format!(
+                    "Set « {} » créé ({}). Il est écrit dans le .msh.",
+                    self.mesh.set_name.trim(),
+                    region.count()
+                ));
+                self.mesh.set_name.clear();
+                self.state.progress.sets = built.sets().len();
+                self.error = None;
+                self.set_region(None);
+            }
+            Err(e) => self.error = Some(e.to_string()),
         }
     }
 
@@ -702,20 +911,43 @@ impl App {
             return;
         }
         let wanted: Vec<String> = match (self.state.space, self.state.tool(), &self.mesh.built) {
+            // une sélection sur le Mesh : une clé qui change avec elle (« # » : pas des entités)
+            (Space::Mesh, tool @ (Tool::FaceSets | Tool::VertexSets), _)
+                if self.mesh.region.as_ref().is_some_and(|(t, _)| *t == tool) =>
+            {
+                vec![format!("#region:{}", self.mesh.region_version)]
+            }
             (Space::Mesh, Tool::FaceSets, _) => self.mesh.selection.clone(),
-            (Space::Mesh, Tool::ManageSets, Some(built)) => self
-                .mesh
-                .inspected
-                .as_deref()
-                .map(|name| built.entities_of(name))
-                .unwrap_or_default(),
+            (Space::Mesh, Tool::ManageSets, Some(built)) => match self.mesh.inspected.as_deref() {
+                Some(name) if built.mesh_sets.contains(name) => vec![format!("#set:{name}")],
+                Some(name) => built.entities_of(name),
+                None => Vec::new(),
+            },
             _ => Vec::new(),
         };
         if wanted == self.mesh.shown {
             return;
         }
         if let (Some(open), Some(built)) = (self.mesh_view.as_mut(), &self.mesh.built) {
-            open.view.set_highlight(sets::highlight(built, &wanted));
+            let triangles = match wanted.first().map(String::as_str) {
+                Some(key) if key.starts_with('#') => {
+                    let skin = mesh_pick::skin(&built.file);
+                    match (&self.mesh.region, key.strip_prefix("#set:")) {
+                        (_, Some(name)) => built
+                            .file
+                            .sets
+                            .get(name)
+                            .map(|set| mesh_pick::highlight_set(&built.file, &skin, set))
+                            .unwrap_or_default(),
+                        (Some((_, region)), None) => {
+                            mesh_pick::highlight_set(&built.file, &skin, &region.to_set())
+                        }
+                        _ => Vec::new(),
+                    }
+                }
+                _ => sets::highlight(built, &wanted),
+            };
+            open.view.set_highlight(triangles);
         }
         self.mesh.shown = wanted;
     }
@@ -813,7 +1045,21 @@ impl App {
                         mesh_space::recipe(&name, self.mesh.size, self.mesh.quadratic, &built.user);
                     (cad.path.clone(), msh_path, Some(recipe))
                 }
-                Some(Imported::Mesh(path, _)) => (path.clone(), path.clone(), None),
+                Some(Imported::Mesh(path, _)) if built.mesh_sets.is_empty() => {
+                    (path.clone(), path.clone(), None)
+                }
+                // les Sets tirés sur le Mesh : un `.msh` à côté, l'original reste intact
+                Some(Imported::Mesh(path, _)) => {
+                    let stem = path
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    let with_sets = path.with_file_name(format!("{stem}_sets.msh"));
+                    fs::write(&with_sets, maille_io::msh::write(&built.file)?).map_err(|e| {
+                        format!("impossible d'écrire {} : {e}", with_sets.display())
+                    })?;
+                    (path.clone(), with_sets, None)
+                }
                 None => return Err("rien n'est importé".into()),
             };
             let mesh_name = msh_path
@@ -1078,10 +1324,7 @@ fn needs_geometry(ui: &mut egui::Ui, mesh: &MeshUi) -> bool {
     match (&mesh.imported, &mesh.built) {
         (Some(Imported::Cad(_)), Some(_)) => false,
         (Some(Imported::Mesh(..)), _) => {
-            ui.label(
-                "Un .msh n'a pas de géométrie : ses Sets existent déjà, mais on ne peut pas en créer \
-                 (Sets sur le maillage : M13b). Importe le dessin, la surface ou la pièce.",
-            );
+            ui.label("Un .msh n'a pas de géométrie : désigne ses faces avec « Faces → Set » ou un cadre.");
             true
         }
         _ => {
@@ -1093,6 +1336,9 @@ fn needs_geometry(ui: &mut egui::Ui, mesh: &MeshUi) -> bool {
 
 /// Inspecteur « Faces → Set » : la sélection faite à la souris, et le nom du Set à créer.
 fn face_sets_tool(ui: &mut egui::Ui, mesh: &mut MeshUi) -> Option<Todo> {
+    if matches!(mesh.imported, Some(Imported::Mesh(..))) {
+        return region_tool(ui, mesh, Tool::FaceSets);
+    }
     if needs_geometry(ui, mesh) {
         return None;
     }
@@ -1123,6 +1369,66 @@ fn face_sets_tool(ui: &mut egui::Ui, mesh: &mut MeshUi) -> Option<Todo> {
     todo
 }
 
+/// Inspecteurs des Sets tirés sur le Mesh : « Faces → Set » sur un `.msh` (région par angle) et
+/// « Cadre → Set » (Nodes ou Elements dans un cadre). `tool` dit lequel.
+fn region_tool(ui: &mut egui::Ui, mesh: &mut MeshUi, tool: Tool) -> Option<Todo> {
+    if mesh.built.is_none() {
+        ui.label("Importe et maille d'abord une géométrie, ou importe un .msh.");
+        return None;
+    }
+    if tool == Tool::FaceSets {
+        ui.label("Clique une face de la surface : la région s'étend aux faces voisines.");
+        ui.label("Angle maximal entre voisines (degrés) :");
+        ui.add(egui::Slider::new(&mut mesh.angle, 1.0..=90.0));
+        ui.weak("Un plan se prend d'un clic ; un coin plus vif que l'angle arrête la région. Maj + clic : ajouter.");
+    } else {
+        ui.label("Glisse un cadre dans la vue. Oriente la vue d'abord avec l'outil flèche.");
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut mesh.box_mode, BoxMode::Nodes, "Nodes");
+            ui.radio_value(&mut mesh.box_mode, BoxMode::Elements, "Elements");
+        });
+        ui.checkbox(&mut mesh.box_add, "Ajouter à la sélection");
+        ui.weak(
+            "En 3D, le cadre prend aussi ce qui est caché derrière. Un Set d'Elements sert à \
+             donner un Material à une partie de la pièce.",
+        );
+    }
+    ui.separator();
+    let mut todo = None;
+    let current = mesh.region.as_ref().filter(|(t, _)| *t == tool);
+    match current {
+        None => {
+            ui.weak("Rien de sélectionné.");
+        }
+        Some((_, region)) => {
+            ui.label(format!("Sélection : {}", region.count()));
+        }
+    }
+    let selected = current.is_some();
+    if ui
+        .add_enabled(selected, egui::Button::new("Effacer la sélection"))
+        .clicked()
+    {
+        mesh.region = None;
+        mesh.region_version += 1;
+    }
+    ui.separator();
+    ui.label("Nom du Set :");
+    ui.text_edit_singleline(&mut mesh.set_name);
+    let ready = selected && !mesh.set_name.trim().is_empty();
+    if ui
+        .add_enabled(ready, egui::Button::new("Créer le Set"))
+        .clicked()
+    {
+        todo = Some(Todo::CreateMeshSet);
+    }
+    ui.weak("Ce Set est écrit dans le .msh ; un remaillage le perd.");
+    if let Some(note) = &mesh.note {
+        ui.weak(note);
+    }
+    todo
+}
+
 /// Inspecteur « Sets » : les entités de la géométrie et les Sets créés ; cliquer en surligne un.
 fn manage_sets_tool(ui: &mut egui::Ui, mesh: &mut MeshUi) -> Option<Todo> {
     let Some(built) = &mesh.built else {
@@ -1142,17 +1448,31 @@ fn manage_sets_tool(ui: &mut egui::Ui, mesh: &mut MeshUi) -> Option<Todo> {
     }
     ui.separator();
     ui.label("Sets créés :");
-    if built.user.is_empty() {
-        ui.weak("Aucun : utilise l'outil « Faces → Set ».");
+    if built.user.is_empty() && built.mesh_sets.is_empty() {
+        ui.weak("Aucun : utilise l'outil « Faces → Set » ou « Cadre → Set ».");
     }
     for (name, members) in &built.user {
         pick(ui, name, &mut mesh.inspected);
         ui.weak(format!("    {}", members.join(", ")));
     }
+    for name in &built.mesh_sets {
+        pick(ui, name, &mut mesh.inspected);
+        let set = &built.file.sets[name];
+        ui.weak(format!(
+            "    sur le maillage : {}",
+            if !set.elements.is_empty() {
+                format!("{} Elements", set.elements.len())
+            } else if !set.faces.is_empty() {
+                format!("{} faces", set.faces.len())
+            } else {
+                format!("{} Nodes", set.nodes.len())
+            }
+        ));
+    }
     if let Some(name) = mesh
         .inspected
         .clone()
-        .filter(|n| built.user.contains_key(n))
+        .filter(|n| built.user.contains_key(n) || built.mesh_sets.contains(n))
     {
         ui.separator();
         ui.label(format!("« {name} » :"));
