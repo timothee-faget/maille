@@ -10,6 +10,7 @@ mod error;
 pub mod meshing;
 pub mod model;
 pub mod msh;
+pub mod solving;
 pub mod step;
 pub mod stl;
 pub mod vtk;

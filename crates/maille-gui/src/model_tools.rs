@@ -8,6 +8,7 @@ use maille_io::model::{
 };
 use maille_io::msh::CellKind;
 
+use crate::compute::ComputeState;
 use crate::model_space::{Diagnostic, Draft, Severity, UnitSystem};
 use crate::state::Tool;
 
@@ -400,33 +401,94 @@ pub fn load_tool(ui: &mut egui::Ui, draft: &mut Draft, mesh: &MeshInfo, forms: &
     }
 }
 
-/// Inspecteur « Calculer » : le calcul déduit, les diagnostics et l'écriture du modèle. Rend vrai si
-/// on demande d'enregistrer.
+/// Ce que l'inspecteur « Calculer » demande à l'application.
+#[derive(Debug, Default)]
+pub struct RunRequest {
+    pub save: bool,
+    pub run: bool,
+    pub goto: Option<Tool>,
+}
+
+/// Inspecteur « Calculer » : le calcul déduit, les diagnostics, le lancement du calcul (en tâche de
+/// fond, progression dans le panneau flottant) et l'écriture du modèle.
 pub fn run_tool(
     ui: &mut egui::Ui,
     calculation: Option<String>,
     diags: &[Diagnostic],
     note: Option<&str>,
-) -> (bool, Option<Tool>) {
+    compute: &ComputeState,
+) -> RunRequest {
+    let mut request = RunRequest::default();
     match calculation {
         Some(text) => ui.label(format!("Calcul déduit : {text}")),
         None => ui.weak("Calcul déduit : pas encore (il manque des BC ou un chargement)."),
     };
     ui.separator();
-    let go = diagnostics_ui(ui, diags, None);
+    request.goto = diagnostics_ui(ui, diags, None);
     let blocked = diags.iter().any(|d| d.severity == Severity::Error);
     if diags.is_empty() {
         ui.label("✅ Le modèle est prêt.");
     }
     ui.separator();
-    let save = ui
+    let idle = !compute.is_running();
+    request.run = ui
+        .add_enabled(!blocked && idle, egui::Button::new("▶ Calculer"))
+        .on_hover_text("Enregistre le modèle puis lance le calcul de `maille solve`")
+        .clicked();
+    match compute {
+        ComputeState::Finished(pvd) => {
+            ui.weak(format!("Résultats : {}", pvd.display()));
+        }
+        ComputeState::Cancelled => {
+            ui.weak("Calcul annulé.");
+        }
+        ComputeState::Failed(why) => {
+            ui.colored_label(Color32::from_rgb(240, 110, 100), why);
+        }
+        _ => {}
+    }
+    request.save = ui
         .add_enabled(!blocked, egui::Button::new("Enregistrer le modèle (.toml)"))
         .clicked();
-    ui.weak("Puis : maille solve modele.toml. Le calcul depuis l'interface arrive ensuite.");
+    ui.weak("Équivalent en ligne de commande : maille solve modele.toml.");
     if let Some(note) = note {
         ui.weak(note);
     }
-    (save, go)
+    request
+}
+
+/// Le contenu du panneau « Calcul en cours » : étape, avancement, itération, coupes. Rend vrai si on
+/// clique sur « Annuler ».
+pub fn progress_ui(ui: &mut egui::Ui, running: &crate::compute::Running) -> bool {
+    ui.label(egui::RichText::new("Calcul en cours").strong());
+    if !running.phase.is_empty() {
+        ui.weak(&running.phase);
+    }
+    if running.total > 0 {
+        ui.add(
+            egui::ProgressBar::new(running.done as f32 / running.total as f32)
+                .text(format!("incrément {} / {}", running.done, running.total)),
+        );
+    } else {
+        ui.add(egui::Spinner::new());
+    }
+    if let Some((iteration, residual)) = running.iteration {
+        ui.weak(format!(
+            "Newton : itération {iteration}, résidu {residual:.1e}"
+        ));
+    }
+    if running.cuts > 0 {
+        ui.weak(format!("incrément coupé {} fois", running.cuts));
+    }
+    ui.add_enabled(
+        !running.stopping,
+        egui::Button::new(if running.stopping {
+            "Arrêt en cours…"
+        } else {
+            "Annuler"
+        }),
+    )
+    .clicked()
 }
 
 /// Les diagnostics, une ligne chacun ; `only` ne garde que ceux d'un outil. Rend l'outil du

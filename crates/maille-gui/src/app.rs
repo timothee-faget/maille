@@ -14,6 +14,7 @@ use egui_lucide::Lucide;
 use maille_io::meshing::Source;
 use maille_viewer::{Cut, NodalResults, ResultsView};
 
+use crate::compute::{ComputeState, Job, Running};
 use crate::mesh_space::{self, Built, Cad, Imported};
 use crate::model_space::{self, Diagnostic, Draft, Severity};
 use crate::model_tools::{self, Forms, MeshInfo};
@@ -86,6 +87,12 @@ struct ModelUi {
     note: Option<String>,
     /// Surfaces rigides dessinées en ce moment dans la vue.
     shown: Vec<maille_io::model::ContactDef>,
+    /// Le calcul en cours, son état, et le modèle (clé) du dernier calcul dont les résultats sont
+    /// ouverts : s'il change ensuite, les résultats sont périmés.
+    job: Option<Job>,
+    compute: ComputeState,
+    launched: Option<ModelKey>,
+    fresh: Option<ModelKey>,
 }
 
 /// Ce que l'inspecteur demande à l'application, une fois les panneaux dessinés.
@@ -98,6 +105,7 @@ enum Todo {
     DeleteSet(String),
     RenameSet(String, String),
     SaveModel,
+    Run,
 }
 
 pub struct App {
@@ -142,6 +150,10 @@ impl App {
                 key: None,
                 note: None,
                 shown: Vec::new(),
+                job: None,
+                compute: ComputeState::Idle,
+                launched: None,
+                fresh: None,
             },
             path: String::new(),
             mesh_path: String::new(),
@@ -164,6 +176,7 @@ impl App {
     }
 
     fn load(&mut self, path: &Path, frame: &eframe::Frame) {
+        self.model.fresh = None;
         let Some(gpu) = frame.wgpu_render_state() else {
             self.error = Some("l'interface a besoin de wgpu".to_string());
             return;
@@ -539,16 +552,19 @@ impl App {
                                 Tool::StepAmplitude => model_tools::step_tool(ui, &mut m.draft),
                                 _ => {
                                     let calculation = model_space::run_label(&m.draft, &built.file);
-                                    let (save, go) = model_tools::run_tool(
+                                    let request = model_tools::run_tool(
                                         ui,
                                         calculation,
                                         &m.diags,
                                         m.note.as_deref(),
+                                        &m.compute,
                                     );
-                                    if save {
+                                    if request.run {
+                                        todo = Some(Todo::Run);
+                                    } else if request.save {
                                         todo = Some(Todo::SaveModel);
                                     }
-                                    goto = go;
+                                    goto = request.goto;
                                 }
                             }
                             if tool != Tool::Run {
@@ -586,7 +602,10 @@ impl App {
             self.state.set_tool(target);
         }
         match todo {
-            Some(Todo::SaveModel) => self.save_model(),
+            Some(Todo::SaveModel) => {
+                self.save_model();
+            }
+            Some(Todo::Run) => self.start_run(ctx),
             Some(Todo::Open(path)) => self.load(&path, frame),
             Some(Todo::Import(path)) => self.import(&path, frame),
             Some(Todo::Remesh) => self.remesh(frame),
@@ -752,10 +771,8 @@ impl App {
     }
 
     /// Écrit le modèle (et le maillage, pour une géométrie) à côté de la source : `<source>_modele.toml`.
-    fn save_model(&mut self) {
-        let Some(built) = &self.mesh.built else {
-            return;
-        };
+    fn save_model(&mut self) -> Option<PathBuf> {
+        let built = self.mesh.built.as_ref()?;
         let result = (|| -> Result<PathBuf, Box<dyn Error>> {
             let (source, msh_path, meshing) = match &self.mesh.imported {
                 Some(Imported::Cad(cad)) => {
@@ -790,8 +807,92 @@ impl App {
             Ok(path) => {
                 self.model.note = Some(format!("Écrit : {}", path.display()));
                 self.error = None;
+                Some(path)
             }
-            Err(e) => self.error = Some(e.to_string()),
+            Err(e) => {
+                self.error = Some(e.to_string());
+                None
+            }
+        }
+    }
+
+    /// Enregistre le modèle puis lance le calcul dans un thread.
+    fn start_run(&mut self, ctx: &egui::Context) {
+        if self.model.job.is_some() {
+            return;
+        }
+        let Some(path) = self.save_model() else {
+            return;
+        };
+        let ctx = ctx.clone();
+        self.model.job = Some(Job::start(&path, move || ctx.request_repaint()));
+        self.model.compute = ComputeState::Running(Running::default());
+        self.model.launched = self.model.key.clone();
+    }
+
+    /// Prend les messages du calcul ; à la fin, ouvre les résultats dans l'espace Résultats.
+    fn poll_job(&mut self, frame: &eframe::Frame) {
+        let Some(job) = &mut self.model.job else {
+            return;
+        };
+        for message in job.poll() {
+            self.model.compute.apply(message);
+        }
+        if !job.is_finished() {
+            return;
+        }
+        self.model.job = None;
+        if let ComputeState::Finished(pvd) = self.model.compute.clone() {
+            self.load(&pvd, frame);
+            if self.error.is_none() {
+                self.model.fresh = self.model.launched.clone();
+            }
+        }
+    }
+
+    /// Panneau flottant du calcul en cours, dans tous les espaces.
+    fn compute_panel(&mut self, ctx: &egui::Context) {
+        let ComputeState::Running(running) = &self.model.compute else {
+            return;
+        };
+        let mut cancel = false;
+        panel("compute", Align2::CENTER_BOTTOM, [0.0, -GAP]).show(ctx, |ui| {
+            floating().show(ui, |ui| {
+                ui.set_width(260.0);
+                cancel = model_tools::progress_ui(ui, running);
+            });
+        });
+        if cancel {
+            if let Some(job) = &self.model.job {
+                job.cancel();
+            }
+            if let ComputeState::Running(r) = &mut self.model.compute {
+                r.stopping = true;
+            }
+        }
+    }
+
+    /// Bandeau de l'espace Résultats quand le modèle a changé depuis le calcul dont on voit les résultats.
+    fn stale_banner(&mut self, ctx: &egui::Context) {
+        let stale = self.model.fresh.is_some() && self.model.fresh != self.model.key;
+        if !(stale && self.state.space == Space::Results) {
+            return;
+        }
+        let mut relaunch = false;
+        panel("stale", Align2::CENTER_TOP, [0.0, 60.0]).show(ctx, |ui| {
+            floating().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.colored_label(
+                        Color32::from_rgb(230, 180, 80),
+                        "Résultats périmés : le modèle a changé depuis ce calcul.",
+                    );
+                    relaunch = ui.button("Relancer le calcul").clicked();
+                });
+            });
+        });
+        if relaunch {
+            self.state.go(Space::Model);
+            self.state.set_tool(Tool::Run);
         }
     }
 
@@ -1260,6 +1361,7 @@ impl eframe::App for App {
             }
         }
 
+        self.poll_job(frame);
         self.refresh_model();
         let mut clicked = None;
         egui::CentralPanel::default()
@@ -1273,6 +1375,8 @@ impl eframe::App for App {
         self.card(&ctx);
         self.toolbar(&ctx);
         self.inspector(&ctx, frame);
+        self.compute_panel(&ctx);
+        self.stale_banner(&ctx);
         if self.refresh_model() {
             ctx.request_repaint();
         }

@@ -144,6 +144,8 @@ pub enum MailleError {
     },
     /// `Model::solve` (linéaire) avec des contacts.
     ContactNeedsQuasiStatic,
+    /// L'appelant a demandé l'arrêt du calcul (`Flow::Stop`) : aucun résultat n'est rendu.
+    Cancelled,
     /// Newton-Raphson n'a pas trouvé l'équilibre de l'incrément `increment` (temps `time`).
     NotConverged {
         increment: usize,
@@ -405,6 +407,7 @@ impl fmt::Display for MailleError {
                 f,
                 "un contact est non linéaire : utiliser Model::solve_quasi_static avec une Step::quasi_static et une Amplitude, au lieu de Model::solve"
             ),
+            Self::Cancelled => write!(f, "calcul annulé"),
             Self::NotConverged { increment, time } => write!(
                 f,
                 "Newton-Raphson ne converge pas à l'incrément {increment} (t = {time}) : augmenter le nombre d'incréments de la Step, ou réduire la charge. Si la plasticité est parfaite (H = 0), la charge dépasse peut-être la charge limite de la structure ; en grandes déformations, la structure flambe peut-être (ou ses Elements se retournent : mailler plus fin)"

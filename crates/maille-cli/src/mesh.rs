@@ -131,16 +131,5 @@ fn mesh_model(model_path: &Path, output: Option<&Path>) -> Result<(), Failure> {
 
 /// Le maillage de la recette `[meshing]` ; la source est relative au dossier du modèle.
 pub(crate) fn from_recipe(dir: &Path, def: &MeshingDef) -> Result<MshFile, Failure> {
-    let path = dir.join(&def.source);
-    let source = meshing::Source::of(&path).ok_or_else(|| {
-        format!(
-            "[meshing] source = \"{}\" : format non pris en charge, écrire un fichier .dxf, .stl ou .step",
-            def.source
-        )
-    })?;
-    let meshed = meshing::run(source, &read_bytes(&path)?, def)?;
-    if let Some(unit) = &meshed.unit {
-        println!("{} : unité de longueur {unit}", path.display());
-    }
-    Ok(meshed.file)
+    maille_io::solving::mesh_from_recipe(dir, def, &mut |line| println!("{line}"))
 }
