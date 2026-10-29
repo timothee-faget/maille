@@ -15,6 +15,7 @@ use maille_io::meshing::Source;
 use maille_viewer::{Cut, NodalResults, ResultsView};
 
 use crate::compute::{ComputeState, Job, Running};
+use crate::library;
 use crate::mesh_space::{self, Built, Cad, Imported};
 use crate::model_space::{self, Diagnostic, Draft, Severity};
 use crate::model_tools::{self, Forms, MeshInfo};
@@ -85,6 +86,7 @@ struct ModelKey {
 /// Réglages de l'espace Modèle, tels qu'on les édite.
 struct ModelUi {
     draft: Draft,
+    library: model_tools::LibraryUi,
     forms: Forms,
     diags: Vec<Diagnostic>,
     key: Option<ModelKey>,
@@ -149,6 +151,7 @@ impl App {
             },
             model: ModelUi {
                 draft: Draft::default(),
+                library: model_tools::LibraryUi::new(library::default_user_path()),
                 forms: Forms::default(),
                 diags: Vec::new(),
                 key: None,
@@ -537,9 +540,12 @@ impl App {
                             };
                             let m = &mut self.model;
                             match tool {
-                                Tool::Material => {
-                                    model_tools::material_tool(ui, &mut m.draft, &info)
-                                }
+                                Tool::Material => model_tools::material_tool(
+                                    ui,
+                                    &mut m.draft,
+                                    &info,
+                                    &mut m.library,
+                                ),
                                 Tool::Support => model_tools::support_tool(
                                     ui,
                                     &mut m.draft,

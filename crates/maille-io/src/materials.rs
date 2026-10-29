@@ -15,7 +15,7 @@
 
 use std::collections::BTreeMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::model::MaterialDef;
 use crate::IoError;
@@ -95,6 +95,23 @@ impl UnitSystem {
     fn mass(&self) -> f64 {
         self.force * self.time * self.time / self.length
     }
+
+    /// Ce par quoi on multiplie une valeur SI pour l'avoir dans ce système.
+    fn factors(&self) -> Factors {
+        Factors {
+            stress: self.length * self.length / self.force,
+            density: self.length.powi(3) / self.mass(),
+            specific_heat: self.mass() / (self.force * self.length),
+            conductivity: self.time / self.force,
+        }
+    }
+}
+
+struct Factors {
+    stress: f64,
+    density: f64,
+    specific_heat: f64,
+    conductivity: f64,
 }
 
 fn invalid(problem: String) -> IoError {
@@ -108,26 +125,33 @@ fn unknown_unit(what: &str, found: &str, known: &str) -> IoError {
 }
 
 /// Un Material de la bibliothèque, en SI. Les propriétés absentes restent absentes.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LibraryMaterial {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
     /// Module d'Young E (Pa).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub young: Option<f64>,
     /// Coefficient de Poisson ν.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub poisson: Option<f64>,
     /// Conductivité thermique k (W/(m·K)).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub conductivity: Option<f64>,
     /// Masse volumique ρ (kg/m³).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub density: Option<f64>,
     /// Chaleur massique c (J/(kg·K)).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub specific_heat: Option<f64>,
     /// Coefficient de dilatation thermique α (1/K).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub expansion: Option<f64>,
     /// Limite d'élasticité σy0 (Pa). Elle n'entre pas dans `to_def` : `MaterialDef::yield_stress`
     /// active la plasticité de von Mises, que l'utilisateur doit demander (elle n'existe pas en
     /// contraintes planes).
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub yield_stress: Option<f64>,
 }
 
@@ -135,16 +159,13 @@ impl LibraryMaterial {
     /// Le Material exprimé dans le système d'unités `units`, prêt pour `[materials.<nom>]`. Il est
     /// élastique et thermique, sans plasticité : voir `yield_stress_in`.
     pub fn to_def(&self, units: UnitSystem) -> MaterialDef {
-        let stress = units.length * units.length / units.force;
-        let density = units.length.powi(3) / units.mass();
-        let specific_heat = units.mass() / (units.force * units.length);
-        let conductivity = units.time / units.force;
+        let f = units.factors();
         MaterialDef {
-            young: self.young.map(|v| v * stress),
+            young: self.young.map(|v| v * f.stress),
             poisson: self.poisson,
-            conductivity: self.conductivity.map(|v| v * conductivity),
-            density: self.density.map(|v| v * density),
-            specific_heat: self.specific_heat.map(|v| v * specific_heat),
+            conductivity: self.conductivity.map(|v| v * f.conductivity),
+            density: self.density.map(|v| v * f.density),
+            specific_heat: self.specific_heat.map(|v| v * f.specific_heat),
             expansion: self.expansion,
             yield_stress: None,
             hardening: None,
@@ -152,11 +173,26 @@ impl LibraryMaterial {
         }
     }
 
+    /// Le Material d'un modèle écrit dans le système `units`, ramené en SI pour la bibliothèque.
+    /// L'écrouissage et l'hyperélasticité ne sont pas gardés.
+    pub fn from_def(def: &MaterialDef, units: UnitSystem, description: &str) -> Self {
+        let f = units.factors();
+        Self {
+            description: description.to_string(),
+            young: def.young.map(|v| v / f.stress),
+            poisson: def.poisson,
+            conductivity: def.conductivity.map(|v| v / f.conductivity),
+            density: def.density.map(|v| v / f.density),
+            specific_heat: def.specific_heat.map(|v| v / f.specific_heat),
+            expansion: def.expansion,
+            yield_stress: def.yield_stress.map(|v| v / f.stress),
+        }
+    }
+
     /// La limite d'élasticité σy0 dans le système `units`, à mettre dans `MaterialDef::yield_stress`
     /// pour une analyse plastique.
     pub fn yield_stress_in(&self, units: UnitSystem) -> Option<f64> {
-        self.yield_stress
-            .map(|v| v * units.length * units.length / units.force)
+        self.yield_stress.map(|v| v * units.factors().stress)
     }
 
     fn check(&self, name: &str) -> Result<(), IoError> {
@@ -189,7 +225,7 @@ impl LibraryMaterial {
 }
 
 /// Ensemble de Materials nommés.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Library {
     materials: BTreeMap<String, LibraryMaterial>,
@@ -208,6 +244,24 @@ impl Library {
             material.check(name)?;
         }
         Ok(library)
+    }
+
+    /// Écrit la bibliothèque en TOML : `parse(&to_toml()?)` redonne la même.
+    pub fn to_toml(&self) -> Result<String, IoError> {
+        toml::to_string(self).map_err(|e| IoError::Toml(e.to_string()))
+    }
+
+    /// Ajoute `material` sous `name`, ou remplace celui qui porte ce nom. Refuse un nom vide ou des
+    /// valeurs absurdes.
+    pub fn insert(&mut self, name: &str, material: LibraryMaterial) -> Result<(), IoError> {
+        if name.trim().is_empty() {
+            return Err(invalid(
+                "bibliothèque de Materials : donne un nom au Material".to_string(),
+            ));
+        }
+        material.check(name)?;
+        self.materials.insert(name.to_string(), material);
+        Ok(())
     }
 
     /// Ajoute les Materials de `other` ; sur un nom commun, `other` l'emporte.
