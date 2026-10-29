@@ -108,3 +108,110 @@ fn the_suggested_size_is_a_round_fraction_of_the_extent() {
     close(suggested_size(Source::Dxf, 3.0_f64.sqrt()), 0.087);
     close(suggested_size(Source::Dxf, 0.0), 1.0);
 }
+
+mod sets {
+    use std::collections::BTreeMap;
+
+    use maille_io::meshing::{combine_sets, run};
+    use maille_io::model::MeshingDef;
+    use maille_io::msh::Set;
+
+    use super::*;
+
+    fn plaque(size: f64) -> maille_io::msh::MshFile {
+        let (_, bytes) = example("plaque.dxf");
+        let recipe = Recipe {
+            size: Some(size),
+            ..Recipe::default()
+        };
+        mesh(Source::Dxf, &bytes, &recipe).unwrap().file
+    }
+
+    fn sets(entries: &[(&str, &[&str])]) -> BTreeMap<String, Vec<String>> {
+        entries
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.iter().map(|s| s.to_string()).collect()))
+            .collect()
+    }
+
+    #[test]
+    fn a_set_is_the_union_of_its_entities() {
+        let mut file = plaque(0.5);
+        let (bas, haut) = (file.sets["bas"].clone(), file.sets["haut"].clone());
+        combine_sets(&mut file, &sets(&[("horizontaux", &["bas", "haut"])])).unwrap();
+        let union = &file.sets["horizontaux"];
+        let mut nodes: Vec<usize> = bas.nodes.iter().chain(&haut.nodes).copied().collect();
+        nodes.sort_unstable();
+        nodes.dedup();
+        assert_eq!(union.nodes, nodes);
+        assert_eq!(union.faces.len(), bas.faces.len() + haut.faces.len());
+        // les entités elles-mêmes restent, et un coin partagé n'est compté qu'une fois
+        assert_eq!(file.sets["bas"], bas);
+        let twice = sets(&[("deux_fois", &["bas", "bas", "haut"])]);
+        combine_sets(&mut file, &twice).unwrap();
+        assert_eq!(file.sets["deux_fois"], file.sets["horizontaux"]);
+    }
+
+    #[test]
+    fn a_set_survives_remeshing_at_another_size() {
+        let wanted = sets(&[("verticaux", &["gauche", "droite"])]);
+        for size in [1.0, 0.5, 0.25] {
+            let mut file = plaque(size);
+            combine_sets(&mut file, &wanted).unwrap();
+            let set: &Set = &file.sets["verticaux"];
+            let (g, d) = (&file.sets["gauche"], &file.sets["droite"]);
+            assert_eq!(set.faces.len(), g.faces.len() + d.faces.len(), "h = {size}");
+            // tous les Nodes du Set sont sur x = 0 ou x = 4
+            assert!(set
+                .nodes
+                .iter()
+                .all(|&n| file.nodes[n].x.abs() < 1e-9 || (file.nodes[n].x - 4.0).abs() < 1e-9));
+        }
+    }
+
+    #[test]
+    fn mistakes_name_the_set_and_the_known_entities() {
+        let mut file = plaque(1.0);
+        match combine_sets(&mut file, &sets(&[("x", &["bas", "fantome"])])) {
+            Err(IoError::UnknownSet { key, name, known }) => {
+                assert_eq!((key.as_str(), name.as_str()), ("meshing.sets.x", "fantome"));
+                assert!(
+                    known.contains(&"bas".to_string()) && !known.contains(&DOMAIN_SET.to_string())
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            combine_sets(&mut file, &sets(&[("bas", &["haut"])])),
+            Err(IoError::DuplicateSetName { .. })
+        ));
+        assert!(matches!(
+            combine_sets(&mut file, &sets(&[(DOMAIN_SET, &["haut"])])),
+            Err(IoError::DuplicateSetName { .. })
+        ));
+        assert!(matches!(
+            combine_sets(&mut file, &sets(&[("vide", &[])])),
+            Err(IoError::InvalidModel { .. })
+        ));
+        // le domaine n'est pas une entité de la géométrie
+        assert!(matches!(
+            combine_sets(&mut file, &sets(&[("tout", &[DOMAIN_SET])])),
+            Err(IoError::UnknownSet { .. })
+        ));
+    }
+
+    #[test]
+    fn the_recipe_of_a_model_meshes_then_groups() {
+        let (_, bytes) = example("plaque.dxf");
+        let def = MeshingDef {
+            source: "plaque.dxf".to_string(),
+            size: Some(0.5),
+            quadratic: Some(true),
+            feature_angle: None,
+            sets: sets(&[("verticaux", &["gauche", "droite"])]),
+        };
+        let meshed = run(Source::Dxf, &bytes, &def).unwrap();
+        assert_eq!(meshed.file.kind, CellKind::Tri6);
+        assert!(meshed.file.sets.contains_key("verticaux"));
+    }
+}

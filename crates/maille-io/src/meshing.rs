@@ -2,13 +2,15 @@
 //! `maille mesh` et l'interface, qui obtiennent ainsi le même maillage. Le calque d'une entité DXF, le
 //! nom d'un `solid` STL (ou `surface_N`), le nom d'une face STEP (ou `face_N`) nomme le bord.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use maille_core::mesher::{
     tetrahedralize, tetrahedralize_brep, triangulate, MeshOptions, TetOptions,
 };
 
-use crate::msh::MshFile;
+use crate::model::MeshingDef;
+use crate::msh::{MshFile, Set, DOMAIN_SET};
 use crate::{dxf, step, stl, IoError};
 
 /// Angle vif par défaut du STL, en degrés : au-delà, deux triangles voisins sont deux surfaces.
@@ -167,4 +169,64 @@ pub fn suggested_size(source: Source, extent: f64) -> f64 {
     }
     let scale = 10f64.powf(raw.log10().floor() - 1.0);
     (raw / scale).round() * scale
+}
+
+/// Regroupe des entités de la géométrie en Sets : chaque Set utilisateur est l'union des Sets de bord
+/// (Nodes, faces, Elements) des entités qu'il liste. Erreur si une entité n'existe pas (la liste des
+/// noms connus est donnée), si le nom du Set est déjà pris (entité, domaine ou autre Set) ou si la
+/// liste est vide. Un Set ne peut regrouper que des entités, pas d'autres Sets utilisateur.
+pub fn combine_sets(
+    file: &mut MshFile,
+    sets: &BTreeMap<String, Vec<String>>,
+) -> Result<(), IoError> {
+    let entities = file.sets.clone();
+    for (name, members) in sets {
+        let key = format!("meshing.sets.{name}");
+        if entities.contains_key(name) || name == DOMAIN_SET {
+            return Err(IoError::DuplicateSetName { name: name.clone() });
+        }
+        if members.is_empty() {
+            return Err(IoError::InvalidModel {
+                problem: format!("{key} : le Set ne regroupe aucune entité de la géométrie"),
+            });
+        }
+        let mut union = Set::default();
+        for member in members {
+            let entity = entities
+                .get(member)
+                .filter(|_| member != DOMAIN_SET)
+                .ok_or_else(|| IoError::UnknownSet {
+                    key: key.clone(),
+                    name: member.clone(),
+                    known: entities
+                        .keys()
+                        .filter(|k| *k != DOMAIN_SET)
+                        .cloned()
+                        .collect(),
+                })?;
+            union.nodes.extend(&entity.nodes);
+            union.faces.extend(&entity.faces);
+            union.elements.extend(&entity.elements);
+        }
+        for list in [&mut union.nodes, &mut union.elements] {
+            list.sort_unstable();
+            list.dedup();
+        }
+        union.faces.sort_unstable();
+        union.faces.dedup();
+        file.sets.insert(name.clone(), union);
+    }
+    Ok(())
+}
+
+/// Maille depuis la recette `[meshing]` d'un modèle : le maillage, puis les Sets utilisateur.
+pub fn run(source: Source, bytes: &[u8], def: &MeshingDef) -> Result<Meshed, IoError> {
+    let recipe = Recipe {
+        size: def.size,
+        feature_angle: def.feature_angle.unwrap_or(FEATURE_ANGLE),
+        quadratic: def.quadratic.unwrap_or(false),
+    };
+    let mut meshed = mesh(source, bytes, &recipe)?;
+    combine_sets(&mut meshed.file, &def.sets)?;
+    Ok(meshed)
 }

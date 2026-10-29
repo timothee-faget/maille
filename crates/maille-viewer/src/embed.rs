@@ -84,6 +84,25 @@ impl ResultsView {
         self.renderer.set_camera(&self.display.camera);
     }
 
+    /// Surligne ces triangles (sommets dans les coordonnées de la pièce), par-dessus le maillage ;
+    /// une liste vide retire le surlignage.
+    pub fn set_highlight(&mut self, triangles: Vec<[[f64; 3]; 3]>) {
+        self.display.highlight = triangles;
+        self.refresh();
+    }
+
+    /// Où le point `p` de la pièce tombe dans la texture : (x, y) en pixels depuis le coin haut gauche,
+    /// et la profondeur (0 : devant, 1 : derrière). Sert à désigner ce qu'il y a sous le curseur.
+    pub fn project(&self, p: [f64; 3]) -> [f64; 3] {
+        let size = self.renderer.size();
+        let clip = self.display.camera.project(p, size);
+        [
+            (clip[0] + 1.0) * 0.5 * size[0],
+            (1.0 - clip[1]) * 0.5 * size[1],
+            clip[2],
+        ]
+    }
+
     /// Base de la caméra dans les coordonnées de la pièce : (droite, haut, œil), où `œil` va de la pièce
     /// vers l'observateur. Sert à dessiner le trièdre d'orientation.
     pub fn orientation(&self) -> ([f64; 3], [f64; 3], [f64; 3]) {

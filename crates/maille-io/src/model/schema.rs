@@ -27,6 +27,11 @@
 //! radius = 10.0                   # cylindre et sphère ; `normal` pour le plan, `axis` en 3D
 //! motion = [0.0, -0.08]           # déplacement de la surface à λ = 1 (nul par défaut)
 //!
+//! [meshing]                       # facultative : de quoi refaire le .msh (maille mesh modele.toml)
+//! source = "piece.step"
+//! size = 2.0
+//! sets = { encastrement = ["face_3", "face_5"] }   # un Set = plusieurs entités de la géométrie
+//!
 //! [[bcs]]                         # Dirichlet sur un Set de Nodes
 //! set = "sym_y"
 //! dof = "ux"                      # ux, uy, uz (statique), t (thermique)
@@ -75,6 +80,10 @@ pub struct ModelFile {
     /// Sans `[step]` : calcul linéaire.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub step: Option<StepDef>,
+    /// Recette du maillage : source CAO, taille h, Sets sur la géométrie. Sans elle, `mesh` est un
+    /// `.msh` fait ailleurs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meshing: Option<MeshingDef>,
     /// Calcul couplé seulement : le thermique transitoire qui précède le mécanique ; sans lui, le
     /// thermique est stationnaire.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -243,6 +252,28 @@ pub struct StepDef {
     /// Quasi-statique seulement : points (t, λ), rampe de 0 à 1 sur la durée par défaut.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub amplitude: Option<Vec<[f64; 2]>>,
+}
+
+/// `[meshing]` : de quoi refaire le maillage. Un Set peut regrouper plusieurs entités de la géométrie
+/// (calque DXF, `solid` ou `surface_N` du STL, face du STEP) : il survit au remaillage, puisqu'il les
+/// désigne par leur nom.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MeshingDef {
+    /// Fichier CAO (`.dxf`, `.stl`, `.step`), relatif au dossier du modèle.
+    pub source: String,
+    /// Taille h des Elements, dans les unités du fichier ; facultative pour un STL seulement.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<f64>,
+    /// Elements du second ordre (Tri6, Tet10), faux par défaut.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quadratic: Option<bool>,
+    /// Angle vif d'un STL, en degrés (30 par défaut).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub feature_angle: Option<f64>,
+    /// Nom du Set → noms des entités de la géométrie qu'il regroupe.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sets: BTreeMap<String, Vec<String>>,
 }
 
 /// `[thermal_step]` : le transitoire thermique d'un calcul couplé (mêmes clés que `[step]` transitoire).

@@ -75,6 +75,12 @@ fn fs_shaded(in: VertexOut) -> @location(0) vec4<f32> {
     return vec4<f32>(color.rgb * shade, color.a);
 }
 
+// Faces sélectionnées : orange uni, par-dessus le Mesh.
+@fragment
+fn fs_highlight(in: VertexOut) -> @location(0) vec4<f32> {
+    return vec4<f32>(1.0, 0.55, 0.0, 1.0);
+}
+
 @fragment
 fn fs_edge(in: VertexOut) -> @location(0) vec4<f32> {
     return vec4<f32>(0.15, 0.15, 0.15, 1.0);

@@ -2,18 +2,19 @@
 //! d'une entité DXF, le nom d'un `solid` STL (ou `surface_N` à défaut), le nom d'une face STEP (ou
 //! `face_N` à défaut) nomme le bord (voir `maille_io::dxf`, `maille_io::stl` et `maille_io::step`).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use maille_io::meshing;
-use maille_io::msh::{self, DOMAIN_SET};
+use maille_io::model::{self, MeshingDef};
+use maille_io::msh::{self, MshFile, DOMAIN_SET};
 
-use crate::files::{read_bytes, write, Failure};
+use crate::files::{read, read_bytes, write, Failure};
 
 /// `maille mesh <dessin.dxf> --size <h> [--quadratic] [-o <maillage.msh>]` ou
 /// `maille mesh <piece.stl> [--size <h>] [--feature-angle <degrés>] [--quadratic] [-o <maillage.msh>]`
 /// ou `maille mesh <piece.step> --size <h> [--quadratic] [-o <maillage.msh>]`.
 pub fn mesh(args: &[String]) -> Result<(), Failure> {
-    let usage = "usage : maille mesh <dessin.dxf> --size <h> [--quadratic] [-o <maillage.msh>]\n        maille mesh <piece.stl> [--size <h>] [--feature-angle <degrés>] [--quadratic] [-o <maillage.msh>]\n        maille mesh <piece.step> --size <h> [--quadratic] [-o <maillage.msh>]";
+    let usage = "usage : maille mesh <modele.toml> [-o <maillage.msh>]\n        maille mesh <dessin.dxf> --size <h> [--quadratic] [-o <maillage.msh>]\n        maille mesh <piece.stl> [--size <h>] [--feature-angle <degrés>] [--quadratic] [-o <maillage.msh>]\n        maille mesh <piece.step> --size <h> [--quadratic] [-o <maillage.msh>]";
     let (mut input, mut size, mut angle, mut output, mut quadratic) =
         (None, None, None, None, false);
     let mut it = args.iter();
@@ -45,6 +46,12 @@ pub fn mesh(args: &[String]) -> Result<(), Failure> {
         }
     }
     let input: PathBuf = input.ok_or(usage)?;
+    if input.extension().is_some_and(|e| e == "toml") {
+        if size.is_some() || angle.is_some() || quadratic {
+            return Err("--size, --feature-angle et --quadratic sont dans la section [meshing] du modèle : les y écrire".into());
+        }
+        return mesh_model(&input, output.as_deref());
+    }
     let output = output.unwrap_or_else(|| input.with_extension("msh"));
     let source = meshing::Source::of(&input).ok_or_else(|| {
         format!(
@@ -97,4 +104,43 @@ pub fn mesh(args: &[String]) -> Result<(), Failure> {
             .join(", ")
     );
     Ok(())
+}
+
+/// Maille depuis la recette `[meshing]` d'un modèle : le `.msh` de sa clé `mesh` (ou `-o`), avec les
+/// Sets utilisateur.
+fn mesh_model(model_path: &Path, output: Option<&Path>) -> Result<(), Failure> {
+    let dir = model_path.parent().unwrap_or(Path::new("."));
+    let file = model::parse(&read(model_path)?)?;
+    let def = file.meshing.as_ref().ok_or_else(|| {
+        format!(
+            "{} n'a pas de section [meshing] : il n'y a pas de recette à suivre (source, size)",
+            model_path.display()
+        )
+    })?;
+    let output = output.map_or_else(|| dir.join(&file.mesh), Path::to_path_buf);
+    let mesh = from_recipe(dir, def)?;
+    write(&output, &msh::write(&mesh)?)?;
+    println!(
+        "{} : {} Nodes, {} Elements",
+        output.display(),
+        mesh.nodes.len(),
+        mesh.cells.len()
+    );
+    Ok(())
+}
+
+/// Le maillage de la recette `[meshing]` ; la source est relative au dossier du modèle.
+pub(crate) fn from_recipe(dir: &Path, def: &MeshingDef) -> Result<MshFile, Failure> {
+    let path = dir.join(&def.source);
+    let source = meshing::Source::of(&path).ok_or_else(|| {
+        format!(
+            "[meshing] source = \"{}\" : format non pris en charge, écrire un fichier .dxf, .stl ou .step",
+            def.source
+        )
+    })?;
+    let meshed = meshing::run(source, &read_bytes(&path)?, def)?;
+    if let Some(unit) = &meshed.unit {
+        println!("{} : unité de longueur {unit}", path.display());
+    }
+    Ok(meshed.file)
 }

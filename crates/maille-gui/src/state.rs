@@ -91,6 +91,8 @@ impl Tool {
             Tool::Navigate
                 | Tool::Import
                 | Tool::MeshSize
+                | Tool::FaceSets
+                | Tool::ManageSets
                 | Tool::Quality
                 | Tool::Open
                 | Tool::Field
@@ -430,11 +432,13 @@ mod tests {
             Tool::Navigate,
             Tool::Import,
             Tool::MeshSize,
+            Tool::FaceSets,
+            Tool::ManageSets,
             Tool::Quality,
         ] {
             assert!(tool.available(), "{tool:?}");
         }
-        for tool in [Tool::Probe, Tool::FaceSets, Tool::Material, Tool::Run] {
+        for tool in [Tool::Probe, Tool::VertexSets, Tool::Material, Tool::Run] {
             assert!(!tool.available(), "{tool:?}");
         }
     }

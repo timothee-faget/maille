@@ -65,6 +65,9 @@ pub struct Renderer {
     legend_fill_pipeline: wgpu::RenderPipeline,
     legend_line_pipeline: wgpu::RenderPipeline,
     legend: Option<LegendBuffers>,
+    /// Triangles sélectionnés, orange par-dessus le Mesh : le buffer et le nombre de sommets.
+    highlight_pipeline: wgpu::RenderPipeline,
+    highlight: Option<(wgpu::Buffer, u32)>,
     text: Text,
 }
 
@@ -338,6 +341,13 @@ impl Renderer {
             "fs_edge",
             depth_state(true, lequal, false),
         );
+        let highlight_pipeline = pipeline(
+            "vs_line",
+            &line_buffers,
+            triangle_list,
+            "fs_highlight",
+            depth_state(false, lequal, false),
+        );
         let legend_fill_pipeline = pipeline(
             "vs_screen",
             &screen_buffers,
@@ -409,6 +419,8 @@ impl Renderer {
             legend_fill_pipeline,
             legend_line_pipeline,
             legend: None,
+            highlight_pipeline,
+            highlight: None,
             text,
         }
     }
@@ -541,6 +553,21 @@ impl Renderer {
             triangle_indices: triangles.len() as u32,
             lines: buffer(bytemuck::cast_slice(lines), wgpu::BufferUsages::VERTEX),
             line_vertices: lines.len() as u32,
+        });
+        self.request_redraw();
+    }
+
+    /// Triangles à surligner (3 sommets chacun), par-dessus le Mesh ; vide : aucun.
+    pub fn set_highlight(&mut self, triangles: &[[f32; 3]]) {
+        self.highlight = (!triangles.is_empty()).then(|| {
+            let buffer = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: None,
+                    contents: bytemuck::cast_slice(triangles),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+            (buffer, triangles.len() as u32)
         });
         self.request_redraw();
     }
@@ -748,6 +775,11 @@ impl Renderer {
                 pass.set_vertex_buffer(1, mesh.values.slice(..));
                 pass.set_index_buffer(mesh.triangles.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..mesh.triangle_indices, 0, 0..1);
+                if let Some((buffer, count)) = &self.highlight {
+                    pass.set_pipeline(&self.highlight_pipeline);
+                    pass.set_vertex_buffer(0, buffer.slice(..));
+                    pass.draw(0..*count, 0..1);
+                }
                 pass.set_pipeline(&self.edge_pipeline);
                 pass.set_vertex_buffer(0, mesh.lines.slice(..));
                 pass.draw(0..mesh.line_vertices, 0..1);

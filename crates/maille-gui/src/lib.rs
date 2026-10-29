@@ -6,6 +6,7 @@ mod app;
 pub mod mesh_space;
 pub mod quality;
 pub mod results;
+pub mod sets;
 pub mod state;
 mod triad;
 

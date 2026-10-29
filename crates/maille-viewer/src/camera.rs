@@ -116,7 +116,6 @@ impl Camera {
     }
 
     /// Coordonnées de clip (x, y, profondeur) du point `p`.
-    #[cfg(test)]
     pub fn project(&self, p: V3, size: [f64; 2]) -> V3 {
         let (right, up, eye) = self.axes();
         let d = sub(p, self.target);
