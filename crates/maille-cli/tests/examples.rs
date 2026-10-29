@@ -853,7 +853,7 @@ fn tube_under_pressure_follows_lame() {
 #[test]
 fn commands_report_errors_and_usage() {
     let w = Workdir::new("erreurs");
-    let help = w.maille(&[]);
+    let help = w.maille(&["help"]);
     assert!(help.status.success());
     assert!(String::from_utf8_lossy(&help.stdout).contains("maille solve"));
 

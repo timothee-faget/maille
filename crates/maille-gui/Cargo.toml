@@ -1,0 +1,12 @@
+[package]
+name = "maille-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "wgpu"] }
+maille-core = { path = "../maille-core" }
+maille-io = { path = "../maille-io" }
+maille-viewer = { path = "../maille-viewer" }

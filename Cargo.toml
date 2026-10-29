@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/maille-core", "crates/maille-io", "crates/maille-cli", "crates/maille-viewer"]
+members = ["crates/maille-core", "crates/maille-io", "crates/maille-cli", "crates/maille-viewer", "crates/maille-gui"]
 
 [workspace.package]
 version = "0.12.0"

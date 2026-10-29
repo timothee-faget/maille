@@ -11,5 +11,6 @@ path = "src/main.rs"
 
 [dependencies]
 maille-core = { path = "../maille-core" }
+maille-gui = { path = "../maille-gui" }
 maille-io = { path = "../maille-io" }
 maille-viewer = { path = "../maille-viewer" }
