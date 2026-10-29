@@ -1373,7 +1373,7 @@ checksum = "7f66e8d5d03f609abc3a39e6f08e4164ebf1447a732906d39eb9b99b7919ef39"
 
 [[package]]
 name = "maille-cli"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "maille-core",
  "maille-gui",
@@ -1383,14 +1383,14 @@ dependencies = [
 
 [[package]]
 name = "maille-core"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "criterion",
 ]
 
 [[package]]
 name = "maille-gui"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "eframe",
  "egui-lucide",
@@ -1402,7 +1402,7 @@ dependencies = [
 
 [[package]]
 name = "maille-io"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "maille-core",
  "serde",
@@ -1411,7 +1411,7 @@ dependencies = [
 
 [[package]]
 name = "maille-viewer"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "bytemuck",
  "glyphon",
