@@ -29,6 +29,8 @@ pub enum Quantity {
     Temperature,
     /// Déformation plastique cumulée p.
     PlasticStrain,
+    /// Défaut de forme (0 : parfait), pour regarder un Mesh sans résultats de calcul.
+    Distortion,
 }
 
 impl Quantity {
@@ -73,6 +75,7 @@ impl Quantity {
             Self::Displacement => "|u|",
             Self::Temperature => "T",
             Self::PlasticStrain => "p (déformation plastique cumulée)",
+            Self::Distortion => "Défaut de forme (0 : parfait)",
         }
     }
 }
@@ -87,6 +90,8 @@ pub struct Scene {
     temperatures: Vec<f64>,
     /// Déformation plastique cumulée p aux Nodes, vide hors calcul élasto-plastique.
     plastic_strains: Vec<f64>,
+    /// Défaut de forme aux Nodes d'un Mesh montré sans résultats, vide sinon.
+    distortion: Vec<f64>,
     /// Grandes déformations (`NodalResults::large_strain`).
     large_strain: bool,
     /// Triangles à remplir (indices de Nodes) : 1 par Tri3, 4 par Tri6 (antihoraires) ; pour des
@@ -114,6 +119,8 @@ pub struct NodalResults {
     pub stresses: Vec<Stress>,
     pub temperatures: Vec<f64>,
     pub plastic_strains: Vec<f64>,
+    /// Un Mesh sans calcul : son défaut de forme (0 : parfait) à chaque Node ; les autres champs restent vides.
+    pub distortion: Vec<f64>,
     /// Grandes déformations : la déformée se montre à l'échelle 1 (aucune amplification).
     pub large_strain: bool,
 }
@@ -266,6 +273,7 @@ impl Scene {
             } else {
                 nodal_equivalent_plastic_strains(mesh, field)?
             },
+            distortion: Vec::new(),
             large_strain: false,
             triangles,
             edges,
@@ -277,10 +285,12 @@ impl Scene {
     /// un triangle ni un tétraèdre ou si un champ n'a pas une valeur par Node.
     pub fn from_nodal(r: &NodalResults) -> Result<Self, SceneError> {
         let n = r.nodes.len();
+        let mesh_only = !r.distortion.is_empty();
         let thermal = !r.temperatures.is_empty();
         let sized = |len: usize, wanted: usize| len == 0 || len == wanted;
-        if (thermal && r.temperatures.len() != n)
-            || (!thermal && (r.stresses.len() != n || r.displacements.len() != n))
+        if (mesh_only && r.distortion.len() != n)
+            || (thermal && r.temperatures.len() != n)
+            || (!mesh_only && !thermal && (r.stresses.len() != n || r.displacements.len() != n))
             || !sized(r.plastic_strains.len(), n)
             || r.cells.iter().flatten().any(|&i| i >= n)
         {
@@ -293,7 +303,7 @@ impl Scene {
         } = geometry(&r.cells)?;
         Ok(Self {
             nodes: r.nodes.clone(),
-            displacements: if thermal {
+            displacements: if thermal || mesh_only {
                 vec![[0.0; 3]; n]
             } else {
                 r.displacements.clone()
@@ -301,6 +311,7 @@ impl Scene {
             stresses: r.stresses.clone(),
             temperatures: r.temperatures.clone(),
             plastic_strains: r.plastic_strains.clone(),
+            distortion: r.distortion.clone(),
             large_strain: r.large_strain,
             triangles,
             edges,
@@ -316,6 +327,9 @@ impl Scene {
     /// Champs affichables : la température pour un Field thermique, sinon les champs mécaniques,
     /// plus p pour un Field élasto-plastique.
     pub fn quantities(&self) -> &'static [Quantity] {
+        if !self.distortion.is_empty() {
+            return &[Quantity::Distortion];
+        }
         match (
             !self.temperatures.is_empty(),
             self.is_solid(),
@@ -331,7 +345,7 @@ impl Scene {
 
     /// Vrai si le Field a des déplacements à amplifier (statique).
     pub fn has_displacements(&self) -> bool {
-        self.temperatures.is_empty()
+        self.temperatures.is_empty() && self.distortion.is_empty()
     }
 
     /// Valeur du champ à chaque Node (vide si le champ n'est pas dans `quantities`).
@@ -352,6 +366,7 @@ impl Scene {
                 .collect(),
             Quantity::Temperature => self.temperatures.clone(),
             Quantity::PlasticStrain => self.plastic_strains.clone(),
+            Quantity::Distortion => self.distortion.clone(),
         }
     }
 
@@ -774,6 +789,30 @@ mod tests {
                 "{q:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_mesh_without_results_shows_only_its_distortion() {
+        let (nodes, cells) = crate::testmesh::cube();
+        let distortion = vec![0.5; nodes.len()];
+        let scene = Scene::from_nodal(&NodalResults {
+            nodes,
+            cells,
+            distortion: distortion.clone(),
+            ..NodalResults::default()
+        })
+        .unwrap();
+        assert_eq!(scene.quantities(), &[Quantity::Distortion]);
+        assert_eq!(scene.values(Quantity::Distortion), distortion);
+        assert!(!scene.has_displacements() && scene.is_solid());
+        // un défaut qui n'a pas une valeur par Node est refusée
+        let wrong = NodalResults {
+            nodes: vec![[0.0; 3]; 4],
+            cells: vec![vec![0, 1, 2, 3]],
+            distortion: vec![1.0],
+            ..NodalResults::default()
+        };
+        assert!(Scene::from_nodal(&wrong).is_err());
     }
 
     #[test]

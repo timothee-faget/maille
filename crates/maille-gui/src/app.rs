@@ -2,15 +2,19 @@
 //! une image) et, par-dessus, des panneaux flottants arrondis et semi-transparents. Ne décide de
 //! rien : l'état est dans `state`.
 
+use std::error::Error;
 use std::path::{Path, PathBuf};
 
 use eframe::egui::{
     self, Align2, Color32, CornerRadius, Frame, Margin, Pos2, Rect, RichText, Sense, Stroke, Vec2,
 };
-use eframe::egui_wgpu::wgpu;
+use eframe::egui_wgpu::{wgpu, RenderState};
 use egui_lucide::Lucide;
-use maille_viewer::{Cut, ResultsView};
+use maille_io::meshing::Source;
+use maille_viewer::{Cut, NodalResults, ResultsView};
 
+use crate::mesh_space::{self, Built, Cad, Imported};
+use crate::quality::POOR;
 use crate::results;
 use crate::state::{Action, Item, Space, State, Status, Tool};
 use crate::triad;
@@ -39,11 +43,35 @@ struct Open {
     cut_flipped: bool,
 }
 
+/// Réglages de l'espace Maillage, tels qu'on les édite.
+struct MeshUi {
+    imported: Option<Imported>,
+    built: Option<Built>,
+    /// Taille h choisie, et maillage du second ordre.
+    size: f64,
+    quadratic: bool,
+    /// Dernier message de l'espace (maillage écrit…).
+    note: Option<String>,
+}
+
+/// Ce que l'inspecteur demande à l'application, une fois les panneaux dessinés.
+enum Todo {
+    Open(PathBuf),
+    Import(PathBuf),
+    Remesh,
+    Save,
+}
+
 pub struct App {
     state: State,
-    open: Option<Open>,
-    /// Chemin tapé dans l'inspecteur « Ouvrir ».
+    /// La vue des résultats (espace Résultats).
+    results: Option<Open>,
+    /// La vue du maillage (espaces Maillage et Modèle).
+    mesh_view: Option<Open>,
+    mesh: MeshUi,
+    /// Chemins tapés dans les inspecteurs « Ouvrir » et « Importer ».
     path: String,
+    mesh_path: String,
     /// À ouvrir dès la première image (argument de la ligne de commande).
     pending: Option<PathBuf>,
     error: Option<String>,
@@ -53,10 +81,32 @@ impl App {
     pub fn new(open: Option<PathBuf>) -> Self {
         Self {
             state: State::default(),
-            open: None,
+            results: None,
+            mesh_view: None,
+            mesh: MeshUi {
+                imported: None,
+                built: None,
+                size: 1.0,
+                quadratic: false,
+                note: None,
+            },
             path: String::new(),
+            mesh_path: String::new(),
             pending: open,
             error: None,
+        }
+    }
+
+    /// Un fichier déposé ou ouvert : des résultats (`.pvd`, `.vtu`), sinon un maillage ou une géométrie.
+    fn route(&mut self, path: &Path, frame: &eframe::Frame) {
+        let is_results = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "pvd" | "vtu"));
+        if is_results {
+            self.load(path, frame);
+        } else {
+            self.import(path, frame);
         }
     }
 
@@ -67,31 +117,12 @@ impl App {
         };
         let loaded = results::open(path, None)
             .and_then(|r| results::to_nodal(&r))
-            .and_then(|nodal| {
-                ResultsView::new(gpu.device.clone(), gpu.queue.clone(), &nodal, [1, 1], 1.0)
-            });
+            .and_then(|nodal| open_view(gpu, &nodal, path));
         match loaded {
-            Ok(view) => {
-                let texture = gpu.renderer.write().register_native_texture(
-                    &gpu.device,
-                    &view.texture().create_view(&Default::default()),
-                    wgpu::FilterMode::Linear,
-                );
-                if let Some(old) = self.open.take() {
-                    gpu.renderer.write().free_texture(&old.texture);
+            Ok(open) => {
+                if let Some(old) = self.results.replace(open) {
+                    free_view(gpu, &old);
                 }
-                self.open = Some(Open {
-                    view,
-                    texture,
-                    size: [1, 1],
-                    name: path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                    cut_axis: None,
-                    cut_fraction: 0.5,
-                    cut_flipped: false,
-                });
                 self.state.progress.results_open = true;
                 self.state.go(Space::Results);
                 self.state.set_tool(Tool::Navigate);
@@ -101,8 +132,81 @@ impl App {
         }
     }
 
+    /// Importe un dessin, une surface, une pièce ou un maillage. Une géométrie est maillée tout de suite
+    /// à la taille proposée, pour qu'il y ait quelque chose à voir ; on règle h ensuite.
+    fn import(&mut self, path: &Path, frame: &eframe::Frame) {
+        match mesh_space::import(path) {
+            Ok(Imported::Cad(cad)) => {
+                self.mesh.size = cad.suggested;
+                self.mesh.quadratic = false;
+                self.mesh.note = None;
+                self.mesh.built = None;
+                self.mesh.imported = Some(Imported::Cad(cad));
+                self.state.progress.geometry = true;
+                self.state.progress.meshed = false;
+                self.state.progress.sets = 0;
+                self.state.go(Space::Mesh);
+                self.state.set_tool(Tool::MeshSize);
+                self.error = None;
+                self.remesh(frame);
+            }
+            Ok(Imported::Mesh(file, built)) => {
+                self.mesh.imported = Some(Imported::Mesh(file.clone(), built.clone()));
+                self.mesh.note = None;
+                self.state.progress.geometry = true;
+                self.state.go(Space::Mesh);
+                self.state.set_tool(Tool::Quality);
+                self.error = None;
+                self.show_built(*built, &file, frame);
+            }
+            Err(e) => self.error = Some(e.to_string()),
+        }
+    }
+
+    /// Remaille la géométrie importée avec la taille et l'ordre choisis.
+    fn remesh(&mut self, frame: &eframe::Frame) {
+        let Some(Imported::Cad(cad)) = &self.mesh.imported else {
+            return;
+        };
+        match mesh_space::mesh(cad, self.mesh.size, self.mesh.quadratic) {
+            Ok(built) => {
+                let path = cad.path.clone();
+                self.mesh.note = None;
+                self.error = None;
+                self.show_built(built, &path, frame);
+            }
+            Err(e) => self.error = Some(e.to_string()),
+        }
+    }
+
+    fn show_built(&mut self, built: Built, path: &Path, frame: &eframe::Frame) {
+        let Some(gpu) = frame.wgpu_render_state() else {
+            self.error = Some("l'interface a besoin de wgpu".to_string());
+            return;
+        };
+        match open_view(gpu, &built.nodal(), path) {
+            Ok(open) => {
+                if let Some(old) = self.mesh_view.replace(open) {
+                    free_view(gpu, &old);
+                }
+                self.state.progress.meshed = true;
+                self.state.progress.sets = built.sets().len();
+                self.mesh.built = Some(built);
+            }
+            Err(e) => self.error = Some(e.to_string()),
+        }
+    }
+
+    /// La vue à montrer : les résultats dans l'espace Résultats, le maillage dans les deux autres.
+    fn view_mut(&mut self) -> Option<&mut Open> {
+        match self.state.space {
+            Space::Results => self.results.as_mut(),
+            Space::Mesh | Space::Model => self.mesh_view.as_mut(),
+        }
+    }
+
     fn act(&mut self, action: Action) {
-        if let Some(open) = self.open.as_mut() {
+        if let Some(open) = self.view_mut() {
             match action {
                 Action::Fit => open.view.fit(),
                 Action::View(axis) => open.view.look_along(axis),
@@ -114,12 +218,20 @@ impl App {
     fn viewport(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
         let rect = ui.max_rect();
         let ppp = ui.ctx().pixels_per_point();
-        let (Some(open), Some(gpu)) = (self.open.as_mut(), frame.wgpu_render_state()) else {
+        let invitation = match self.state.space {
+            Space::Results => {
+                "Dépose un fichier .pvd ou .vtu ici,\nou ouvre-le avec l'outil « Ouvrir »"
+            }
+            _ => {
+                "Dépose un dessin .dxf, une surface .stl, une pièce .step\nou un maillage .msh ici, ou utilise l'outil « Importer »"
+            }
+        };
+        let (Some(open), Some(gpu)) = (self.view_mut(), frame.wgpu_render_state()) else {
             ui.painter().rect_filled(rect, 0.0, Color32::from_gray(242));
             ui.painter().text(
                 rect.center(),
                 Align2::CENTER_CENTER,
-                "Dépose un fichier .pvd ou .vtu ici,\nou ouvre-le avec l'outil « Ouvrir » (Résultats)",
+                invitation,
                 egui::FontId::proportional(18.0),
                 Color32::from_gray(110),
             );
@@ -236,7 +348,7 @@ impl App {
             return;
         }
         let tool = self.state.tool();
-        let mut to_open = None;
+        let mut todo = None;
         let mut hide = false;
         panel(
             "inspector",
@@ -275,11 +387,29 @@ impl App {
                         ui.label("Fichier .pvd ou .vtu :");
                         ui.text_edit_singleline(&mut self.path);
                         if ui.button("Ouvrir").clicked() && !self.path.trim().is_empty() {
-                            to_open = Some(PathBuf::from(self.path.trim()));
+                            todo = Some(Todo::Open(PathBuf::from(self.path.trim())));
                         }
                         ui.weak("Ou dépose-le sur la fenêtre.");
                     }
-                    Tool::Field | Tool::Deformation | Tool::Cut => match self.open.as_mut() {
+                    Tool::Import => {
+                        ui.label("Dessin .dxf, surface .stl, pièce .step ou maillage .msh :");
+                        ui.text_edit_singleline(&mut self.mesh_path);
+                        if ui.button("Importer").clicked() && !self.mesh_path.trim().is_empty() {
+                            todo = Some(Todo::Import(PathBuf::from(self.mesh_path.trim())));
+                        }
+                        ui.weak("Ou dépose-le sur la fenêtre.");
+                        if let Some(built) = &self.mesh.built {
+                            ui.separator();
+                            ui.label(mesh_space::summary(built));
+                        }
+                    }
+                    Tool::MeshSize => {
+                        if let Some(t) = mesh_size_tool(ui, &mut self.mesh) {
+                            todo = Some(t);
+                        }
+                    }
+                    Tool::Quality => quality_tool(ui, &self.mesh),
+                    Tool::Field | Tool::Deformation | Tool::Cut => match self.results.as_mut() {
                         Some(open) => results_tool(ui, tool, open),
                         None => {
                             ui.label("Ouvre d'abord un calcul (outil « Ouvrir »).");
@@ -301,8 +431,25 @@ impl App {
         if hide {
             self.state.inspector = false;
         }
-        if let Some(path) = to_open {
-            self.load(&path, frame);
+        match todo {
+            Some(Todo::Open(path)) => self.load(&path, frame),
+            Some(Todo::Import(path)) => self.import(&path, frame),
+            Some(Todo::Remesh) => self.remesh(frame),
+            Some(Todo::Save) => self.save(),
+            None => {}
+        }
+    }
+
+    /// Écrit le maillage à côté de la source, comme `maille mesh`.
+    fn save(&mut self) {
+        if let (Some(Imported::Cad(cad)), Some(built)) = (&self.mesh.imported, &self.mesh.built) {
+            match mesh_space::save(cad, built) {
+                Ok(path) => {
+                    self.mesh.note = Some(format!("Écrit : {}", path.display()));
+                    self.error = None;
+                }
+                Err(e) => self.error = Some(e.to_string()),
+            }
         }
     }
 
@@ -358,6 +505,116 @@ impl App {
             self.state.cards = false;
         }
     }
+}
+
+/// Montre `nodal` : une vue du viewer sur le device d'eframe, et sa texture côté egui.
+fn open_view(gpu: &RenderState, nodal: &NodalResults, path: &Path) -> Result<Open, Box<dyn Error>> {
+    let view = ResultsView::new(gpu.device.clone(), gpu.queue.clone(), nodal, [1, 1], 1.0)?;
+    let texture = gpu.renderer.write().register_native_texture(
+        &gpu.device,
+        &view.texture().create_view(&Default::default()),
+        wgpu::FilterMode::Linear,
+    );
+    Ok(Open {
+        view,
+        texture,
+        size: [1, 1],
+        name: path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        cut_axis: None,
+        cut_fraction: 0.5,
+        cut_flipped: false,
+    })
+}
+
+/// Libère la texture d'une vue remplacée.
+fn free_view(gpu: &RenderState, old: &Open) {
+    gpu.renderer.write().free_texture(&old.texture);
+}
+
+/// Inspecteur de la taille h : curseur, ordre des Elements, bouton Mailler, écriture du `.msh`.
+fn mesh_size_tool(ui: &mut egui::Ui, mesh: &mut MeshUi) -> Option<Todo> {
+    let Some(imported) = &mesh.imported else {
+        ui.label("Importe d'abord un dessin, une surface ou une pièce (outil « Importer »).");
+        return None;
+    };
+    let Imported::Cad(cad) = imported else {
+        ui.label("Un .msh est déjà maillé. Importe le dessin, la surface ou la pièce pour changer la taille.");
+        return None;
+    };
+    let mut todo = None;
+    ui.label(format!(
+        "{} ({})",
+        cad.path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        format_name(cad)
+    ));
+    ui.label("Taille h des Elements, dans les unités du fichier :");
+    let (lo, hi) = (cad.suggested / 8.0, cad.suggested * 4.0);
+    ui.add(egui::Slider::new(&mut mesh.size, lo..=hi).logarithmic(true));
+    ui.checkbox(
+        &mut mesh.quadratic,
+        "Elements du second ordre (Tri6, Tet10)",
+    );
+    if ui.button("Mailler").clicked() {
+        todo = Some(Todo::Remesh);
+    }
+    if let Some(built) = &mesh.built {
+        ui.separator();
+        ui.label(mesh_space::summary(built));
+        if let Some(unit) = &built.unit {
+            ui.label(format!(
+                "Unité du fichier STEP : {unit} (rien n'est converti)."
+            ));
+        }
+        if ui.button("Enregistrer le .msh").clicked() {
+            todo = Some(Todo::Save);
+        }
+    }
+    if let Some(note) = &mesh.note {
+        ui.weak(note);
+    }
+    todo
+}
+
+fn format_name(cad: &Cad) -> &'static str {
+    match cad.source {
+        Source::Dxf => "dessin DXF",
+        Source::Stl => "surface STL",
+        Source::Step => "pièce STEP",
+    }
+}
+
+/// Inspecteur de la qualité : ce que le viewer colorie, en chiffres.
+fn quality_tool(ui: &mut egui::Ui, mesh: &MeshUi) {
+    let Some(built) = &mesh.built else {
+        ui.label("Importe et maille d'abord une géométrie, ou importe un .msh.");
+        return;
+    };
+    let q = &built.quality;
+    ui.label(mesh_space::summary(built));
+    ui.separator();
+    ui.label(format!("Qualité minimale : {:.2}", q.min));
+    ui.label(format!("Qualité moyenne : {:.2}", q.mean));
+    if q.poor == 0 {
+        ui.colored_label(
+            Color32::from_rgb(90, 200, 120),
+            format!("Aucun Element sous {POOR}."),
+        );
+    } else {
+        ui.colored_label(
+            Color32::from_rgb(240, 180, 70),
+            format!(
+                "{} Element(s) sous {POOR} : le calcul y sera moins précis, réduire la taille h.",
+                q.poor
+            ),
+        );
+    }
+    ui.weak("1 : triangle équilatéral ou tétraèdre régulier. La vue colore le défaut de forme (1 − qualité) : rouge pour un Element écrasé, au pire Element de chaque Node.");
 }
 
 /// Couleurs des axes x, y, z (rouge, vert, bleu, comme partout).
@@ -523,7 +780,7 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         if let Some(path) = self.pending.take() {
-            self.load(&path, frame);
+            self.route(&path, frame);
         }
         let dropped = ctx.input(|i| {
             i.raw
@@ -533,7 +790,7 @@ impl eframe::App for App {
                 .next()
         });
         if let Some(path) = dropped {
-            self.load(&path, frame);
+            self.route(&path, frame);
         }
         if !ctx.egui_wants_keyboard_input() {
             let (fit, axis) = ctx.input(|i| {
@@ -559,7 +816,11 @@ impl eframe::App for App {
         self.card(&ctx);
         self.toolbar(&ctx);
         self.inspector(&ctx, frame);
-        if let Some(open) = &self.open {
+        let shown = match self.state.space {
+            Space::Results => &self.results,
+            _ => &self.mesh_view,
+        };
+        if let Some(open) = shown {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
                 "Maille — {}",
                 open.name

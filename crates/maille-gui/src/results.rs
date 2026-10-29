@@ -79,6 +79,7 @@ pub fn to_nodal(r: &VtuResults) -> Result<NodalResults, Box<dyn Error>> {
         stresses,
         temperatures,
         plastic_strains: array("plastic_strain", 1).unwrap_or_default().to_vec(),
+        distortion: Vec::new(),
         large_strain: r.large_strain,
     })
 }

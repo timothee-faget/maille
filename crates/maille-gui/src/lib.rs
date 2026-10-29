@@ -3,6 +3,8 @@
 //! `maille-viewer`. L'état de l'interface (`state`) est pur et testé ; `app` ne fait que l'afficher.
 
 mod app;
+pub mod mesh_space;
+pub mod quality;
 pub mod results;
 pub mod state;
 mod triad;
