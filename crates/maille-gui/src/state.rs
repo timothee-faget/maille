@@ -105,6 +105,10 @@ impl Tool {
                 | Tool::Field
                 | Tool::Deformation
                 | Tool::Cut
+                | Tool::Probe
+                | Tool::Increments
+                | Tool::Curve
+                | Tool::Capture
         )
     }
 }
@@ -204,6 +208,8 @@ pub struct Progress {
     /// Nombre de Sets de bord du maillage.
     pub sets: usize,
     pub results_open: bool,
+    /// Un Node a été désigné avec la sonde.
+    pub probed: bool,
     /// Espace Modèle : un Material, des BC, un chargement, et le nombre de diagnostics bloquants.
     pub material: bool,
     pub bcs: bool,
@@ -321,7 +327,12 @@ impl State {
                 };
                 vec![
                     step("Ouvrir un calcul", open, Tool::Open, false),
-                    step("Sonde, coupe ou courbe", Missing, Tool::Cut, true),
+                    step(
+                        "Sonde, coupe ou courbe",
+                        if self.progress.probed { Done } else { Missing },
+                        Tool::Probe,
+                        true,
+                    ),
                 ]
             }
         }
@@ -483,8 +494,6 @@ mod tests {
         ] {
             assert!(tool.available(), "{tool:?}");
         }
-        for tool in [Tool::Probe, Tool::VertexSets, Tool::Curve, Tool::Capture] {
-            assert!(!tool.available(), "{tool:?}");
-        }
+        assert!(!Tool::VertexSets.available());
     }
 }
