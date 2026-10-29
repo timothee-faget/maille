@@ -12,6 +12,8 @@ Chaque élément et chaque physique sont validés contre une solution analytique
 - Thermique stationnaire et transitoire (conduction, source, convection)
 - Couplage thermo-mécanique séquentiel (dilatation thermique)
 - Plasticité de von Mises en petites déformations (écrouissage isotrope linéaire)
+- Grandes déformations (Lagrangien total, Saint-Venant–Kirchhoff et néo-Hookéen), pression suiveuse
+- Contact sans frottement contre une surface rigide (plan, cylindre, sphère), en petites et grandes déformations
 - Pression sur une face, en 2D et en 3D
 - Solveur creux direct (Cholesky en ligne de ciel) et itératif (gradients conjugués préconditionnés), choisi
   selon la taille du problème
