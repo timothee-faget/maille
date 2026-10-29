@@ -97,6 +97,9 @@ impl Tool {
                 | Tool::Material
                 | Tool::Support
                 | Tool::Load
+                | Tool::Thermal
+                | Tool::Contact
+                | Tool::StepAmplitude
                 | Tool::Run
                 | Tool::Open
                 | Tool::Field
@@ -480,7 +483,7 @@ mod tests {
         ] {
             assert!(tool.available(), "{tool:?}");
         }
-        for tool in [Tool::Probe, Tool::VertexSets, Tool::Thermal, Tool::Contact] {
+        for tool in [Tool::Probe, Tool::VertexSets, Tool::Curve, Tool::Capture] {
             assert!(!tool.available(), "{tool:?}");
         }
     }

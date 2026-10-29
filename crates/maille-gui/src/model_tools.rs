@@ -2,11 +2,13 @@
 //! décident de rien d'autre que de ce qu'on affiche ; les règles sont dans `model_space`.
 
 use eframe::egui::{self, Color32};
-use maille_io::model::Physics;
-use maille_io::model::{DofDef, PlaneStateDef, PressureDef, ValueDef};
+use maille_io::model::{
+    ContactDef, ContactKind, ConvectionDef, DofDef, HeatSourceDef, PlaneStateDef, PressureDef,
+    ValueDef,
+};
 use maille_io::msh::CellKind;
 
-use crate::model_space::{physics_label, Diagnostic, Draft, Severity, UnitSystem};
+use crate::model_space::{Diagnostic, Draft, Severity, UnitSystem};
 use crate::state::Tool;
 
 /// Un formulaire « Set, DOF, valeur » pour ajouter une BC ou un Load.
@@ -34,6 +36,72 @@ pub struct Forms {
     pub load: ValueForm,
     pub pressure_set: String,
     pub pressure: f64,
+    /// Température imposée : `set` et `value` de la BC en `t`.
+    pub temperature: ValueForm,
+    pub heat_set: String,
+    pub heat: f64,
+    pub convection_set: String,
+    pub film: f64,
+    pub sink: f64,
+    pub contact: ContactForm,
+}
+
+/// Le formulaire d'un Contact : tous les paramètres des trois surfaces, on n'en garde que ceux du `kind`.
+#[derive(Debug, Clone)]
+pub struct ContactForm {
+    pub set: String,
+    pub kind: ContactKind,
+    pub point: [f64; 3],
+    pub normal: [f64; 3],
+    pub axis: [f64; 3],
+    pub center: [f64; 3],
+    pub radius: f64,
+    pub motion: [f64; 3],
+}
+
+impl Default for ContactForm {
+    fn default() -> Self {
+        Self {
+            set: String::new(),
+            kind: ContactKind::Plane,
+            point: [0.0; 3],
+            normal: [0.0, 1.0, 0.0],
+            axis: [0.0, 0.0, 1.0],
+            center: [0.0; 3],
+            radius: 1.0,
+            motion: [0.0; 3],
+        }
+    }
+}
+
+impl ContactForm {
+    /// Le Contact du formulaire pour un maillage de dimension `dim` (2 ou 3).
+    fn to_def(&self, dim: usize) -> ContactDef {
+        let v = |a: &[f64; 3]| Some(a[..dim].to_vec());
+        let (plane, cylinder, sphere) = (
+            self.kind == ContactKind::Plane,
+            self.kind == ContactKind::Cylinder,
+            self.kind == ContactKind::Sphere,
+        );
+        ContactDef {
+            set: self.set.clone(),
+            kind: self.kind,
+            point: (plane || cylinder).then(|| self.point[..dim].to_vec()),
+            normal: if plane { v(&self.normal) } else { None },
+            axis: if cylinder && dim == 3 {
+                v(&self.axis)
+            } else {
+                None
+            },
+            center: if sphere { v(&self.center) } else { None },
+            radius: (cylinder || sphere).then_some(self.radius),
+            motion: self
+                .motion
+                .iter()
+                .any(|m| *m != 0.0)
+                .then(|| self.motion[..dim].to_vec()),
+        }
+    }
 }
 
 /// Ce que le maillage dit au formulaire.
@@ -44,6 +112,14 @@ pub struct MeshInfo<'a> {
 }
 
 impl MeshInfo<'_> {
+    fn dim(&self) -> usize {
+        if self.planar() {
+            2
+        } else {
+            3
+        }
+    }
+
     fn planar(&self) -> bool {
         matches!(self.kind, CellKind::Tri3 | CellKind::Tri6)
     }
@@ -148,6 +224,37 @@ pub fn material_tool(ui: &mut egui::Ui, draft: &mut Draft, mesh: &MeshInfo) {
             );
             ui.label("Coefficient de Poisson ν :");
             ui.add(egui::DragValue::new(&mut m.poisson).speed(0.005));
+            let k = if units == UnitSystem::Si { 1e6 } else { 1.0 };
+            ui.separator();
+            ui.label("Propriétés facultatives :");
+            optional(ui, "conductivité k", &mut m.conductivity, 1.0);
+            optional(ui, "masse volumique ρ", &mut m.density, 1.0);
+            optional(ui, "chaleur massique c", &mut m.specific_heat, 1.0);
+            optional(ui, "dilatation α [1/K]", &mut m.expansion, 1.2e-5);
+            optional(
+                ui,
+                "limite élastique σy (plasticité)",
+                &mut m.yield_stress,
+                250.0 * k,
+            );
+            if m.yield_stress.is_some() {
+                let mut h = m.hardening.unwrap_or(0.0);
+                ui.horizontal(|ui| {
+                    ui.label(with_unit("écrouissage H", units.stress()));
+                    ui.add(
+                        egui::DragValue::new(&mut h)
+                            .speed(1.0)
+                            .range(0.0..=f64::MAX),
+                    );
+                });
+                m.hardening = Some(h);
+            }
+            ui.separator();
+            ui.checkbox(&mut draft.large, "Grandes déformations");
+            if draft.large {
+                ui.checkbox(&mut m.neo_hookean, "loi néo-hookéenne");
+            }
+            ui.separator();
             if ui.button("Retirer le Material").clicked() {
                 draft.material = None;
             }
@@ -297,12 +404,12 @@ pub fn load_tool(ui: &mut egui::Ui, draft: &mut Draft, mesh: &MeshInfo, forms: &
 /// on demande d'enregistrer.
 pub fn run_tool(
     ui: &mut egui::Ui,
-    physics: Option<Physics>,
+    calculation: Option<String>,
     diags: &[Diagnostic],
     note: Option<&str>,
 ) -> (bool, Option<Tool>) {
-    match physics {
-        Some(p) => ui.label(format!("Calcul déduit : {}", physics_label(p))),
+    match calculation {
+        Some(text) => ui.label(format!("Calcul déduit : {text}")),
         None => ui.weak("Calcul déduit : pas encore (il manque des BC ou un chargement)."),
     };
     ui.separator();
@@ -343,4 +450,287 @@ pub fn diagnostics_ui(ui: &mut egui::Ui, diags: &[Diagnostic], only: Option<Tool
         }
     }
     go
+}
+
+/// Une propriété facultative : une case, et sa valeur quand elle est cochée.
+fn optional(ui: &mut egui::Ui, label: &str, value: &mut Option<f64>, default: f64) {
+    ui.horizontal(|ui| {
+        let mut on = value.is_some();
+        if ui.checkbox(&mut on, label).changed() {
+            *value = on.then_some(default);
+        }
+        if let Some(v) = value {
+            let speed = (v.abs() * 0.01).max(1e-12);
+            ui.add(egui::DragValue::new(v).speed(speed));
+        }
+    });
+}
+
+/// Trois composantes (ou deux en 2D) d'un vecteur.
+fn vector(ui: &mut egui::Ui, label: &str, v: &mut [f64; 3], dim: usize) {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        for c in v.iter_mut().take(dim) {
+            ui.add(egui::DragValue::new(c).speed(0.05));
+        }
+    });
+}
+
+/// Inspecteur « Thermique » : températures imposées, sources, convections et couplage.
+pub fn thermal_tool(ui: &mut egui::Ui, draft: &mut Draft, mesh: &MeshInfo, forms: &mut Forms) {
+    if mesh.sets.is_empty() {
+        ui.weak("Maille d'abord, et crée des Sets (espace Maillage).");
+        return;
+    }
+    ui.label("Température imposée sur un Set :");
+    let mut remove = None;
+    for (i, b) in draft
+        .bcs
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| b.dof == DofDef::T)
+    {
+        ui.horizontal(|ui| {
+            ui.label(format!("{} · T = {}", b.set, b.value));
+            if ui.small_button("×").clicked() {
+                remove = Some(i);
+            }
+        });
+    }
+    if let Some(i) = remove.take() {
+        draft.bcs.remove(i);
+    }
+    ui.horizontal(|ui| {
+        set_picker(ui, "t-set", mesh.sets, &mut forms.temperature.set);
+        ui.add(egui::DragValue::new(&mut forms.temperature.value).speed(1.0));
+    });
+    if ui.button("Ajouter la température").clicked() && !forms.temperature.set.is_empty() {
+        draft.bcs.push(ValueDef {
+            set: forms.temperature.set.clone(),
+            dof: DofDef::T,
+            value: forms.temperature.value,
+        });
+    }
+    ui.separator();
+    ui.label("HeatSource (puissance volumique) :");
+    for (i, h) in draft.heat_sources.iter().enumerate() {
+        ui.horizontal(|ui| {
+            ui.label(format!("{} · {}", h.set, h.value));
+            if ui.small_button("×").clicked() {
+                remove = Some(i);
+            }
+        });
+    }
+    if let Some(i) = remove.take() {
+        draft.heat_sources.remove(i);
+    }
+    ui.horizontal(|ui| {
+        let mut sets = vec![maille_io::msh::DOMAIN_SET];
+        sets.extend_from_slice(mesh.sets);
+        set_picker(ui, "heat-set", &sets, &mut forms.heat_set);
+        ui.add(egui::DragValue::new(&mut forms.heat).speed(0.1));
+    });
+    if ui.button("Ajouter la HeatSource").clicked() && !forms.heat_set.is_empty() {
+        draft.heat_sources.push(HeatSourceDef {
+            set: forms.heat_set.clone(),
+            value: forms.heat,
+        });
+    }
+    ui.separator();
+    ui.label("Convection h (T − T∞) sur un bord :");
+    for (i, c) in draft.convections.iter().enumerate() {
+        ui.horizontal(|ui| {
+            ui.label(format!("{} · h = {}, T∞ = {}", c.set, c.film, c.sink));
+            if ui.small_button("×").clicked() {
+                remove = Some(i);
+            }
+        });
+    }
+    if let Some(i) = remove {
+        draft.convections.remove(i);
+    }
+    set_picker(ui, "conv-set", mesh.sets, &mut forms.convection_set);
+    ui.horizontal(|ui| {
+        ui.label("h");
+        ui.add(egui::DragValue::new(&mut forms.film).speed(0.1));
+        ui.label("T∞");
+        ui.add(egui::DragValue::new(&mut forms.sink).speed(1.0));
+    });
+    if ui.button("Ajouter la Convection").clicked() && !forms.convection_set.is_empty() {
+        draft.convections.push(ConvectionDef {
+            set: forms.convection_set.clone(),
+            film: forms.film,
+            sink: forms.sink,
+        });
+    }
+    ui.separator();
+    let mut coupled = draft.reference_temperature.is_some();
+    if ui
+        .checkbox(&mut coupled, "Dilater la pièce par les températures")
+        .on_hover_text(
+            "Couplage thermo-mécanique : le thermique, puis le mécanique avec α (T − T_ref)",
+        )
+        .changed()
+    {
+        draft.reference_temperature = coupled.then_some(20.0);
+    }
+    if let Some(reference) = &mut draft.reference_temperature {
+        ui.horizontal(|ui| {
+            ui.label("T_ref (sans contrainte)");
+            ui.add(egui::DragValue::new(reference).speed(1.0));
+        });
+    }
+}
+
+/// Inspecteur « Contact » : Nodes d'un bord contre une surface rigide, dessinée dans la vue.
+pub fn contact_tool(ui: &mut egui::Ui, draft: &mut Draft, mesh: &MeshInfo, form: &mut ContactForm) {
+    if mesh.sets.is_empty() {
+        ui.weak("Maille d'abord, et crée des Sets (espace Maillage).");
+        return;
+    }
+    ui.label("Sans frottement, contre une surface rigide (pénalité). Elle est dessinée en orange.");
+    ui.separator();
+    let mut remove = None;
+    for (i, c) in draft.contacts.iter().enumerate() {
+        ui.horizontal(|ui| {
+            ui.label(format!("{} · {:?}", c.set, c.kind));
+            if ui.small_button("×").clicked() {
+                remove = Some(i);
+            }
+        });
+    }
+    if let Some(i) = remove {
+        draft.contacts.remove(i);
+    }
+    ui.separator();
+    ui.label("Ajouter :");
+    let dim = mesh.dim();
+    set_picker(ui, "contact-set", mesh.sets, &mut form.set);
+    let three_d = dim == 3;
+    ui.horizontal(|ui| {
+        ui.radio_value(&mut form.kind, ContactKind::Plane, "plan");
+        ui.radio_value(
+            &mut form.kind,
+            ContactKind::Cylinder,
+            if three_d { "cylindre" } else { "cercle" },
+        );
+        if three_d {
+            ui.radio_value(&mut form.kind, ContactKind::Sphere, "sphère");
+        }
+    });
+    if !three_d && form.kind == ContactKind::Sphere {
+        form.kind = ContactKind::Cylinder;
+    }
+    match form.kind {
+        ContactKind::Plane => {
+            vector(ui, "point", &mut form.point, dim);
+            vector(ui, "normale (vers la pièce)", &mut form.normal, dim);
+        }
+        ContactKind::Cylinder => {
+            vector(
+                ui,
+                if three_d { "point de l'axe" } else { "centre" },
+                &mut form.point,
+                dim,
+            );
+            if three_d {
+                vector(ui, "axe", &mut form.axis, dim);
+            }
+        }
+        ContactKind::Sphere => vector(ui, "centre", &mut form.center, dim),
+    }
+    if form.kind != ContactKind::Plane {
+        ui.horizontal(|ui| {
+            ui.label("rayon");
+            ui.add(
+                egui::DragValue::new(&mut form.radius)
+                    .speed(0.05)
+                    .range(0.0..=f64::MAX),
+            );
+        });
+    }
+    vector(ui, "déplacement à λ = 1", &mut form.motion, dim);
+    if ui.button("Ajouter le Contact").clicked() && !form.set.is_empty() {
+        draft.contacts.push(form.to_def(dim));
+    }
+}
+
+/// Inspecteur « Step, Amplitude » : le quasi-statique (avec son amplitude) et le transitoire thermique.
+pub fn step_tool(ui: &mut egui::Ui, draft: &mut Draft) {
+    let mut on = draft.quasi_step.is_some();
+    if ui.checkbox(&mut on, "Step quasi-statique").changed() {
+        draft.quasi_step = on.then(Draft::default_quasi_step);
+    }
+    if let Some(step) = &mut draft.quasi_step {
+        ui.horizontal(|ui| {
+            ui.label("durée");
+            ui.add(
+                egui::DragValue::new(&mut step.duration)
+                    .speed(0.05)
+                    .range(0.0..=f64::MAX),
+            );
+            ui.label("incréments");
+            ui.add(egui::DragValue::new(&mut step.increments).range(1..=100_000));
+        });
+        let mut custom = step.amplitude.is_some();
+        if ui
+            .checkbox(&mut custom, "Amplitude λ(t) personnalisée")
+            .on_hover_text("Sans elle : une rampe de 0 à 1 sur la durée")
+            .changed()
+        {
+            step.amplitude = custom.then(|| vec![[0.0, 0.0], [step.duration, 1.0]]);
+        }
+        if let Some(points) = &mut step.amplitude {
+            let mut remove = None;
+            for (i, p) in points.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label("t");
+                    ui.add(egui::DragValue::new(&mut p[0]).speed(0.05));
+                    ui.label("λ");
+                    ui.add(egui::DragValue::new(&mut p[1]).speed(0.05));
+                    if ui.small_button("×").clicked() {
+                        remove = Some(i);
+                    }
+                });
+            }
+            if let Some(i) = remove {
+                points.remove(i);
+            }
+            if ui.button("Ajouter un point").clicked() {
+                let last = points.last().map_or(0.0, |p| p[0]);
+                points.push([last + 1.0, 1.0]);
+            }
+        }
+    }
+    ui.separator();
+    let mut thermal = draft.thermal_step.is_some();
+    if ui.checkbox(&mut thermal, "Transitoire thermique").changed() {
+        draft.thermal_step = thermal.then(Draft::default_thermal_step);
+    }
+    if let Some(t) = &mut draft.thermal_step {
+        ui.horizontal(|ui| {
+            ui.label("durée");
+            ui.add(
+                egui::DragValue::new(&mut t.duration)
+                    .speed(1.0)
+                    .range(0.0..=f64::MAX),
+            );
+            ui.label("incréments");
+            ui.add(egui::DragValue::new(&mut t.increments).range(1..=100_000));
+        });
+        ui.horizontal(|ui| {
+            ui.label("T initiale");
+            ui.add(egui::DragValue::new(&mut t.initial_temperature).speed(1.0));
+        });
+        let mut theta = t.theta.unwrap_or(1.0);
+        ui.horizontal(|ui| {
+            ui.label("θ (1 : Euler implicite, 0,5 : Crank-Nicolson)");
+            ui.add(
+                egui::DragValue::new(&mut theta)
+                    .speed(0.05)
+                    .range(0.0..=1.0),
+            );
+        });
+        t.theta = ((theta - 1.0).abs() > f64::EPSILON).then_some(theta);
+    }
 }
