@@ -1,0 +1,51 @@
+# Tube épais chauffé de l'intérieur, en un seul fichier : le calcul thermique, puis le calcul
+# mécanique dilaté par ses températures. Même cas que tube_thermique.toml + tube_contraintes.toml
+# (solution de Timoshenko et Goodier).
+#
+# Pas de `analysis` : le calcul se déduit du contenu. Des BC en `t` donnent une partie thermique,
+# des BC en `ux`/`uy` une partie mécanique, et `[temperatures]` sans `from` les couple.
+#
+# Lancer : maille solve tube_thermomeca.toml
+# Écrit tube_thermomeca_thermal.pvd (les températures) et tube_thermomeca.pvd (les contraintes).
+
+units = "N, mm, MPa, K, W"
+mesh = "tube.msh"
+
+[materials.acier]
+young = 210e3
+poisson = 0.3
+expansion = 1.2e-5          # coefficient de dilatation α, en 1/K
+conductivity = 0.05
+
+[[sections]]
+set = "domaine"
+material = "acier"
+plane_state = "strain"
+
+# Partie thermique : 120 °C à l'intérieur, 20 °C à l'extérieur (régime stationnaire, sans
+# [thermal_step]).
+[[bcs]]
+set = "interieur"
+dof = "t"
+value = 120.0
+
+[[bcs]]
+set = "exterieur"
+dof = "t"
+value = 20.0
+
+# Partie mécanique : symétries du quart de section, en appui glissant ; surfaces libres.
+[[bcs]]
+set = "sym_x"
+dof = "uy"
+value = 0.0
+
+[[bcs]]
+set = "sym_y"
+dof = "ux"
+value = 0.0
+
+# Couplage : sans `from`, les températures sont celles de la partie thermique de ce fichier.
+[temperatures]
+increment = "last"          # "last" ou un indice entier, depuis 0
+reference = 20.0            # T_ref : température sans contrainte

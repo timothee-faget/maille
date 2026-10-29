@@ -9,6 +9,7 @@ use maille_core::model::{
     Amplitude, Analysis, Bc, Convection, HeatSource, Kinematics, Load, Model, Pressure, Step,
 };
 
+use super::physics::analysis_of;
 use super::schema::*;
 use super::{Loaded, Run};
 use crate::msh::{CellKind, MshFile, Set};
@@ -33,11 +34,12 @@ pub fn build(
                 .to_string(),
         ));
     }
+    let kind = analysis_of(file)?;
     match (&file.temperatures, temperatures) {
         (Some(def), None) => {
             return Err(invalid(format!(
                 "[temperatures] demande les températures de {} : les lire (vtk::read_point_data) et les passer à build",
-                def.from
+                def.from.as_deref().unwrap_or("la partie thermique du modèle")
             )))
         }
         (None, Some(_)) => {
@@ -48,7 +50,7 @@ pub fn build(
         }
         _ => {}
     }
-    let analysis = match file.analysis {
+    let analysis = match kind {
         AnalysisKind::Static => Analysis::Static,
         AnalysisKind::Thermal => Analysis::Thermal,
     };
@@ -144,7 +146,7 @@ pub fn build(
                 mesh.kind.dim(),
             )?);
         }
-        if file.analysis != AnalysisKind::Static
+        if kind != AnalysisKind::Static
             || !matches!(
                 file.step.as_ref().map(|s| s.kind),
                 Some(StepKind::QuasiStatic)
@@ -160,11 +162,11 @@ pub fn build(
 
     let run = match &file.step {
         None => Run::Linear,
-        Some(def) => step(def, file.analysis, mesh.nodes.len())?,
+        Some(def) => step(def, kind, mesh.nodes.len())?,
     };
     let large_strain = file.kinematics == Some(KinematicsDef::Large);
     if large_strain {
-        if file.analysis != AnalysisKind::Static {
+        if kind != AnalysisKind::Static {
             return Err(invalid(
                 "kinematics = \"large\" demande analysis = \"static\"".to_string(),
             ));

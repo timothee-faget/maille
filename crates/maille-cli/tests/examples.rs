@@ -753,6 +753,64 @@ fn tube_thermal_stresses_follow_timoshenko() {
     assert!(rms < 3e-3, "erreur RMS {rms:.2e}");
 }
 
+/// Le tube thermo-mécanique en un seul fichier donne les mêmes températures et les mêmes contraintes
+/// que les deux fichiers enchaînés (donc Timoshenko et Goodier, vérifié ci-dessus).
+#[test]
+fn tube_in_one_file_matches_the_two_file_chain() {
+    let w = Workdir::new("tube-un-fichier");
+    w.solve("tube_thermique.toml");
+    w.solve("tube_contraintes.toml");
+    w.solve("tube_thermomeca.toml");
+
+    let (_, chain_t) = w.results("tube_thermique.pvd", None);
+    let (_, one_t) = w.results("tube_thermomeca_thermal.pvd", None);
+    let (_, chain_s) = w.results("tube_contraintes.pvd", None);
+    let (_, one_s) = w.results("tube_thermomeca.pvd", None);
+    for (name, a, b) in [
+        ("temperature", &chain_t, &one_t),
+        ("stress", &chain_s, &one_s),
+        ("displacement", &chain_s, &one_s),
+    ] {
+        let (x, y) = (array(a, name), array(b, name));
+        assert_eq!(x.len(), y.len(), "{name}");
+        let scale = x.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+        for (u, v) in x.iter().zip(y) {
+            assert!((u - v).abs() <= 1e-9 * scale, "{name} : {u} contre {v}");
+        }
+    }
+}
+
+/// Avec `[thermal_step]`, le thermique est transitoire et le mécanique prend l'Increment choisi : à
+/// un temps très long devant la diffusion, il retrouve les contraintes du régime stationnaire.
+#[test]
+fn coupled_tube_with_a_thermal_step_reaches_the_steady_stresses() {
+    let w = Workdir::new("tube-transitoire");
+    w.solve("tube_thermomeca.toml");
+    let (_, steady) = w.results("tube_thermomeca.pvd", None);
+
+    let text = fs::read_to_string(w.0.join("tube_thermomeca.toml")).unwrap();
+    let text = text.replace(
+        "conductivity = 0.05",
+        "conductivity = 0.05\ndensity = 1.0\nspecific_heat = 1.0",
+    )
+        + "\n[thermal_step]\nduration = 2e5\nincrements = 20\ninitial_temperature = 20.0\n";
+    fs::write(w.0.join("tube_transitoire.toml"), text).unwrap();
+    w.solve("tube_transitoire.toml");
+    let thermal =
+        read_pvd(&fs::read_to_string(w.0.join("tube_transitoire_thermal.pvd")).unwrap()).unwrap();
+    assert_eq!(
+        thermal.len(),
+        21,
+        "un Increment par pas, plus l'état initial"
+    );
+    let (_, r) = w.results("tube_transitoire.pvd", None);
+    let (a, b) = (array(&r, "stress"), array(&steady, "stress"));
+    let scale = b.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+    for (u, v) in a.iter().zip(b) {
+        assert!((u - v).abs() < 1e-3 * scale, "{u} contre {v}");
+    }
+}
+
 #[test]
 fn tube_under_pressure_follows_lame() {
     let w = Workdir::new("tube-pression");

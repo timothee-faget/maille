@@ -6,6 +6,7 @@
 //! et le `.vtu` (`TemperaturesDef::pick`, `vtk::read_point_data`) et passe les températures à `build`.
 
 mod build;
+mod physics;
 mod schema;
 
 use maille_core::mesh::Mesh;
@@ -15,6 +16,7 @@ use crate::vtk::Entry;
 use crate::IoError;
 
 pub use build::build;
+pub use physics::{physics, split, Physics};
 pub use schema::*;
 
 /// Lit un fichier de modèle. Les erreurs de syntaxe donnent la ligne et la colonne ; une clé
@@ -56,7 +58,14 @@ pub enum Run {
 impl TemperaturesDef {
     /// Incrément du calcul thermique choisi par `increment` parmi ceux du `.pvd`.
     pub fn pick<'a>(&self, entries: &'a [Entry]) -> Result<&'a Entry, IoError> {
-        let last = entries.len().saturating_sub(1);
+        let source = self.from.as_deref().unwrap_or("le calcul thermique");
+        Ok(&entries[self.index(entries.len(), source)?])
+    }
+
+    /// Rang de l'Increment choisi parmi `count` Increments d'un calcul thermique, `source` nommant
+    /// le fichier ou le calcul pour le message d'erreur.
+    pub fn index(&self, count: usize, source: &str) -> Result<usize, IoError> {
+        let last = count.saturating_sub(1);
         let index = match &self.increment {
             None => last,
             Some(IncrementDef::Name(n)) if n == "last" => last,
@@ -69,12 +78,13 @@ impl TemperaturesDef {
             }
             Some(IncrementDef::Index(i)) => *i,
         };
-        entries.get(index).ok_or_else(|| IoError::InvalidModel {
-            problem: format!(
-                "[temperatures] increment = {index} : {} contient {} incrément(s), numérotés depuis 0",
-                self.from,
-                entries.len()
-            ),
-        })
+        if index >= count {
+            return Err(IoError::InvalidModel {
+                problem: format!(
+                    "[temperatures] increment = {index} : {source} contient {count} incrément(s), numérotés depuis 0"
+                ),
+            });
+        }
+        Ok(index)
     }
 }
