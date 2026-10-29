@@ -4,6 +4,8 @@
 
 mod app;
 pub mod mesh_space;
+pub mod model_space;
+mod model_tools;
 pub mod quality;
 pub mod results;
 pub mod sets;
