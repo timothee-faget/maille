@@ -11,7 +11,7 @@ maillage (.msh) ──┐
                   ├─ maille solve ──▶ résultats (.pvd + .vtu) ──▶ maille view / ParaView
 modèle (.toml) ───┘                                  │
         ▲                                            │
-        └──── [temperatures] (un calcul lit les résultats thermiques d'un autre)
+        └──── [temperatures] (un calcul lit les résultats thermiques d'un autre, ou d'un même fichier)
 ```
 
 Depuis ce dossier :
@@ -26,7 +26,8 @@ maille view trempe.pvd 50         # un incrément précis, depuis 0
 |---|---|---|
 | `traction` | plaque en contraintes planes, Tri6 | champ linéaire |
 | `trempe` | thermique transitoire, 200 incréments | série de Fourier |
-| `tube_thermique` puis `tube_contraintes` | couplage thermo-mécanique (lancer dans cet ordre) | Timoshenko et Goodier |
+| `tube_thermomeca` | couplage thermo-mécanique en un seul fichier (thermique, puis mécanique) | Timoshenko et Goodier |
+| `tube_thermique` puis `tube_contraintes` | le même couplage en deux fichiers (lancer dans cet ordre) | Timoshenko et Goodier |
 | `tube_pression` | pression sur un bord, déformations planes | Lamé |
 | `console_gd` | grandes déformations (`kinematics = "large"`) : console élancée, l'elastica ; Tri6 | elastica d'Euler (Bisshopp et Drucker) |
 | `hertz` | contact : un cylindre rigide dans un bloc d'acier, déformations planes ; le maillage resserré vient des tests (`hertz.msh`) | Hertz (demi-largeur de contact, pression maximale) |
@@ -144,7 +145,8 @@ Une clé inconnue ou mal écrite est une erreur, avec la ligne et la colonne. Le
 
 | Clé | Rôle |
 |---|---|
-| `units`, `mesh`, `analysis` | obligatoires ; `analysis` vaut `"static"` ou `"thermal"` |
+| `units`, `mesh` | obligatoires |
+| `analysis` | facultative : `"static"` ou `"thermal"`. Sans elle, le calcul se déduit du contenu : des BC ou des chargements thermiques (`t`, `[[heat_sources]]`, `[[convections]]`) donnent un calcul thermique, des BC ou des efforts mécaniques (`ux`, `uy`, `uz`, `[[pressures]]`, `[[contacts]]`) un calcul statique, et les deux un **calcul couplé** (voir `[temperatures]`) |
 | `kinematics` | `"small"` (défaut) ou `"large"` : grandes déformations (Lagrangien total), analyse statique avec `[step]` `kind = "quasi_static"` ; triangles en déformations planes et tétraèdres, sans plasticité ni `[temperatures]` |
 | `[materials.nom]` | `young`, `poisson`, `conductivity`, `density`, `specific_heat`, `expansion`, `yield_stress` + `hardening` pour la plasticité de von Mises, et `hyperelasticity = "neo_hookean"` (grandes déformations ; Saint-Venant–Kirchhoff sans elle) |
 | `[[sections]]` | `set`, `material` ; triangles : `thickness` (1 par défaut) et `plane_state` (`"stress"` ou `"strain"`, obligatoire en statique). Tout Element a exactement une section |
@@ -154,8 +156,13 @@ Une clé inconnue ou mal écrite est une erreur, avec la ligne et la colonne. Le
 | `[[convections]]` | `set` de bord, `film` (h) et `sink` (T∞) |
 | `[[pressures]]` | `set` de bord, `value` : une pression positive comprime (contre la normale sortante), négative elle tire. Statique, triangles et tétraèdres ; en grandes déformations, elle reste normale à la face déformée |
 | `[[contacts]]` | contact sans frottement d'un bord contre une surface rigide : `set` (bord du corps), `kind` (`"plane"`, `"cylinder"` ou `"sphere"`), et selon `kind` : `point` + `normal` (plan), `point` + `radius` (cylindre ; en 3D aussi `axis`), `center` + `radius` (sphère, 3D) ; `motion` : déplacement de la surface à λ = 1 (nul par défaut). Les vecteurs ont 2 ou 3 composantes comme le maillage. Demande `analysis = "static"` et `[step] kind = "quasi_static"` ; petites ou grandes déformations. Pénalité automatique |
-| `[temperatures]` | couplage : `from` (un `.pvd` thermique sur le même maillage), `increment`, `reference` (T_ref) |
-| `[step]` | absent : calcul linéaire. Sinon `kind`, `duration`, `increments` |
+| `[temperatures]` | couplage : `reference` (T_ref) et `increment` (`"last"` ou un indice depuis 0). Avec `from` (un `.pvd` thermique sur le même maillage), les températures viennent d'un autre calcul ; **sans `from`**, elles viennent de la partie thermique du même fichier, calculée d'abord |
+| `[step]` | absent : calcul linéaire. Sinon `kind`, `duration`, `increments`. Dans un calcul couplé, c'est la Step du mécanique (`quasi_static`) |
+| `[thermal_step]` | calcul couplé seulement : le thermique transitoire (`duration`, `increments`, `initial_temperature`, `theta` optionnel). Absent : le thermique est stationnaire |
+
+Un calcul couplé écrit deux jeux de résultats : `<préfixe>_thermal.pvd` (les températures) et
+`<préfixe>.pvd` (le calcul mécanique dilaté). Les BC et chargements se partagent selon leur DOF : `t`
+va au thermique, `ux`, `uy`, `uz` au mécanique ; les `[[sections]]` et `[materials]` servent aux deux.
 
 `[step]` :
 - `kind = "transient"` (analyse thermique) : `initial_temperature` obligatoire, `theta` optionnel

@@ -4,7 +4,7 @@
 //! ```toml
 //! units = "N, mm, MPa"            # obligatoire, texte libre, recopié dans les résultats
 //! mesh  = "tube.msh"
-//! analysis = "static"             # ou "thermal"
+//! analysis = "static"             # ou "thermal" ; facultative : sans elle, déduite du contenu
 //! kinematics = "small"            # ou "large" : grandes déformations (statique, avec [step])
 //!
 //! [materials.acier]
@@ -45,7 +45,9 @@ pub struct ModelFile {
     pub units: String,
     /// Nom du fichier de maillage `.msh`, ouvert par le CLI.
     pub mesh: String,
-    pub analysis: AnalysisKind,
+    /// Facultative : sans elle, le calcul se déduit du contenu (voir `physics`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub analysis: Option<AnalysisKind>,
     /// Cinématique du calcul statique, petites déformations par défaut.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kinematics: Option<KinematicsDef>,
@@ -73,6 +75,10 @@ pub struct ModelFile {
     /// Sans `[step]` : calcul linéaire.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub step: Option<StepDef>,
+    /// Calcul couplé seulement : le thermique transitoire qui précède le mécanique ; sans lui, le
+    /// thermique est stationnaire.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thermal_step: Option<ThermalStepDef>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -239,12 +245,27 @@ pub struct StepDef {
     pub amplitude: Option<Vec<[f64; 2]>>,
 }
 
+/// `[thermal_step]` : le transitoire thermique d'un calcul couplé (mêmes clés que `[step]` transitoire).
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ThermalStepDef {
+    pub duration: f64,
+    pub increments: usize,
+    /// 1 par défaut (Euler implicite).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub theta: Option<f64>,
+    /// Obligatoire : température uniforme au départ.
+    pub initial_temperature: f64,
+}
+
 /// `[temperatures]` : champ de températures lu dans un fichier de résultats thermiques (`.pvd`).
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TemperaturesDef {
-    /// Fichier `.pvd` du calcul thermique, sur le même maillage.
-    pub from: String,
+    /// Fichier `.pvd` du calcul thermique, sur le même maillage. Sans `from`, le modèle a sa propre
+    /// partie thermique (calcul couplé) et `increment` choisit parmi ses Increments.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
     /// `"last"` (par défaut) ou l'indice de l'incrément, depuis 0.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub increment: Option<IncrementDef>,
