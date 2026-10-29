@@ -25,6 +25,23 @@ pub use scene::NodalResults;
 use maille_core::mesh::Mesh;
 use maille_core::results::Field;
 
+/// Intervalle (min, max) du champ de rang `quantity` (même numérotation que `Shot::quantity`) : pour
+/// garder la même légende sur plusieurs Increments.
+pub fn quantity_range(
+    results: &NodalResults,
+    quantity: usize,
+) -> Result<(f64, f64), Box<dyn std::error::Error>> {
+    let scene = scene::Scene::from_nodal(results)?;
+    let quantities = scene.quantities();
+    let q = quantities.get(quantity).ok_or_else(|| {
+        format!(
+            "champ {quantity} : ce résultat en propose {}, numérotés depuis 0",
+            quantities.len()
+        )
+    })?;
+    Ok(scene::range(&scene.values(*q)))
+}
+
 /// Ouvre une fenêtre sur le Mesh et son Field ; rend la main quand la fenêtre est fermée.
 /// Erreur si le Mesh n'est pas fait de triangles ou de tétraèdres, ou si aucune carte graphique n'est
 /// utilisable.
@@ -357,6 +374,80 @@ mod tests {
         let near = view.project([0.0, 0.0, 1.0]);
         assert!(right[0] > p[0] && up[1] < p[1]);
         assert!(near[2] < p[2]);
+    }
+
+    /// Le cube, avec des déplacements multipliés par `k` : un autre Increment du même maillage.
+    fn scaled(k: f64) -> NodalResults {
+        let mut r = cube_results();
+        for u in &mut r.displacements {
+            *u = u.map(|c| c * k);
+        }
+        r
+    }
+
+    #[test]
+    fn another_increment_replaces_the_fields_and_keeps_the_view() {
+        let shot = Shot::default();
+        let Some(mut view) = embedded(&scaled(1.0), [shot.width, shot.height]) else {
+            return;
+        };
+        view.set_quantity(7);
+        view.look_along(0);
+        view.set_results(&scaled(2.0)).unwrap();
+        assert_eq!(view.quantity(), 7, "le champ choisi est gardé");
+        // même image qu'une vue neuve sur le second Increment, réglée de la même façon
+        let Some(mut fresh) = embedded(&scaled(2.0), [shot.width, shot.height]) else {
+            return;
+        };
+        fresh.set_quantity(7);
+        fresh.look_along(0);
+        assert_eq!(view.pixels(), fresh.pixels());
+    }
+
+    #[test]
+    fn a_locked_range_keeps_the_same_colours_between_increments() {
+        let shot = Shot::default();
+        let (lo, hi) = quantity_range(&scaled(1.0), 7).unwrap();
+        let (_, hi2) = quantity_range(&scaled(2.0), 7).unwrap();
+        assert!(
+            lo < hi && (hi2 - 2.0 * hi).abs() < 1e-9 * hi2,
+            "|u| double avec les déplacements"
+        );
+        let Some(mut small) = embedded(&scaled(1.0), [shot.width, shot.height]) else {
+            return;
+        };
+        small.set_quantity(7);
+        small.look_along(0);
+        let own = small.pixels();
+        small.set_range_lock(Some((lo, hi2)));
+        assert_ne!(small.pixels(), own, "la légende suit l'intervalle imposé");
+        small.set_range_lock(None);
+        assert_eq!(small.pixels(), own);
+        assert!(quantity_range(&scaled(1.0), 99).is_err());
+    }
+
+    #[test]
+    fn the_png_of_a_view_has_the_size_of_its_texture() {
+        let Some(mut view) = embedded(&cube_results(), [320, 200]) else {
+            return;
+        };
+        let png = view.png().unwrap();
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+        // IHDR : largeur puis hauteur
+        assert_eq!(u32::from_be_bytes(png[16..20].try_into().unwrap()), 320);
+        assert_eq!(u32::from_be_bytes(png[20..24].try_into().unwrap()), 200);
+    }
+
+    #[test]
+    fn node_positions_follow_the_deformation() {
+        let Some(mut view) = embedded(&scaled(1.0), [300, 200]) else {
+            return;
+        };
+        let rest = view.node_positions();
+        view.set_deformed(true);
+        let moved = view.node_positions();
+        assert_eq!(rest.len(), moved.len());
+        assert_ne!(rest, moved);
     }
 
     #[test]

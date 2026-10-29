@@ -29,6 +29,9 @@ pub struct Display {
     pub cut: Option<Cut>,
     /// Triangles surlignés (sélection), par-dessus le Mesh non déformé.
     pub highlight: Vec<[[f64; 3]; 3]>,
+    /// Intervalle de la légende imposé (animation : la même échelle à chaque Increment) ; sinon celui
+    /// des valeurs affichées.
+    pub range_lock: Option<(f64, f64)>,
 }
 
 impl Display {
@@ -42,6 +45,7 @@ impl Display {
             follow_window: true,
             cut: None,
             highlight: Vec::new(),
+            range_lock: None,
         }
     }
 
@@ -81,7 +85,7 @@ impl Display {
     /// Envoie au GPU la géométrie, le champ, la caméra et la légende courants.
     pub fn refresh(&self, renderer: &mut Renderer) {
         let values = self.scene.values(self.quantity);
-        let (lo, hi) = range(&values);
+        let (lo, hi) = self.range_lock.unwrap_or_else(|| range(&values));
         let scale = self.deformation_scale();
         let positions = self.scene.positions(scale);
 

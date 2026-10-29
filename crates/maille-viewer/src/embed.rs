@@ -193,6 +193,47 @@ impl ResultsView {
         self.refresh();
     }
 
+    /// Remplace les champs par ceux d'un autre Increment du même maillage (animation) : le champ
+    /// affiché, la déformée, la coupe, la colormap et la caméra sont gardés. Mêmes erreurs que `new`.
+    pub fn set_results(&mut self, results: &NodalResults) -> Result<(), Box<dyn Error>> {
+        let scene = Scene::from_nodal(results)?;
+        self.display.scene = scene;
+        let quantities = self.display.scene.quantities();
+        if !quantities.contains(&self.display.quantity) {
+            self.display.quantity = quantities[0];
+        }
+        if self.display.follow_window {
+            self.display.refit(&self.renderer);
+        }
+        self.refresh();
+        Ok(())
+    }
+
+    /// Impose l'intervalle de la légende (`None` : celui des valeurs affichées).
+    pub fn set_range_lock(&mut self, range: Option<(f64, f64)>) {
+        self.display.range_lock = range;
+        self.refresh();
+    }
+
+    /// Position affichée de chaque Node (déformée comprise si on la montre), dans les coordonnées de
+    /// la pièce : ce que `project` attend.
+    pub fn node_positions(&self) -> Vec<[f64; 3]> {
+        self.display
+            .scene
+            .positions(self.display.deformation_scale())
+    }
+
+    /// L'image courante en PNG : les mêmes pixels que `maille view --png` à cette taille.
+    pub fn png(&mut self) -> Result<Vec<u8>, Box<dyn Error>> {
+        let pixels = self.renderer.render_pixels()?;
+        let [width, height] = self.renderer.size();
+        Ok(crate::png::encode(
+            (width.round() as u32).max(1),
+            (height.round() as u32).max(1),
+            &pixels,
+        ))
+    }
+
     /// Passe à la colormap suivante.
     pub fn next_colormap(&mut self) {
         self.display.colormap = self.display.colormap.next();
