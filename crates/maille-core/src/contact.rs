@@ -26,6 +26,9 @@ pub enum RigidSurface {
         axis: [f64; 3],
         radius: f64,
     },
+    /// Sphère pleine de rayon `radius` ; le corps est à l'extérieur. g = distance au centre − radius.
+    /// Maillages 3D seulement : en 2D, le cercle est un `Cylinder`.
+    Sphere { center: [f64; 3], radius: f64 },
 }
 
 /// Contact entre les Nodes esclaves d'un bord et une surface rigide.
@@ -85,6 +88,17 @@ impl RigidSurface {
                     return bad("l'axe du cylindre est nul");
                 }
             }
+            Self::Sphere { center, radius } => {
+                if dim == 2 {
+                    return bad("la sphère n'existe pas dans un maillage 2D : le cercle s'y écrit RigidSurface::Cylinder");
+                }
+                if !finite(center) || !radius.is_finite() {
+                    return bad("la sphère a une valeur non finie");
+                }
+                if *radius <= 0.0 {
+                    return bad("le rayon de la sphère doit être strictement positif");
+                }
+            }
         }
         Ok(())
     }
@@ -92,6 +106,31 @@ impl RigidSurface {
     /// Interstice du point `x` (z = 0 en 2D).
     pub(crate) fn gap(&self, x: [f64; 3], dim: usize) -> Gap {
         match *self {
+            Self::Sphere { center, radius } => {
+                let d = [x[0] - center[0], x[1] - center[1], x[2] - center[2]];
+                let distance = dot(&d, &d).sqrt();
+                if distance < 1e-300 {
+                    // au centre : pas de direction de poussée
+                    return Gap {
+                        g: -radius,
+                        n: [0.0; 3],
+                        dn: [[0.0; 3]; 3],
+                    };
+                }
+                let n = d.map(|v| v / distance);
+                // ∂n/∂x = (I − n ⊗ n) / distance
+                let dn = std::array::from_fn(|i| {
+                    std::array::from_fn(|j| {
+                        let delta = if i == j { 1.0 } else { 0.0 };
+                        (delta - n[i] * n[j]) / distance
+                    })
+                });
+                Gap {
+                    g: distance - radius,
+                    n,
+                    dn,
+                }
+            }
             Self::Plane { point, normal } => {
                 let mut normal = normal;
                 if dim == 2 {
@@ -177,7 +216,7 @@ fn element_size(mesh: &Mesh, i: usize) -> f64 {
 }
 
 /// Aire tributaire et raideur de pénalité de chaque Node esclave. L'aire vient des faces de Mesh dont
-/// tous les Nodes sont esclaves (∫ N dS, épaisseur comprise) ; ε = c E / h, E et h (taille) étant
+/// tous les Nodes sont esclaves (aire de la face, épaisseur comprise, répartie par la diagonale de ∫ N Nᵀ) ; ε = c E / h, E et h (taille) étant
 /// ceux de l'Element de chaque face, pondérés par l'aire.
 pub(crate) fn contact_terms(mesh: &Mesh, contact: &Contact) -> Result<ContactTerms, MailleError> {
     let slave: std::collections::HashMap<usize, usize> = contact
@@ -201,7 +240,12 @@ pub(crate) fn contact_terms(mesh: &Mesh, contact: &Contact) -> Result<ContactTer
             let Some(terms) = face_convection(mesh, i, face, 1.0, 1.0) else {
                 continue;
             };
-            for (&p, share) in terms.positions.iter().zip(&terms.load) {
+            // aire répartie par la diagonale de ∫ N Nᵀ (lumping HRZ) : les charges consistantes d'une
+            // face quadratique de tétraèdre (Tet10) sont nulles aux sommets, qui n'auraient aucune raideur
+            let total: f64 = terms.load.iter().sum();
+            let diagonal: f64 = (0..terms.positions.len()).map(|a| terms.matrix[a][a]).sum();
+            for (a, &p) in terms.positions.iter().enumerate() {
+                let share = terms.matrix[a][a] * total / diagonal;
                 let k = slave[&e.nodes()[p]];
                 area[k] += share;
                 weighted[k] += share * PENALTY_FACTOR * young / size;
@@ -263,23 +307,55 @@ mod tests {
     }
 
     #[test]
-    fn the_normal_derivative_matches_finite_differences() {
-        let cylinder = RigidSurface::Cylinder {
-            point: [0.5, -0.5, 0.0],
-            axis: [1.0, 2.0, 2.0],
-            radius: 1.0,
+    fn the_sphere_gap_is_the_distance_to_the_center_minus_the_radius() {
+        let sphere = RigidSurface::Sphere {
+            center: [1.0, 2.0, 3.0],
+            radius: 2.0,
         };
+        let gap = sphere.gap([1.0, 2.0, 8.0], 3);
+        assert!((gap.g - 3.0).abs() < 1e-15);
+        assert_eq!(gap.n, [0.0, 0.0, 1.0]);
+        // pénétration : à l'intérieur de la sphère
+        assert!((sphere.gap([1.0, 2.0, 4.0], 3).g + 1.0).abs() < 1e-15);
+        // pas de sphère en 2D
+        assert!(matches!(
+            sphere.check(2),
+            Err(MailleError::InvalidRigidSurface { .. })
+        ));
+        assert!(sphere.check(3).is_ok());
+        let flat = RigidSurface::Sphere {
+            center: [0.0; 3],
+            radius: 0.0,
+        };
+        assert!(flat.check(3).is_err());
+    }
+
+    #[test]
+    fn the_normal_derivative_matches_finite_differences() {
+        let surfaces = [
+            RigidSurface::Cylinder {
+                point: [0.5, -0.5, 0.0],
+                axis: [1.0, 2.0, 2.0],
+                radius: 1.0,
+            },
+            RigidSurface::Sphere {
+                center: [0.5, -0.5, 0.2],
+                radius: 1.0,
+            },
+        ];
         let x = [2.0, 1.0, 0.3];
-        let gap = cylinder.gap(x, 3);
-        let h = 1e-6;
-        for j in 0..3 {
-            let (mut plus, mut minus) = (x, x);
-            plus[j] += h;
-            minus[j] -= h;
-            let (np, nm) = (cylinder.gap(plus, 3).n, cylinder.gap(minus, 3).n);
-            for i in 0..3 {
-                let numeric = (np[i] - nm[i]) / (2.0 * h);
-                assert!((gap.dn[i][j] - numeric).abs() < 1e-8, "dn[{i}][{j}]");
+        for surface in surfaces {
+            let gap = surface.gap(x, 3);
+            let h = 1e-6;
+            for j in 0..3 {
+                let (mut plus, mut minus) = (x, x);
+                plus[j] += h;
+                minus[j] -= h;
+                let (np, nm) = (surface.gap(plus, 3).n, surface.gap(minus, 3).n);
+                for i in 0..3 {
+                    let numeric = (np[i] - nm[i]) / (2.0 * h);
+                    assert!((gap.dn[i][j] - numeric).abs() < 1e-8, "dn[{i}][{j}]");
+                }
             }
         }
     }
