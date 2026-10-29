@@ -1,7 +1,10 @@
 //! Les inspecteurs de l'espace Modèle : des formulaires qui éditent le `Draft` de `model_space`. Ils ne
 //! décident de rien d'autre que de ce qu'on affiche ; les règles sont dans `model_space`.
 
+use std::path::PathBuf;
+
 use eframe::egui::{self, Color32};
+use maille_io::materials::{Library, LibraryMaterial};
 use maille_io::model::{
     ContactDef, ContactKind, ConvectionDef, DofDef, HeatSourceDef, PlaneStateDef, PressureDef,
     ValueDef,
@@ -9,6 +12,7 @@ use maille_io::model::{
 use maille_io::msh::CellKind;
 
 use crate::compute::ComputeState;
+use crate::library;
 use crate::model_space::{Diagnostic, Draft, Severity, UnitSystem};
 use crate::state::Tool;
 
@@ -179,8 +183,35 @@ fn dof_picker(ui: &mut egui::Ui, id: &str, dofs: &[DofDef], chosen: &mut DofDef)
         });
 }
 
+/// La bibliothèque de Materials affichée dans l'inspecteur « Material ».
+pub struct LibraryUi {
+    pub library: Library,
+    /// Le fichier de l'utilisateur, s'il a un dossier de configuration.
+    pub path: Option<PathBuf>,
+    /// Dernier message (fichier illisible, enregistrement fait ou refusé).
+    pub note: Option<String>,
+    /// Le Material choisi dans la liste.
+    pub chosen: String,
+    /// La limite d'élasticité du dernier Material pris, dans les unités du brouillon : proposée quand
+    /// l'utilisateur coche la plasticité.
+    pub yield_hint: Option<f64>,
+}
+
+impl LibraryUi {
+    pub fn new(path: Option<PathBuf>) -> Self {
+        let (library, note) = library::load(path.as_deref());
+        Self {
+            library,
+            path,
+            note,
+            chosen: String::new(),
+            yield_hint: None,
+        }
+    }
+}
+
 /// Inspecteur « Material » : unités, Material élastique, état plan et épaisseur.
-pub fn material_tool(ui: &mut egui::Ui, draft: &mut Draft, mesh: &MeshInfo) {
+pub fn material_tool(ui: &mut egui::Ui, draft: &mut Draft, mesh: &MeshInfo, lib: &mut LibraryUi) {
     ui.label("Unités (cohérentes, rien n'est converti) :");
     let mut system = match &draft.units {
         UnitSystem::Si => 0,
@@ -206,6 +237,9 @@ pub fn material_tool(ui: &mut egui::Ui, draft: &mut Draft, mesh: &MeshInfo) {
     }
     ui.separator();
     let units = draft.units.clone();
+    let library_units = library::library_units(&units);
+    library_picker(ui, draft, library_units, lib);
+    ui.separator();
     match &mut draft.material {
         None => {
             if ui.button("Définir un Material").clicked() {
@@ -236,7 +270,7 @@ pub fn material_tool(ui: &mut egui::Ui, draft: &mut Draft, mesh: &MeshInfo) {
                 ui,
                 "limite élastique σy (plasticité)",
                 &mut m.yield_stress,
-                250.0 * k,
+                lib.yield_hint.unwrap_or(250.0 * k),
             );
             if m.yield_stress.is_some() {
                 let mut h = m.hardening.unwrap_or(0.0);
@@ -256,6 +290,20 @@ pub fn material_tool(ui: &mut egui::Ui, draft: &mut Draft, mesh: &MeshInfo) {
                 ui.checkbox(&mut m.neo_hookean, "loi néo-hookéenne");
             }
             ui.separator();
+            if let (Some(path), Some(lu)) = (&lib.path, library_units) {
+                if ui.button("Enregistrer dans ma bibliothèque").clicked() {
+                    let saved = LibraryMaterial::from_def(&m.to_def(draft.large), lu, "");
+                    lib.note = Some(match library::save(path, &m.name, saved) {
+                        Ok((library, note)) => {
+                            lib.library = library;
+                            note.unwrap_or_else(|| {
+                                format!("« {} » est dans {}.", m.name, path.display())
+                            })
+                        }
+                        Err(e) => format!("Enregistrement impossible : {e}"),
+                    });
+                }
+            }
             if ui.button("Retirer le Material").clicked() {
                 draft.material = None;
             }
@@ -283,6 +331,45 @@ pub fn material_tool(ui: &mut egui::Ui, draft: &mut Draft, mesh: &MeshInfo) {
                 .speed(speed)
                 .range(0.0..=f64::MAX),
         );
+    }
+}
+
+/// Choisir un Material de la bibliothèque : il est converti dans les unités du brouillon.
+fn library_picker(
+    ui: &mut egui::Ui,
+    draft: &mut Draft,
+    units: Option<maille_io::materials::UnitSystem>,
+    lib: &mut LibraryUi,
+) {
+    ui.label("Bibliothèque :");
+    let Some(units) = units else {
+        ui.weak("Pour l'utiliser, écris les unités « longueur, force, temps », par exemple « mm, N, s ».");
+        return;
+    };
+    egui::ComboBox::from_id_salt("library-material")
+        .selected_text(if lib.chosen.is_empty() {
+            "choisir…"
+        } else {
+            &lib.chosen
+        })
+        .show_ui(ui, |ui| {
+            for name in lib.library.names() {
+                ui.selectable_value(&mut lib.chosen, name.to_string(), name);
+            }
+        });
+    if let Some(material) = lib.library.get(&lib.chosen) {
+        if !material.description.is_empty() {
+            ui.weak(&material.description);
+        }
+        if ui.button("Prendre ce Material").clicked() {
+            let (form, yield_stress) = library::material_form(&lib.chosen, material, units);
+            draft.material = Some(form);
+            lib.yield_hint = yield_stress;
+        }
+        ui.weak("Valeurs usuelles : vérifie celles de ta nuance.");
+    }
+    if let Some(note) = &lib.note {
+        ui.weak(note);
     }
 }
 

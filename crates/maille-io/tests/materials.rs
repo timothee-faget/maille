@@ -2,7 +2,7 @@
 //! diffusivité, la plaque en traction), les erreurs disent quoi corriger.
 
 use maille_core::mesher::{triangulate, Curve, Geometry, MeshOptions};
-use maille_io::materials::{Library, UnitSystem};
+use maille_io::materials::{Library, LibraryMaterial, UnitSystem};
 use maille_io::model::{build, parse};
 use maille_io::msh::{read, write, MshFile};
 use maille_io::IoError;
@@ -199,4 +199,63 @@ fn tensile_plate_gives_the_same_stress_in_si_and_in_mm() {
     let si = plate_stress(UnitSystem::SI, 1e-3);
     assert!((si - 210e6).abs() < 1e-6 * 210e6, "{si} Pa");
     assert!((si / 1e6 - mm).abs() < 1e-9 * mm);
+}
+
+#[test]
+fn a_model_material_goes_back_to_si_and_to_the_file_and_back() {
+    let library = Library::builtin();
+    for text in ["m, N, s", "mm, N, s", "in, lbf, s"] {
+        let units = UnitSystem::parse(text).unwrap();
+        for name in library.names() {
+            let original = library.get(name).unwrap();
+            let mut def = original.to_def(units);
+            def.yield_stress = original.yield_stress_in(units);
+            let back = LibraryMaterial::from_def(&def, units, &original.description);
+            for (a, b) in [
+                (back.young, original.young),
+                (back.density, original.density),
+                (back.conductivity, original.conductivity),
+                (back.specific_heat, original.specific_heat),
+                (back.yield_stress, original.yield_stress),
+            ] {
+                assert_eq!(a.is_some(), b.is_some(), "{name} en {text}");
+                if let (Some(a), Some(b)) = (a, b) {
+                    assert!(close(a, b), "{name} en {text} : {a} au lieu de {b}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn the_library_round_trips_through_its_file() {
+    let library = Library::builtin();
+    let again = Library::parse(&library.to_toml().unwrap()).unwrap();
+    assert_eq!(again, library);
+
+    let mut mine = Library::parse("[materials.x]\nyoung = 1e9\n").unwrap();
+    let def = parse_material("young = 2.0\npoisson = 0.3");
+    mine.insert(
+        "mon matériau",
+        LibraryMaterial::from_def(&def, UnitSystem::MM_N_S, ""),
+    )
+    .unwrap();
+    let again = Library::parse(&mine.to_toml().unwrap()).unwrap();
+    assert_eq!(again, mine);
+    assert!(close(
+        again.get("mon matériau").unwrap().young.unwrap(),
+        2.0e6
+    ));
+
+    assert!(mine.insert("  ", again.get("x").unwrap().clone()).is_err());
+    let absurd = LibraryMaterial::from_def(&parse_material("young = -2.0"), UnitSystem::SI, "");
+    assert!(mine.insert("y", absurd).is_err());
+}
+
+fn parse_material(body: &str) -> maille_io::model::MaterialDef {
+    let file = parse(&format!(
+        "units = \"u\"\nmesh = \"m.msh\"\n[materials.m]\n{body}\n"
+    ))
+    .unwrap();
+    file.materials["m"].clone()
 }

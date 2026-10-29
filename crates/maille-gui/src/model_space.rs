@@ -87,6 +87,23 @@ pub struct MaterialForm {
     pub neo_hookean: bool,
 }
 
+impl MaterialForm {
+    /// Le Material du fichier de modèle ; `large` : le modèle est en grandes déformations.
+    pub fn to_def(&self, large: bool) -> model::MaterialDef {
+        model::MaterialDef {
+            young: Some(self.young),
+            poisson: Some(self.poisson),
+            conductivity: self.conductivity,
+            density: self.density,
+            specific_heat: self.specific_heat,
+            expansion: self.expansion,
+            yield_stress: self.yield_stress,
+            hardening: self.yield_stress.and(self.hardening),
+            hyperelasticity: (large && self.neo_hookean).then_some(HyperelasticityDef::NeoHookean),
+        }
+    }
+}
+
 /// Ce que l'utilisateur a rempli dans l'espace Modèle.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Draft {
@@ -217,21 +234,7 @@ impl Draft {
         let mut materials = std::collections::BTreeMap::new();
         let mut sections = Vec::new();
         if let Some(m) = &self.material {
-            materials.insert(
-                m.name.clone(),
-                model::MaterialDef {
-                    young: Some(m.young),
-                    poisson: Some(m.poisson),
-                    conductivity: m.conductivity,
-                    density: m.density,
-                    specific_heat: m.specific_heat,
-                    expansion: m.expansion,
-                    yield_stress: m.yield_stress,
-                    hardening: m.yield_stress.and(m.hardening),
-                    hyperelasticity: (self.large && m.neo_hookean)
-                        .then_some(HyperelasticityDef::NeoHookean),
-                },
-            );
+            materials.insert(m.name.clone(), m.to_def(self.large));
             sections.push(SectionDef {
                 set: DOMAIN_SET.to_string(),
                 material: m.name.clone(),
