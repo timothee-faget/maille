@@ -3,7 +3,9 @@
 //! en TOML par `model::write`. `app` ne fait que l'afficher.
 
 use maille_io::model::{
-    self, DofDef, MeshingDef, ModelFile, Physics, PlaneStateDef, PressureDef, SectionDef, ValueDef,
+    self, ContactDef, ContactKind, ConvectionDef, DofDef, HeatSourceDef, HyperelasticityDef,
+    KinematicsDef, MeshingDef, ModelFile, Physics, PlaneStateDef, PressureDef, SectionDef, StepDef,
+    StepKind, TemperaturesDef, ThermalStepDef, ValueDef,
 };
 use maille_io::msh::{CellKind, MshFile, DOMAIN_SET};
 use maille_io::IoError;
@@ -72,6 +74,17 @@ pub struct MaterialForm {
     pub name: String,
     pub young: f64,
     pub poisson: f64,
+    /// Thermique : conductivité k, masse volumique ρ et chaleur massique c (transitoire).
+    pub conductivity: Option<f64>,
+    pub density: Option<f64>,
+    pub specific_heat: Option<f64>,
+    /// Coefficient de dilatation α (couplage thermo-mécanique).
+    pub expansion: Option<f64>,
+    /// Plasticité de von Mises : limite σy0 et module d'écrouissage H.
+    pub yield_stress: Option<f64>,
+    pub hardening: Option<f64>,
+    /// Loi néo-hookéenne (grandes déformations) à la place de Saint-Venant–Kirchhoff.
+    pub neo_hookean: bool,
 }
 
 /// Ce que l'utilisateur a rempli dans l'espace Modèle.
@@ -86,6 +99,17 @@ pub struct Draft {
     /// Efforts par Node (`Load`).
     pub loads: Vec<ValueDef>,
     pub pressures: Vec<PressureDef>,
+    pub heat_sources: Vec<HeatSourceDef>,
+    pub convections: Vec<ConvectionDef>,
+    pub contacts: Vec<ContactDef>,
+    /// Grandes déformations (Lagrangien total).
+    pub large: bool,
+    /// T_ref du couplage thermo-mécanique : les températures de la partie thermique dilatent le modèle.
+    pub reference_temperature: Option<f64>,
+    /// Transitoire thermique (durée, incréments, θ, température initiale).
+    pub thermal_step: Option<ThermalStepDef>,
+    /// Calcul quasi-statique (Newton par incrément) avec son amplitude.
+    pub quasi_step: Option<StepDef>,
 }
 
 impl Default for Draft {
@@ -98,6 +122,13 @@ impl Default for Draft {
             bcs: Vec::new(),
             loads: Vec::new(),
             pressures: Vec::new(),
+            heat_sources: Vec::new(),
+            convections: Vec::new(),
+            contacts: Vec::new(),
+            large: false,
+            reference_temperature: None,
+            thermal_step: None,
+            quasi_step: None,
         }
     }
 }
@@ -113,7 +144,66 @@ impl Draft {
                 210e3
             },
             poisson: 0.3,
+            conductivity: None,
+            density: None,
+            specific_heat: None,
+            expansion: None,
+            yield_stress: None,
+            hardening: None,
+            neo_hookean: false,
         }
+    }
+
+    /// Une Step quasi-statique par défaut : rampe de 0 à 1 en 10 incréments.
+    pub fn default_quasi_step() -> StepDef {
+        StepDef {
+            kind: StepKind::QuasiStatic,
+            duration: 1.0,
+            increments: 10,
+            theta: None,
+            initial_temperature: None,
+            amplitude: None,
+        }
+    }
+
+    /// Un transitoire thermique par défaut : 100 incréments d'Euler implicite à 20 degrés.
+    pub fn default_thermal_step() -> ThermalStepDef {
+        ThermalStepDef {
+            duration: 100.0,
+            increments: 20,
+            theta: None,
+            initial_temperature: 20.0,
+        }
+    }
+
+    /// Le modèle a une partie mécanique (déplacements, efforts, pression, contact, dilatation…).
+    pub fn has_mechanical(&self) -> bool {
+        self.bcs.iter().any(|b| b.dof != DofDef::T)
+            || self.loads.iter().any(|l| l.dof != DofDef::T)
+            || !self.pressures.is_empty()
+            || !self.contacts.is_empty()
+            || self.large
+            || self.reference_temperature.is_some()
+            || self.quasi_step.is_some()
+    }
+
+    /// Le modèle a une partie thermique.
+    pub fn has_thermal(&self) -> bool {
+        self.bcs.iter().any(|b| b.dof == DofDef::T)
+            || self.loads.iter().any(|l| l.dof == DofDef::T)
+            || !self.heat_sources.is_empty()
+            || !self.convections.is_empty()
+            || self.thermal_step.is_some()
+    }
+
+    /// Plasticité, grandes déformations ou contact : le calcul demande une Step quasi-statique.
+    pub fn is_nonlinear(&self) -> bool {
+        self.large
+            || !self.contacts.is_empty()
+            || self
+                .material
+                .as_ref()
+                .is_some_and(|m| m.yield_stress.is_some())
     }
 
     /// Le fichier de modèle correspondant. `meshing` : la recette du maillage si on la connaît.
@@ -132,13 +222,14 @@ impl Draft {
                 model::MaterialDef {
                     young: Some(m.young),
                     poisson: Some(m.poisson),
-                    conductivity: None,
-                    density: None,
-                    specific_heat: None,
-                    expansion: None,
-                    yield_stress: None,
-                    hardening: None,
-                    hyperelasticity: None,
+                    conductivity: m.conductivity,
+                    density: m.density,
+                    specific_heat: m.specific_heat,
+                    expansion: m.expansion,
+                    yield_stress: m.yield_stress,
+                    hardening: m.yield_stress.and(m.hardening),
+                    hyperelasticity: (self.large && m.neo_hookean)
+                        .then_some(HyperelasticityDef::NeoHookean),
                 },
             );
             sections.push(SectionDef {
@@ -149,23 +240,43 @@ impl Draft {
                 plane_state: planar.then_some(self.plane_state),
             });
         }
+        // sans partie mécanique, le transitoire thermique est le `[step]` du fichier
+        let thermal_only = !self.has_mechanical();
+        let (step, thermal_step) = match (&self.thermal_step, thermal_only) {
+            (Some(t), true) => (
+                Some(StepDef {
+                    kind: StepKind::Transient,
+                    duration: t.duration,
+                    increments: t.increments,
+                    theta: t.theta,
+                    initial_temperature: Some(t.initial_temperature),
+                    amplitude: None,
+                }),
+                None,
+            ),
+            (t, _) => (self.quasi_step.clone(), t.clone()),
+        };
         ModelFile {
             units: self.units.text(),
             mesh: mesh_name.to_string(),
             analysis: None,
-            kinematics: None,
+            kinematics: self.large.then_some(KinematicsDef::Large),
             materials,
             sections,
             bcs: self.bcs.clone(),
             loads: self.loads.clone(),
-            heat_sources: Vec::new(),
-            convections: Vec::new(),
+            heat_sources: self.heat_sources.clone(),
+            convections: self.convections.clone(),
             pressures: self.pressures.clone(),
-            contacts: Vec::new(),
-            temperatures: None,
-            step: None,
+            contacts: self.contacts.clone(),
+            temperatures: self.reference_temperature.map(|reference| TemperaturesDef {
+                from: None,
+                increment: None,
+                reference,
+            }),
+            step,
             meshing,
-            thermal_step: None,
+            thermal_step,
         }
     }
 
@@ -184,10 +295,14 @@ impl Draft {
         model::physics(&self.to_file("", mesh, None)).ok()
     }
 
-    /// Il y a de quoi déformer la pièce : un effort, une pression ou un déplacement imposé non nul.
+    /// Il y a de quoi charger la pièce : un effort, une pression, une source, une convection, un
+    /// contact, ou une valeur imposée non nulle.
     pub fn has_loading(&self) -> bool {
         !self.loads.is_empty()
             || !self.pressures.is_empty()
+            || !self.heat_sources.is_empty()
+            || !self.convections.is_empty()
+            || !self.contacts.is_empty()
             || self.bcs.iter().any(|b| b.value != 0.0)
     }
 
@@ -198,8 +313,181 @@ impl Draft {
             .chain(&self.loads)
             .map(|v| v.set.as_str())
             .chain(self.pressures.iter().map(|p| p.set.as_str()))
+            .chain(self.heat_sources.iter().map(|h| h.set.as_str()))
+            .chain(self.convections.iter().map(|c| c.set.as_str()))
+            .chain(self.contacts.iter().map(|c| c.set.as_str()))
             .collect()
     }
+}
+
+type Tri = [[f64; 3]; 3];
+
+fn add(a: [f64; 3], b: [f64; 3], k: f64) -> [f64; 3] {
+    [a[0] + k * b[0], a[1] + k * b[1], a[2] + k * b[2]]
+}
+
+fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn unit(a: [f64; 3]) -> Option<[f64; 3]> {
+    let n = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt();
+    (n > 1e-12).then(|| [a[0] / n, a[1] / n, a[2] / n])
+}
+
+/// Deux vecteurs unitaires orthogonaux entre eux et à `n` (unitaire).
+fn plane_basis(n: [f64; 3]) -> ([f64; 3], [f64; 3]) {
+    let helper = if n[0].abs() < 0.9 {
+        [1.0, 0.0, 0.0]
+    } else {
+        [0.0, 1.0, 0.0]
+    };
+    let u = unit(cross(n, helper)).unwrap_or([1.0, 0.0, 0.0]);
+    (u, cross(n, u))
+}
+
+/// Un quadrilatère `a b c d` en deux triangles.
+fn quad(out: &mut Vec<Tri>, a: [f64; 3], b: [f64; 3], c: [f64; 3], d: [f64; 3]) {
+    out.push([a, b, c]);
+    out.push([a, c, d]);
+}
+
+fn vec3(v: &Option<Vec<f64>>) -> Option<[f64; 3]> {
+    let v = v.as_ref()?;
+    Some([*v.first()?, *v.get(1)?, v.get(2).copied().unwrap_or(0.0)])
+}
+
+/// La surface rigide d'un Contact, en triangles à surligner dans la vue (position à λ = 0). En 2D, une
+/// bande mince du côté opposé au corps ; en 3D, un carré (plan), un tube court (cylindre) ou une
+/// sphère. Vide si les paramètres manquent.
+pub fn rigid_triangles(contact: &ContactDef, mesh: &MshFile) -> Vec<Tri> {
+    let mut lo = [f64::MAX; 3];
+    let mut hi = [f64::MIN; 3];
+    for p in &mesh.nodes {
+        for (k, v) in [p.x, p.y, p.z].into_iter().enumerate() {
+            lo[k] = lo[k].min(v);
+            hi[k] = hi[k].max(v);
+        }
+    }
+    if mesh.nodes.is_empty() {
+        return Vec::new();
+    }
+    let size = (0..3).map(|k| hi[k] - lo[k]).fold(0.0, f64::max).max(1e-12);
+    let planar = is_planar(mesh);
+    let band = size * 0.01;
+    let segments = 48;
+    let mut out = Vec::new();
+    match contact.kind {
+        ContactKind::Plane => {
+            let (Some(p), Some(n)) = (vec3(&contact.point), vec3(&contact.normal).and_then(unit))
+            else {
+                return out;
+            };
+            let l = size * 1.5;
+            if planar {
+                let t = [-n[1], n[0], 0.0];
+                let (a, b) = (add(p, t, -l), add(p, t, l));
+                quad(&mut out, a, b, add(b, n, -band), add(a, n, -band));
+            } else {
+                let (u, v) = plane_basis(n);
+                let corner = |su: f64, sv: f64| add(add(p, u, su * l), v, sv * l);
+                quad(
+                    &mut out,
+                    corner(-1.0, -1.0),
+                    corner(1.0, -1.0),
+                    corner(1.0, 1.0),
+                    corner(-1.0, 1.0),
+                );
+            }
+        }
+        ContactKind::Cylinder => {
+            let (Some(p), Some(r)) = (vec3(&contact.point), contact.radius) else {
+                return out;
+            };
+            let angle = |k: usize| std::f64::consts::TAU * k as f64 / segments as f64;
+            if planar {
+                let ring = |k: usize, radius: f64| {
+                    [
+                        p[0] + radius * angle(k).cos(),
+                        p[1] + radius * angle(k).sin(),
+                        0.0,
+                    ]
+                };
+                for k in 0..segments {
+                    quad(
+                        &mut out,
+                        ring(k, r - band),
+                        ring(k, r),
+                        ring(k + 1, r),
+                        ring(k + 1, r - band),
+                    );
+                }
+            } else {
+                let Some(axis) = vec3(&contact.axis).and_then(unit) else {
+                    return out;
+                };
+                let (u, v) = plane_basis(axis);
+                let l = size;
+                let at = |k: usize, along: f64| {
+                    add(
+                        add(add(p, u, r * angle(k).cos()), v, r * angle(k).sin()),
+                        axis,
+                        along,
+                    )
+                };
+                for k in 0..segments {
+                    quad(&mut out, at(k, -l), at(k + 1, -l), at(k + 1, l), at(k, l));
+                }
+            }
+        }
+        ContactKind::Sphere => {
+            let (Some(c), Some(r)) = (vec3(&contact.center), contact.radius) else {
+                return out;
+            };
+            let rings = 16;
+            let at = |i: usize, k: usize| {
+                let theta = std::f64::consts::PI * i as f64 / rings as f64;
+                let phi = std::f64::consts::TAU * k as f64 / segments as f64;
+                [
+                    c[0] + r * theta.sin() * phi.cos(),
+                    c[1] + r * theta.sin() * phi.sin(),
+                    c[2] + r * theta.cos(),
+                ]
+            };
+            for i in 0..rings {
+                for k in 0..segments {
+                    quad(
+                        &mut out,
+                        at(i, k),
+                        at(i + 1, k),
+                        at(i + 1, k + 1),
+                        at(i, k + 1),
+                    );
+                }
+            }
+        }
+    }
+    out
+}
+
+/// La phrase qui dit quel calcul est déduit, avec sa nature quand elle n'est pas linéaire.
+pub fn run_label(draft: &Draft, mesh: &MshFile) -> Option<String> {
+    let physics = draft.physics(mesh)?;
+    let mut text = physics_label(physics).to_string();
+    if draft.has_mechanical() && draft.quasi_step.is_some() {
+        text.push_str(", quasi-statique");
+    }
+    if draft.thermal_step.is_some() {
+        text.push_str(", transitoire");
+    }
+    if draft.large {
+        text.push_str(", grandes déformations");
+    }
+    Some(text)
 }
 
 /// Phrase qui décrit le calcul déduit.
@@ -307,7 +595,11 @@ pub fn diagnose(draft: &Draft, mesh: &MshFile, user_sets: &[&str]) -> Vec<Diagno
     };
     for bc in &draft.bcs {
         check_set(
-            Tool::Support,
+            if bc.dof == DofDef::T {
+                Tool::Thermal
+            } else {
+                Tool::Support
+            },
             &format!("La BC « {} »", dof_name(bc.dof)),
             &bc.set,
             false,
@@ -324,6 +616,15 @@ pub fn diagnose(draft: &Draft, mesh: &MshFile, user_sets: &[&str]) -> Vec<Diagno
     for p in &draft.pressures {
         check_set(Tool::Load, "La Pressure", &p.set, true);
     }
+    for h in &draft.heat_sources {
+        check_set(Tool::Thermal, "La HeatSource", &h.set, false);
+    }
+    for c in &draft.convections {
+        check_set(Tool::Thermal, "La Convection", &c.set, true);
+    }
+    for c in &draft.contacts {
+        check_set(Tool::Contact, "Le Contact", &c.set, false);
+    }
 
     for name in user_sets {
         if !draft.used_sets().contains(name) {
@@ -334,13 +635,24 @@ pub fn diagnose(draft: &Draft, mesh: &MshFile, user_sets: &[&str]) -> Vec<Diagno
         }
     }
 
-    if draft.bcs.is_empty() {
+    let t_bcs = draft.bcs.iter().filter(|b| b.dof == DofDef::T).count();
+    let mechanical_bcs: Vec<ValueDef> = draft
+        .bcs
+        .iter()
+        .filter(|b| b.dof != DofDef::T)
+        .cloned()
+        .collect();
+    if draft.bcs.is_empty() && draft.contacts.is_empty() && draft.convections.is_empty() {
         out.push(error(
             Tool::Support,
             "Aucune BC : la pièce flotte. Ajoute un encastrement ou un déplacement imposé.".into(),
         ));
-    } else if out.iter().all(|d| d.tool != Tool::Support) {
-        let free = free_rigid_modes(mesh, &draft.bcs);
+    } else if draft.has_mechanical()
+        && draft.contacts.is_empty()
+        && out.iter().all(|d| d.tool != Tool::Support)
+    {
+        // un contact retient la pièce contre la surface rigide : on ne sait pas dire à l'avance
+        let free = free_rigid_modes(mesh, &mechanical_bcs);
         if !free.is_empty() {
             out.push(error(
                 Tool::Support,
@@ -351,7 +663,81 @@ pub fn diagnose(draft: &Draft, mesh: &MshFile, user_sets: &[&str]) -> Vec<Diagno
             ));
         }
     }
-    if !draft.bcs.is_empty() && !draft.has_loading() {
+
+    if draft.has_thermal() {
+        let material = draft.material.as_ref();
+        if material.is_some_and(|m| m.conductivity.is_none_or(|k| k <= 0.0)) {
+            out.push(error(
+                Tool::Material,
+                "Le calcul thermique demande une conductivité k > 0 dans le Material.".into(),
+            ));
+        }
+        if t_bcs == 0 && draft.convections.is_empty() {
+            out.push(error(
+                Tool::Thermal,
+                "Aucune BC thermique : fixe une température sur un Set, ou ajoute une Convection."
+                    .into(),
+            ));
+        } else if t_bcs == 0 {
+            out.push(warning(
+                Tool::Thermal,
+                "Il y a une Convection mais aucune BC thermique : la température tendra vers celle du milieu."
+                    .into(),
+            ));
+        }
+        if draft.thermal_step.is_some()
+            && material.is_some_and(|m| {
+                m.density.is_none_or(|r| r <= 0.0) || m.specific_heat.is_none_or(|c| c <= 0.0)
+            })
+        {
+            out.push(error(
+                Tool::Material,
+                "Le transitoire thermique demande une masse volumique ρ et une chaleur massique c dans le Material."
+                    .into(),
+            ));
+        }
+        if draft.has_mechanical() {
+            if draft.reference_temperature.is_none() {
+                out.push(error(
+                    Tool::Thermal,
+                    "Le modèle a une partie thermique et une partie mécanique : donne la température de référence pour les coupler."
+                        .into(),
+                ));
+            }
+            if material.is_some_and(|m| m.expansion.is_none()) {
+                out.push(error(
+                    Tool::Material,
+                    "Le couplage thermo-mécanique demande un coefficient de dilatation α dans le Material."
+                        .into(),
+                ));
+            }
+        }
+    }
+    if draft.is_nonlinear() && draft.quasi_step.is_none() {
+        out.push(error(
+            Tool::StepAmplitude,
+            "Contact, plasticité et grandes déformations demandent une Step quasi-statique : ajoute-la."
+                .into(),
+        ));
+    }
+    if let Some(step) = &draft.quasi_step {
+        if step.duration <= 0.0 || step.increments == 0 {
+            out.push(error(
+                Tool::StepAmplitude,
+                "La Step doit avoir une durée positive et au moins un incrément.".into(),
+            ));
+        }
+    }
+    if let Some(t) = &draft.thermal_step {
+        if t.duration <= 0.0 || t.increments == 0 {
+            out.push(error(
+                Tool::StepAmplitude,
+                "Le transitoire thermique doit avoir une durée positive et au moins un incrément."
+                    .into(),
+            ));
+        }
+    }
+    if (!draft.bcs.is_empty() || !draft.convections.is_empty()) && !draft.has_loading() {
         out.push(warning(
             Tool::Load,
             "Aucun chargement : sans effort ni déplacement imposé, la pièce ne se déforme pas."
@@ -361,11 +747,25 @@ pub fn diagnose(draft: &Draft, mesh: &MshFile, user_sets: &[&str]) -> Vec<Diagno
 
     // les règles du cœur, quand rien d'autre n'a été trouvé
     if out.iter().all(|d| d.severity != Severity::Error) {
-        if let Err(e) = model::build(&draft.to_file("", mesh, None), mesh, None) {
+        if let Err(e) = check_core(&draft.to_file("", mesh, None), mesh) {
             out.push(error(Tool::Run, e.to_string()));
         }
     }
     out
+}
+
+/// Construit le modèle avec les règles du cœur ; un calcul couplé est coupé, et la partie mécanique
+/// reçoit des températures de remplissage (seule la construction nous intéresse).
+fn check_core(file: &ModelFile, mesh: &MshFile) -> Result<(), IoError> {
+    if model::physics(file)? == Physics::Coupled {
+        let (thermal, mechanical) = model::split(file)?;
+        model::build(&thermal, mesh, None)?;
+        let filler = vec![0.0; mesh.nodes.len()];
+        model::build(&mechanical, mesh, Some(&filler))?;
+    } else {
+        model::build(file, mesh, None)?;
+    }
+    Ok(())
 }
 
 fn dof_name(dof: DofDef) -> &'static str {
@@ -822,6 +1222,203 @@ mod tests {
             assert!((ux - 0.001 * p.x).abs() < 1e-9, "ux du Node {i}");
             assert!((uy + 0.3 * 0.001 * p.y).abs() < 1e-9, "uy du Node {i}");
         }
+    }
+
+    fn example(name: &str) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples")
+            .join(name)
+    }
+
+    fn example_mesh(name: &str) -> MshFile {
+        maille_io::msh::read(&std::fs::read_to_string(example(name)).unwrap()).unwrap()
+    }
+
+    fn value(set: &str, dof: DofDef, value: f64) -> ValueDef {
+        ValueDef {
+            set: set.into(),
+            dof,
+            value,
+        }
+    }
+
+    /// Le tube thermo-mécanique de `examples/tube_thermomeca.toml`, rempli comme l'interface le fait.
+    fn tube() -> Draft {
+        let mut d = Draft::default();
+        d.units = UnitSystem::Custom("N, mm, MPa, K, W".into());
+        d.material = Some(MaterialForm {
+            expansion: Some(1.2e-5),
+            conductivity: Some(0.05),
+            ..d.steel()
+        });
+        d.plane_state = PlaneStateDef::Strain;
+        d.bcs = vec![
+            value("interieur", DofDef::T, 120.0),
+            value("exterieur", DofDef::T, 20.0),
+            value("sym_x", DofDef::Uy, 0.0),
+            value("sym_y", DofDef::Ux, 0.0),
+        ];
+        d.reference_temperature = Some(20.0);
+        d
+    }
+
+    #[test]
+    fn the_coupled_tube_gives_the_example_file() {
+        let mesh = example_mesh("tube.msh");
+        let mut expected =
+            model::parse(&std::fs::read_to_string(example("tube_thermomeca.toml")).unwrap())
+                .unwrap();
+        expected.temperatures.as_mut().unwrap().increment = None;
+        let d = tube();
+        assert_eq!(d.to_file("tube.msh", &mesh, None), expected);
+        assert_eq!(d.physics(&mesh), Some(Physics::Coupled));
+        assert_eq!(messages(&d, &mesh, &[]), Vec::<String>::new());
+        assert_eq!(run_label(&d, &mesh).unwrap(), "thermo-mécanique");
+    }
+
+    #[test]
+    fn the_hertz_contact_gives_the_example_file() {
+        let mesh = example_mesh("hertz.msh");
+        let mut expected =
+            model::parse(&std::fs::read_to_string(example("hertz.toml")).unwrap()).unwrap();
+        expected.analysis = None;
+        expected.sections[0].thickness = None;
+        let mut d = Draft::default();
+        d.material = Some(d.steel());
+        d.plane_state = PlaneStateDef::Strain;
+        d.bcs = vec![
+            value("axe", DofDef::Ux, 0.0),
+            value("droite", DofDef::Ux, 0.0),
+            value("bas", DofDef::Uy, 0.0),
+        ];
+        d.contacts = vec![ContactDef {
+            set: "dessus".into(),
+            kind: ContactKind::Cylinder,
+            point: Some(vec![0.0, 10.0]),
+            normal: None,
+            axis: None,
+            center: None,
+            radius: Some(10.0),
+            motion: Some(vec![0.0, -0.08]),
+        }];
+        // sans Step, un contact est refusé en clair
+        let m = messages(&d, &mesh, &[]);
+        assert!(m.iter().any(|s| s.contains("Step quasi-statique")), "{m:?}");
+        d.quasi_step = Some(StepDef {
+            increments: 8,
+            ..Draft::default_quasi_step()
+        });
+        assert_eq!(d.to_file("hertz.msh", &mesh, None), expected);
+        assert_eq!(messages(&d, &mesh, &[]), Vec::<String>::new());
+        assert_eq!(run_label(&d, &mesh).unwrap(), "statique, quasi-statique");
+        // la surface rigide se dessine : un anneau de 48 quadrilatères autour du centre (0, 10)
+        let ring = rigid_triangles(&d.contacts[0], &mesh);
+        assert_eq!(ring.len(), 96);
+        for t in &ring {
+            for p in t {
+                let r = ((p[0]).powi(2) + (p[1] - 10.0).powi(2)).sqrt();
+                assert!((9.0..=10.0 + 1e-9).contains(&r), "r = {r}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_rigid_plane_is_drawn_behind_its_surface() {
+        let mesh = plate();
+        let contact = ContactDef {
+            set: "gauche".into(),
+            kind: ContactKind::Plane,
+            point: Some(vec![0.0, 1.5]),
+            normal: Some(vec![0.0, -1.0]),
+            axis: None,
+            center: None,
+            radius: None,
+            motion: None,
+        };
+        let tris = rigid_triangles(&contact, &mesh);
+        assert_eq!(tris.len(), 2);
+        // le corps est du côté de la normale (y < 1,5) ; la bande est au-dessus de y = 1,5
+        assert!(tris.iter().flatten().all(|p| p[1] >= 1.5 - 1e-12));
+        assert!(rigid_triangles(
+            &ContactDef {
+                point: None,
+                ..contact
+            },
+            &mesh
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn thermal_diagnostics_name_what_is_missing() {
+        let mesh = plate();
+        let mut d = filled();
+        d.heat_sources = vec![HeatSourceDef {
+            set: DOMAIN_SET.into(),
+            value: 1.0,
+        }];
+        let m = messages(&d, &mesh, &[]);
+        assert!(m.iter().any(|s| s.contains("conductivité")), "{m:?}");
+        assert!(
+            m.iter().any(|s| s.contains("température de référence")),
+            "{m:?}"
+        );
+        assert!(m.iter().any(|s| s.contains("dilatation")), "{m:?}");
+
+        // thermique seul : une température imposée, un transitoire sans ρ ni c
+        let mut t = Draft::default();
+        t.material = Some(MaterialForm {
+            conductivity: Some(1.0),
+            ..t.steel()
+        });
+        t.bcs = vec![value("gauche", DofDef::T, 100.0)];
+        t.thermal_step = Some(Draft::default_thermal_step());
+        let m = messages(&t, &mesh, &[]);
+        assert!(m.iter().any(|s| s.contains("masse volumique")), "{m:?}");
+        let material = t.material.as_mut().unwrap();
+        material.density = Some(7.8e-9);
+        material.specific_heat = Some(4.6e8);
+        assert_eq!(messages(&t, &mesh, &[]), Vec::<String>::new());
+        // sans partie mécanique, le transitoire devient le `[step]` du fichier
+        let file = t.to_file("p.msh", &mesh, None);
+        assert_eq!(file.step.unwrap().kind, StepKind::Transient);
+        assert!(file.thermal_step.is_none());
+        assert_eq!(run_label(&t, &mesh).unwrap(), "thermique, transitoire");
+    }
+
+    #[test]
+    fn a_convection_without_a_thermal_bc_is_a_warning() {
+        let mut t = Draft::default();
+        t.material = Some(MaterialForm {
+            conductivity: Some(1.0),
+            ..t.steel()
+        });
+        t.convections = vec![ConvectionDef {
+            set: "droite".into(),
+            film: 10.0,
+            sink: 20.0,
+        }];
+        let diags = diagnose(&t, &plate(), &[]);
+        assert!(diags.iter().any(|d| d.severity == Severity::Warning
+            && d.message.contains("Convection mais aucune BC thermique")));
+        assert!(
+            diags.iter().all(|d| d.severity != Severity::Error),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn plasticity_and_large_strains_ask_for_a_quasi_static_step() {
+        let mesh = plate();
+        let mut d = filled();
+        d.material.as_mut().unwrap().yield_stress = Some(250.0);
+        d.plane_state = PlaneStateDef::Strain;
+        let m = messages(&d, &mesh, &[]);
+        assert!(m.iter().any(|s| s.contains("Step quasi-statique")), "{m:?}");
+        d.quasi_step = Some(Draft::default_quasi_step());
+        assert_eq!(messages(&d, &mesh, &[]), Vec::<String>::new());
+        d.large = true;
+        assert!(d.to_file("p.msh", &mesh, None).kinematics.is_some());
     }
 
     #[test]

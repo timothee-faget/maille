@@ -84,6 +84,8 @@ struct ModelUi {
     diags: Vec<Diagnostic>,
     key: Option<ModelKey>,
     note: Option<String>,
+    /// Surfaces rigides dessinées en ce moment dans la vue.
+    shown: Vec<maille_io::model::ContactDef>,
 }
 
 /// Ce que l'inspecteur demande à l'application, une fois les panneaux dessinés.
@@ -139,6 +141,7 @@ impl App {
                 diags: Vec::new(),
                 key: None,
                 note: None,
+                shown: Vec::new(),
             },
             path: String::new(),
             mesh_path: String::new(),
@@ -492,57 +495,68 @@ impl App {
                             "Les Sets de sommets arrivent avec les Sets sur le maillage (M13b).",
                         );
                     }
-                    Tool::Material | Tool::Support | Tool::Load | Tool::Run => {
-                        match &self.mesh.built {
-                            None => {
-                                ui.label(
-                                    "Importe et maille d'abord une géométrie, ou importe un .msh.",
-                                );
+                    Tool::Material
+                    | Tool::Support
+                    | Tool::Load
+                    | Tool::Thermal
+                    | Tool::Contact
+                    | Tool::StepAmplitude
+                    | Tool::Run => match &self.mesh.built {
+                        None => {
+                            ui.label(
+                                "Importe et maille d'abord une géométrie, ou importe un .msh.",
+                            );
+                        }
+                        Some(built) => {
+                            let sets = built.sets();
+                            let info = MeshInfo {
+                                sets: &sets,
+                                kind: built.file.kind,
+                            };
+                            let m = &mut self.model;
+                            match tool {
+                                Tool::Material => {
+                                    model_tools::material_tool(ui, &mut m.draft, &info)
+                                }
+                                Tool::Support => model_tools::support_tool(
+                                    ui,
+                                    &mut m.draft,
+                                    &info,
+                                    &mut m.forms.bc,
+                                ),
+                                Tool::Load => {
+                                    model_tools::load_tool(ui, &mut m.draft, &info, &mut m.forms)
+                                }
+                                Tool::Thermal => {
+                                    model_tools::thermal_tool(ui, &mut m.draft, &info, &mut m.forms)
+                                }
+                                Tool::Contact => model_tools::contact_tool(
+                                    ui,
+                                    &mut m.draft,
+                                    &info,
+                                    &mut m.forms.contact,
+                                ),
+                                Tool::StepAmplitude => model_tools::step_tool(ui, &mut m.draft),
+                                _ => {
+                                    let calculation = model_space::run_label(&m.draft, &built.file);
+                                    let (save, go) = model_tools::run_tool(
+                                        ui,
+                                        calculation,
+                                        &m.diags,
+                                        m.note.as_deref(),
+                                    );
+                                    if save {
+                                        todo = Some(Todo::SaveModel);
+                                    }
+                                    goto = go;
+                                }
                             }
-                            Some(built) => {
-                                let sets = built.sets();
-                                let info = MeshInfo {
-                                    sets: &sets,
-                                    kind: built.file.kind,
-                                };
-                                let m = &mut self.model;
-                                match tool {
-                                    Tool::Material => {
-                                        model_tools::material_tool(ui, &mut m.draft, &info)
-                                    }
-                                    Tool::Support => model_tools::support_tool(
-                                        ui,
-                                        &mut m.draft,
-                                        &info,
-                                        &mut m.forms.bc,
-                                    ),
-                                    Tool::Load => model_tools::load_tool(
-                                        ui,
-                                        &mut m.draft,
-                                        &info,
-                                        &mut m.forms,
-                                    ),
-                                    _ => {
-                                        let physics = m.draft.physics(&built.file);
-                                        let (save, go) = model_tools::run_tool(
-                                            ui,
-                                            physics,
-                                            &m.diags,
-                                            m.note.as_deref(),
-                                        );
-                                        if save {
-                                            todo = Some(Todo::SaveModel);
-                                        }
-                                        goto = go;
-                                    }
-                                }
-                                if tool != Tool::Run {
-                                    ui.separator();
-                                    goto = model_tools::diagnostics_ui(ui, &m.diags, Some(tool));
-                                }
+                            if tool != Tool::Run {
+                                ui.separator();
+                                goto = model_tools::diagnostics_ui(ui, &m.diags, Some(tool));
                             }
                         }
-                    }
+                    },
                     Tool::Field | Tool::Deformation | Tool::Cut => match self.results.as_mut() {
                         Some(open) => results_tool(ui, tool, open),
                         None => {
@@ -619,6 +633,28 @@ impl App {
     /// Met la surbrillance de la vue du maillage à jour : la sélection pour « Faces → Set », le Set
     /// examiné pour « Sets », rien sinon.
     fn sync_highlight(&mut self) {
+        // l'outil Contact dessine les surfaces rigides ; en le quittant, on rend le surlignage des Sets
+        let rigid = match (self.state.space, self.state.tool()) {
+            (Space::Model, Tool::Contact) => self.model.draft.contacts.clone(),
+            _ => Vec::new(),
+        };
+        if rigid != self.model.shown {
+            if let (Some(open), Some(built)) = (self.mesh_view.as_mut(), &self.mesh.built) {
+                let triangles = if rigid.is_empty() {
+                    sets::highlight(built, &self.mesh.shown)
+                } else {
+                    rigid
+                        .iter()
+                        .flat_map(|c| model_space::rigid_triangles(c, &built.file))
+                        .collect()
+                };
+                open.view.set_highlight(triangles);
+            }
+            self.model.shown = rigid;
+        }
+        if !self.model.shown.is_empty() {
+            return;
+        }
         let wanted: Vec<String> = match (self.state.space, self.state.tool(), &self.mesh.built) {
             (Space::Mesh, Tool::FaceSets, _) => self.mesh.selection.clone(),
             (Space::Mesh, Tool::ManageSets, Some(built)) => self
