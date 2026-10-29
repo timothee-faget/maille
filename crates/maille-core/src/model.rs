@@ -569,6 +569,18 @@ impl Model {
     /// R = C (Tₙ₊₁ − Tₙ)/Δt + K (θ Tₙ₊₁ + (1 − θ) Tₙ) − F, puissance moyenne fournie pendant le pas
     /// (Σ R Δt est exactement la chaleur apportée par les BC).
     pub fn solve_step(&self, step: &Step, initial: &[f64]) -> Result<Vec<Increment>, MailleError> {
+        self.solve_step_with(step, initial, &mut |_| Flow::Continue)
+    }
+
+    /// Comme `solve_step`, en prévenant `observer` après chaque Increment (`Event::Increment`). Si
+    /// l'observateur répond `Flow::Stop`, le calcul s'arrête sur `MailleError::Cancelled` et rien n'est
+    /// rendu.
+    pub fn solve_step_with(
+        &self,
+        step: &Step,
+        initial: &[f64],
+        observer: &mut Observer,
+    ) -> Result<Vec<Increment>, MailleError> {
         self.require_thermal()?;
         let mesh = &self.mesh;
         let n = mesh.nodes.len();
@@ -631,6 +643,14 @@ impl Model {
                 field: thermal_field(&fluxes, t.clone(), reactions),
                 residuals: Vec::new(),
             });
+            notify(
+                observer,
+                Event::Increment {
+                    done: s,
+                    total: step.increments(),
+                    time: s as f64 * dt,
+                },
+            )?;
         }
         Ok(history)
     }
@@ -651,6 +671,19 @@ impl Model {
         &self,
         step: &Step,
         amplitude: &Amplitude,
+    ) -> Result<Vec<Increment>, MailleError> {
+        self.solve_quasi_static_with(step, amplitude, &mut |_| Flow::Continue)
+    }
+
+    /// Comme `solve_quasi_static`, en prévenant `observer` à chaque itération de Newton-Raphson
+    /// (`Event::Iteration`), à chaque coupe d'incrément (`Event::Cut`) et à chaque Increment fini
+    /// (`Event::Increment`). Si l'observateur répond `Flow::Stop`, le calcul s'arrête sur
+    /// `MailleError::Cancelled` et rien n'est rendu.
+    pub fn solve_quasi_static_with(
+        &self,
+        step: &Step,
+        amplitude: &Amplitude,
+        observer: &mut Observer,
     ) -> Result<Vec<Increment>, MailleError> {
         if self.analysis != Analysis::Static {
             return Err(MailleError::StaticOnly);
@@ -698,6 +731,7 @@ impl Model {
                 (start, time),
                 0,
                 (increment, time),
+                observer,
             )?;
             let contact = self.contact_state(&state.u, amplitude.at(time));
             history.push(Increment {
@@ -705,6 +739,14 @@ impl Model {
                 field: quasi_static_field(state.u.clone(), reactions, responses, contact),
                 residuals,
             });
+            notify(
+                observer,
+                Event::Increment {
+                    done: increment,
+                    total: step.increments(),
+                    time,
+                },
+            )?;
         }
         Ok(history)
     }
@@ -714,6 +756,7 @@ impl Model {
     /// l'une après l'autre, jusqu'à `MAX_CUTS` fois (1/32 de l'incrément). Seuls les Increments de la
     /// Step sont gardés ; en cas de coupe, les résidus rendus sont ceux de la dernière moitié.
     /// L'état n'est modifié qu'aux convergences.
+    #[allow(clippy::too_many_arguments)]
     fn advance(
         &self,
         a: &Assembly,
@@ -722,6 +765,7 @@ impl Model {
         (t0, t1): (f64, f64),
         cuts: usize,
         at: (usize, f64),
+        observer: &mut Observer,
     ) -> Result<Equilibrium, MailleError> {
         let mut trial = state.u.clone();
         let mut scale = state.scale;
@@ -732,6 +776,7 @@ impl Model {
             amplitude.at(t1),
             &mut scale,
             at,
+            &mut *observer,
         );
         match attempt {
             Ok(equilibrium) => {
@@ -746,8 +791,23 @@ impl Model {
                 | MailleError::PlasticCollapse { .. },
             ) if cuts < MAX_CUTS => {
                 let middle = (t0 + t1) / 2.0;
-                self.advance(a, amplitude, state, (t0, middle), cuts + 1, at)?;
-                self.advance(a, amplitude, state, (middle, t1), cuts + 1, at)
+                notify(
+                    observer,
+                    Event::Cut {
+                        time: t1,
+                        cuts: cuts + 1,
+                    },
+                )?;
+                self.advance(
+                    a,
+                    amplitude,
+                    state,
+                    (t0, middle),
+                    cuts + 1,
+                    at,
+                    &mut *observer,
+                )?;
+                self.advance(a, amplitude, state, (middle, t1), cuts + 1, at, observer)
             }
             Err(e) => Err(e),
         }
@@ -809,6 +869,7 @@ impl Model {
     /// `committed`) et le mène à F_int(u) = λ F, valeurs imposées λ × valeur de la BC. Renvoie les
     /// réponses des Elements, les réactions et les résidus relatifs (voir `Increment::residuals`).
     /// `at` : (incrément, temps), pour les erreurs.
+    #[allow(clippy::too_many_arguments)]
     fn equilibrium(
         &self,
         a: &Assembly,
@@ -817,6 +878,7 @@ impl Model {
         lambda: f64,
         scale: &mut f64,
         (increment, time): (usize, f64),
+        observer: &mut Observer,
     ) -> Result<Equilibrium, MailleError> {
         let mut residuals = Vec::new();
         // un « Element » de plus par Node esclave, pour la tangente du contact
@@ -857,6 +919,14 @@ impl Model {
                 return Err(MailleError::NotConverged { increment, time });
             }
             residuals.push(relative);
+            notify(
+                observer,
+                Event::Iteration {
+                    increment,
+                    iteration: residuals.len(),
+                    residual: relative,
+                },
+            )?;
             // au moins une itération : la première applique l'incrément des valeurs imposées
             if residuals.len() > 1 && relative <= NEWTON_TOLERANCE {
                 let reactions = residual
@@ -1053,6 +1123,44 @@ struct QuasiStaticState {
 type Equilibrium = (Vec<ElementResponse>, Vec<f64>, Vec<f64>);
 
 /// Tolérance de Newton-Raphson sur le résidu relatif (voir `Increment::residuals`).
+/// Ce qu'un calcul long raconte à son appelant (`solve_step_with`, `solve_quasi_static_with`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Event {
+    /// Un Increment de la Step est fini : `done` sur `total`, au temps `time`.
+    Increment {
+        done: usize,
+        total: usize,
+        time: f64,
+    },
+    /// Une itération de Newton-Raphson de l'incrément `increment` (depuis 1) a un résidu relatif
+    /// `residual`.
+    Iteration {
+        increment: usize,
+        iteration: usize,
+        residual: f64,
+    },
+    /// Newton n'a pas convergé : l'intervalle qui finit à `time` est coupé en deux (`cuts` coupes
+    /// déjà faites, celle-ci comprise).
+    Cut { time: f64, cuts: usize },
+}
+
+/// Réponse de l'appelant à un `Event` : continuer, ou arrêter le calcul (`MailleError::Cancelled`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Flow {
+    Continue,
+    Stop,
+}
+
+/// Le rappel d'un calcul long : il reçoit chaque `Event` et dit s'il faut continuer.
+pub type Observer<'a> = dyn FnMut(&Event) -> Flow + 'a;
+
+fn notify(observer: &mut Observer, event: Event) -> Result<(), MailleError> {
+    match observer(&event) {
+        Flow::Continue => Ok(()),
+        Flow::Stop => Err(MailleError::Cancelled),
+    }
+}
+
 const NEWTON_TOLERANCE: f64 = 1e-8;
 /// Nombre maximal d'itérations de Newton-Raphson par incrément.
 const NEWTON_ITERATIONS: usize = 25;
