@@ -8,6 +8,7 @@ mod camera;
 mod colormap;
 mod cut;
 mod display;
+mod embed;
 mod legend;
 mod png;
 mod render;
@@ -17,6 +18,8 @@ mod solid;
 mod testmesh;
 mod vec3;
 
+pub use display::Cut;
+pub use embed::ResultsView;
 pub use scene::NodalResults;
 
 use maille_core::mesh::Mesh;
@@ -249,6 +252,65 @@ mod tests {
         let band = (0.25 * lut.len() as f64) as usize;
         assert_color(pixel(&sliced, &cut, cx, cy), lut[band], "coupe x = -0,5");
         assert_ne!(lut[band], lut[0]);
+    }
+
+    /// Vue embarquée sur son propre device (comme le ferait l'interface graphique) ; `None` sans carte
+    /// graphique.
+    fn embedded(results: &NodalResults, size: [u32; 2]) -> Option<ResultsView> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()?;
+        Some(ResultsView::new(device, queue, results, size, 1.0).unwrap())
+    }
+
+    #[test]
+    fn an_embedded_view_draws_the_same_pixels_as_the_screenshot() {
+        let shot = Shot {
+            yaw: 90.0,
+            pitch: 0.0,
+            quantity: 7,
+            ..Shot::default()
+        };
+        let Some(expected) = render(&cube_results(), &shot) else {
+            return;
+        };
+        let Some(mut view) = embedded(&cube_results(), [shot.width, shot.height]) else {
+            return;
+        };
+        view.set_quantity(7);
+        view.look_along(0);
+        assert_eq!(view.pixels(), expected);
+    }
+
+    #[test]
+    fn an_embedded_view_follows_its_size_and_its_controls() {
+        let Some(mut view) = embedded(&cube_results(), [300, 200]) else {
+            return;
+        };
+        assert_eq!(view.texture().width(), 300);
+        view.resize([640, 480], 2.0);
+        assert_eq!(
+            (view.texture().width(), view.texture().height()),
+            (640, 480)
+        );
+        // le champ choisi, la déformée et la coupe se règlent sans fenêtre
+        assert!(view.quantities().len() > 7 && view.has_displacements() && view.is_solid());
+        view.set_quantity(2);
+        assert_eq!(view.quantity(), 2);
+        view.set_quantity(99);
+        assert_eq!(view.quantity(), 2, "un rang inexistant est ignoré");
+        view.set_deformed(true);
+        assert!(view.deformed());
+        view.set_cut(Some(Cut {
+            axis: 0,
+            fraction: 7.0,
+            flipped: false,
+        }));
+        assert_eq!(view.cut().unwrap().fraction, 1.0);
+        view.set_cut(None);
+        assert!(view.cut().is_none());
+        view.draw();
     }
 
     #[test]

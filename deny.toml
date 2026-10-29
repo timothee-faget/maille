@@ -10,6 +10,9 @@ allow = [
     "ISC",
     "Zlib",
     "Unicode-3.0",
+    # polices embarquées par egui (epaint_default_fonts) : l'embarquement est permis
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
 ]
 confidence-threshold = 0.9
 

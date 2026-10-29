@@ -33,10 +33,13 @@ enum Target {
         surface: wgpu::Surface<'static>,
         config: wgpu::SurfaceConfiguration,
     },
+    /// Texture hors écran : capture PNG, ou image montrée par un autre client (l'interface graphique)
+    /// qui partage le device. `scale` : pixels physiques par pixel logique de cet écran.
     Offscreen {
         texture: wgpu::Texture,
         width: u32,
         height: u32,
+        scale: f64,
     },
 }
 
@@ -146,7 +149,9 @@ fn offscreen_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Te
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: OFFSCREEN_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     })
 }
@@ -196,18 +201,30 @@ impl Renderer {
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))?;
         let (width, height) = (width.max(1), height.max(1));
+        Ok(Self::new_shared(
+            device, queue, width, height, 1.0, colormap,
+        ))
+    }
+
+    /// Prépare le GPU pour une texture de `width` × `height` pixels sur un device qui appartient à un
+    /// autre client (l'interface graphique) : `draw` la remplit, `texture` la donne. `scale` :
+    /// pixels physiques par pixel logique, pour la taille du texte.
+    pub fn new_shared(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        width: u32,
+        height: u32,
+        scale: f64,
+        colormap: Colormap,
+    ) -> Self {
+        let (width, height) = (width.max(1), height.max(1));
         let target = Target::Offscreen {
             texture: offscreen_texture(&device, width, height),
             width,
             height,
+            scale,
         };
-        Ok(Self::build(
-            device,
-            queue,
-            OFFSCREEN_FORMAT,
-            target,
-            colormap,
-        ))
+        Self::build(device, queue, OFFSCREEN_FORMAT, target, colormap)
     }
 
     fn build(
@@ -406,7 +423,7 @@ impl Renderer {
     pub fn scale_factor(&self) -> f64 {
         match &self.target {
             Target::Window { window, .. } => window.scale_factor(),
-            Target::Offscreen { .. } => 1.0,
+            Target::Offscreen { scale, .. } => *scale,
         }
     }
 
@@ -557,19 +574,58 @@ impl Renderer {
         if width == 0 || height == 0 {
             return;
         }
-        if let Target::Window {
-            surface, config, ..
-        } = &mut self.target
-        {
-            config.width = width;
-            config.height = height;
-            surface.configure(&self.device, config);
-        } else {
-            return;
+        match &mut self.target {
+            Target::Window {
+                surface, config, ..
+            } => {
+                config.width = width;
+                config.height = height;
+                surface.configure(&self.device, config);
+            }
+            Target::Offscreen {
+                texture,
+                width: w,
+                height: h,
+                ..
+            } => {
+                if (*w, *h) == (width, height) {
+                    return;
+                }
+                *texture = offscreen_texture(&self.device, width, height);
+                (*w, *h) = (width, height);
+            }
         }
         self.depth = depth_view(&self.device, width, height);
         // la matrice dépend du rapport de la fenêtre : l'appelant renvoie la caméra
         self.write_uniforms();
+    }
+
+    /// Facteur d'échelle de l'écran d'une texture partagée (écran Retina : 2) ; sans effet sur une
+    /// fenêtre, qui le lit d'elle-même.
+    pub fn set_scale_factor(&mut self, factor: f64) {
+        if let Target::Offscreen { scale, .. } = &mut self.target {
+            *scale = factor;
+        }
+    }
+
+    /// La texture d'une cible hors écran (format sRGB 8 bits), que `draw` remplit ; `None` pour une
+    /// fenêtre. Elle change quand `resize` change la taille.
+    pub fn texture(&self) -> Option<&wgpu::Texture> {
+        match &self.target {
+            Target::Offscreen { texture, .. } => Some(texture),
+            Target::Window { .. } => None,
+        }
+    }
+
+    /// Dessine dans la texture d'une cible hors écran, sans relire les pixels.
+    pub fn draw(&mut self) {
+        let Target::Offscreen { texture, .. } = &self.target else {
+            return;
+        };
+        let view = texture.create_view(&Default::default());
+        let encoder = self.encode(&view);
+        self.queue.submit([encoder.finish()]);
+        self.text.atlas.trim();
     }
 
     /// Dessine dans la fenêtre.
@@ -608,6 +664,7 @@ impl Renderer {
             texture,
             width,
             height,
+            ..
         } = &self.target
         else {
             return Err("capture demandée sur une fenêtre".into());
