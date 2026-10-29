@@ -28,7 +28,8 @@ fn vector(name: &str, values: &[f64], dofs: usize) -> PointArray {
 /// - thermique : `temperature` et `reaction` (puissance fournie aux Nodes imposés) ;
 /// - statique : `displacement` et `reaction` (3 composantes), `stress` (6 composantes dans
 ///   l'ordre de VTK : xx, yy, zz, xy, yz, xz) et `von_mises` lissés aux Nodes (`nodal_stresses`),
-///   et `plastic_strain` (p lissée) si le calcul est plastique.
+///   et `plastic_strain` (p lissée) si le calcul est plastique ;
+/// - avec des contacts : `contact_force` (3 composantes, force sur le corps) et `contact_pressure`.
 ///
 /// 2D et 3D seulement : les Bar et Beam n'ont pas de contraintes aux Nodes.
 pub fn result_arrays(mesh: &Mesh, field: &Field) -> Result<Vec<PointArray>, IoError> {
@@ -77,6 +78,14 @@ pub fn result_arrays(mesh: &Mesh, field: &Field) -> Result<Vec<PointArray>, IoEr
             "plastic_strain",
             1,
             nodal_equivalent_plastic_strains(mesh, field)?,
+        ));
+    }
+    if !field.contact_forces.is_empty() {
+        arrays.push(vector("contact_force", &field.contact_forces, dofs));
+        arrays.push(array(
+            "contact_pressure",
+            1,
+            field.contact_pressures.clone(),
         ));
     }
     Ok(arrays)

@@ -1,0 +1,51 @@
+# Balle de caoutchouc écrasée entre deux plans rigides : grandes déformations et contact.
+#
+# On ne maille qu'un quart de la balle (rayon 10 mm) : le bord « bas » (y = 0) et le bord « gauche »
+# (x = 0) sont des plans de symétrie. Le plan rigide du haut descend de 4 mm (40 % du rayon) et écrase la
+# balle ; elle glisse sans frottement. Le néo-Hookéen (`hyperelasticity`) garde sa raideur à grande
+# déformation, là où Saint-Venant–Kirchhoff se ramollirait. ν = 0,45 : Tri6 et ν proches de 0,5 verrouillent
+# moins que Tri3 (la formulation mixte n'est pas faite).
+#
+# Lancer : maille solve balle.toml     puis : maille view balle.pvd
+# Le fichier balle_contacts.csv donne la force sur le plan à chaque incrément (courbe force-enfoncement).
+
+# Unités cohérentes de votre choix : Maille ne convertit rien. Ici : N, mm, MPa.
+units = "N, mm, MPa"
+mesh = "balle.msh"
+analysis = "static"
+kinematics = "large"
+
+[materials.caoutchouc]
+young = 10.0
+poisson = 0.45
+hyperelasticity = "neo_hookean"
+
+[[sections]]
+set = "domaine"
+material = "caoutchouc"
+thickness = 1.0
+plane_state = "strain"
+
+[[bcs]]
+set = "bas"
+dof = "uy"
+value = 0.0
+
+[[bcs]]
+set = "gauche"
+dof = "ux"
+value = 0.0
+
+# Le plan rigide : il passe par (0, 10) et pousse vers le bas (sa normale pointe vers la balle).
+# `motion` est son déplacement quand λ = 1, ici la fin du calcul.
+[[contacts]]
+set = "balle"
+kind = "plane"
+point = [0.0, 10.0]
+normal = [0.0, -1.0]
+motion = [0.0, -4.0]
+
+[step]
+kind = "quasi_static"
+duration = 1.0
+increments = 20

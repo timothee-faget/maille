@@ -74,6 +74,7 @@ fn regenerate_example_meshes() {
         ("trempe", "1"),
         ("tube", "1"),
         ("console_gd", "0.5"),
+        ("balle", "0.5"),
     ] {
         let out = Command::new(env!("CARGO_BIN_EXE_maille"))
             .args([
@@ -93,6 +94,26 @@ fn regenerate_example_meshes() {
         );
     }
     fs::write(dir.join("cube.msh"), write(&cube()).unwrap()).unwrap();
+    fs::write(dir.join("hertz.msh"), write(&hertz_block()).unwrap()).unwrap();
+}
+
+/// Demi-bloc de 10 × 10 pour le contact de Hertz, symétrique en x = 0 : le maillage se resserre vers le
+/// contact (taille 0,1 sur 1,5 mm autour de l'axe), que le mailleur DXF, à taille unique, ne sait pas
+/// faire. Les deux morceaux du dessus forment le même bord « dessus ».
+fn hertz_block() -> MshFile {
+    use maille_core::mesher::{triangulate, Curve, Geometry, MeshOptions};
+    let geometry = Geometry {
+        outer: vec![
+            Curve::line([0.0, 0.0], 0.1, "dessus"),
+            Curve::line([1.5, 0.0], 0.8, "dessus"),
+            Curve::line([10.0, 0.0], 2.0, "droite"),
+            Curve::line([10.0, -10.0], 2.0, "bas"),
+            Curve::line([0.0, -10.0], 1.0, "axe"),
+        ],
+        holes: vec![],
+    };
+    let t = triangulate(&geometry, &MeshOptions::default()).unwrap();
+    MshFile::from_triangulation(&t.to_quadratic()).unwrap()
 }
 
 // --- exécution du binaire sur une copie des exemples ---
@@ -195,6 +216,91 @@ fn large_strain_cantilever_follows_the_elastica() {
     // dix incréments plus l'état de repos
     let pvd = fs::read_to_string(w.0.join("console_gd.pvd")).unwrap();
     assert_eq!(read_pvd(&pvd).unwrap().len(), 11);
+}
+
+/// Lignes (time, fx, fy, fz) du `.csv` des contacts, pour le contact 0.
+fn contact_rows(w: &Workdir, name: &str) -> Vec<[f64; 4]> {
+    let text = fs::read_to_string(w.0.join(name)).unwrap();
+    let mut lines = text.lines();
+    assert_eq!(lines.next(), Some("time,contact,fx,fy,fz"));
+    lines
+        .map(|l| {
+            let v: Vec<f64> = l.split(',').map(|x| x.parse().unwrap()).collect();
+            assert_eq!(v[1], 0.0, "un seul contact");
+            [v[0], v[2], v[3], v[4]]
+        })
+        .collect()
+}
+
+#[test]
+fn hertz_example_follows_the_contact_theory() {
+    // a = √(4 P R / π E*), p0 = 2 P / (π a), pour la force P du .csv (demi-modèle : × 2)
+    let w = Workdir::new("hertz");
+    w.solve("hertz.toml");
+    let rows = contact_rows(&w, "hertz_contacts.csv");
+    assert_eq!(rows.len(), 9);
+    assert!(rows[0][2].abs() < 1e-12, "aucune force au repos");
+    let force = 2.0 * rows.last().unwrap()[2];
+    let (_, r) = w.results("hertz.pvd", None);
+    let pressure = array(&r, "contact_pressure");
+    let e_star = 210e3 / (1.0 - 0.3 * 0.3);
+    let a = (4.0 * force * 10.0 / (PI * e_star)).sqrt();
+    let p0 = 2.0 * force / (PI * a);
+    // nœuds du dessus (y = 0) en contact : demi-largeur entre le dernier actif et le suivant
+    let top: Vec<(f64, f64)> = r
+        .nodes
+        .iter()
+        .zip(pressure)
+        .filter(|(n, _)| n.y.abs() < 1e-9)
+        .map(|(n, p)| (n.x, *p))
+        .collect();
+    let last = top
+        .iter()
+        .filter(|(_, p)| *p > 0.0)
+        .fold(0.0, |m: f64, (x, _)| m.max(*x));
+    let next = top
+        .iter()
+        .map(|(x, _)| *x)
+        .filter(|&x| x > last + 1e-9)
+        .fold(f64::INFINITY, f64::min);
+    let measured = 0.5 * (last + next);
+    let peak = top.iter().fold(0.0, |m: f64, (_, p)| m.max(*p));
+    assert!(
+        (measured / a - 1.0).abs() < 5e-2,
+        "a = {measured}, Hertz {a}"
+    );
+    assert!((peak / p0 - 1.0).abs() < 5e-2, "p0 = {peak}, Hertz {p0}");
+    // le champ de force de contact est écrit aussi
+    assert_eq!(array(&r, "contact_force").len(), 3 * r.nodes.len());
+}
+
+#[test]
+fn balle_example_is_squeezed_by_the_rigid_plane() {
+    // pas de solution exacte : on vérifie que 40 % d'écrasement converge, que la force monte avec
+    // l'enfoncement, et que le calcul est en grandes déformations
+    let w = Workdir::new("balle");
+    w.solve("balle.toml");
+    let rows = contact_rows(&w, "balle_contacts.csv");
+    assert_eq!(rows.len(), 21);
+    assert!(rows[0][2].abs() < 1e-12);
+    for pair in rows.windows(2) {
+        assert!(pair[1][2] > pair[0][2], "la force monte avec l'enfoncement");
+    }
+    assert!(rows.last().unwrap()[2] > 10.0);
+    let (_, r) = w.results("balle.pvd", None);
+    assert!(r.large_strain);
+    // la balle écrasée de 4 mm : son sommet (y = 10) est descendu de 4 mm, à la pénétration près
+    let u = array(&r, "displacement");
+    let top = r
+        .nodes
+        .iter()
+        .position(|n| n.x.abs() < 1e-9 && (n.y - 10.0).abs() < 1e-9)
+        .unwrap();
+    assert!(
+        (u[3 * top + 1] + 4.0).abs() < 1e-2,
+        "uy = {}",
+        u[3 * top + 1]
+    );
 }
 
 #[test]

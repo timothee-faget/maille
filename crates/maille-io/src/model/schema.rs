@@ -20,6 +20,13 @@
 //! set = "interieur"
 //! value = 100.0
 //!
+//! [[contacts]]                    # contact sans frottement contre une surface rigide (statique)
+//! set = "dessus"                  # bord du corps déformable (Set de Nodes)
+//! kind = "cylinder"               # "plane", "cylinder" ou "sphere"
+//! point = [0.0, 10.0]             # plan et cylindre ; `center` pour la sphère
+//! radius = 10.0                   # cylindre et sphère ; `normal` pour le plan, `axis` en 3D
+//! motion = [0.0, -0.08]           # déplacement de la surface à λ = 1 (nul par défaut)
+//!
 //! [[bcs]]                         # Dirichlet sur un Set de Nodes
 //! set = "sym_y"
 //! dof = "ux"                      # ux, uy, uz (statique), t (thermique)
@@ -55,6 +62,9 @@ pub struct ModelFile {
     pub convections: Vec<ConvectionDef>,
     #[serde(default)]
     pub pressures: Vec<PressureDef>,
+    /// Contacts contre des surfaces rigides : demandent `[step] kind = "quasi_static"`.
+    #[serde(default)]
+    pub contacts: Vec<ContactDef>,
     /// Couplage thermo-mécanique : les températures d'un calcul thermique dilatent le modèle
     /// statique. Le CLI lit le fichier `from` et les passe à `build`.
     pub temperatures: Option<TemperaturesDef>,
@@ -156,6 +166,33 @@ pub struct ConvectionDef {
 pub struct PressureDef {
     pub set: String,
     pub value: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ContactKind {
+    Plane,
+    Cylinder,
+    Sphere,
+}
+
+/// Contact des Nodes d'un bord contre une surface rigide. Les vecteurs ont 2 composantes (maillage 2D)
+/// ou 3 ; seules les clés de `kind` sont admises :
+/// - `plane` : `point` et `normal` (vers le corps) ;
+/// - `cylinder` : `point`, `radius` et, en 3D, `axis` ; en 2D, c'est un cercle ;
+/// - `sphere` : `center` et `radius` (3D).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContactDef {
+    pub set: String,
+    pub kind: ContactKind,
+    pub point: Option<Vec<f64>>,
+    pub normal: Option<Vec<f64>>,
+    pub axis: Option<Vec<f64>>,
+    pub center: Option<Vec<f64>>,
+    pub radius: Option<f64>,
+    /// Déplacement de la surface rigide quand λ(t) = 1, nul par défaut.
+    pub motion: Option<Vec<f64>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]

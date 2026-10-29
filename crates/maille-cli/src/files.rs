@@ -125,6 +125,18 @@ fn solve_file(model_path: &Path, output: Option<&Path>) -> Result<Vec<PathBuf>, 
     let pvd = named(".pvd");
     write(&pvd, &vtk::write_pvd(&entries)?)?;
     written.push(pvd);
+    // contacts : la force sur chaque surface rigide à chaque incrément, pour la courbe force-enfoncement
+    if increments.iter().any(|(_, f)| !f.rigid_forces.is_empty()) {
+        let mut csv = String::from("time,contact,fx,fy,fz\n");
+        for (time, field) in &increments {
+            for (c, f) in field.rigid_forces.iter().enumerate() {
+                csv.push_str(&format!("{time:e},{c},{:e},{:e},{:e}\n", f[0], f[1], f[2]));
+            }
+        }
+        let path = named("_contacts.csv");
+        write(&path, &csv)?;
+        written.push(path);
+    }
     Ok(written)
 }
 
