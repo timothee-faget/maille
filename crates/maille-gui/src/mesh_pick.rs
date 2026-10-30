@@ -470,6 +470,19 @@ pub fn highlight_edges(
         .collect()
 }
 
+/// Ce que contient un Set du `.msh`, en clair : « 12 faces », « 40 Nodes »…
+pub fn describe(set: &Set) -> String {
+    if !set.elements.is_empty() {
+        format!("{} Elements", set.elements.len())
+    } else if !set.faces.is_empty() {
+        format!("{} faces", set.faces.len())
+    } else if !set.edges.is_empty() {
+        format!("{} arêtes", set.edges.len())
+    } else {
+        format!("{} Nodes", set.nodes.len())
+    }
+}
+
 /// Les triangles à surligner pour un Set du `.msh`, quel que soit son rôle (Elements, faces, Nodes).
 pub fn highlight_set(file: &MshFile, skin: &[SkinFace], set: &Set) -> Vec<[Point; 3]> {
     if !set.elements.is_empty() {

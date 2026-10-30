@@ -8,6 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use maille_core::results::Stress;
+use maille_io::msh::{self, MshFile};
 use maille_io::vtk::{self, VtuResults};
 
 /// Les Increments d'un `.pvd` (ou l'unique Increment d'un `.vtu`), relus au besoin.
@@ -81,6 +82,46 @@ impl Series {
         let stem = self.pvd.file_stem()?.to_string_lossy().into_owned();
         let path = self.pvd.with_file_name(format!("{stem}_contacts.csv"));
         path.exists().then_some(path)
+    }
+
+    /// Le `.msh` du calcul, d'après le modèle à côté des résultats : `maille solve modele.toml` écrit
+    /// `modele.pvd` (ou `modele_thermal.pvd`, `modele_0003.vtu`…), et `modele.toml` nomme son
+    /// `mesh`. `None` si ce modèle n'est pas là (résultats déplacés, préfixe `-o`).
+    pub fn mesh_path(&self) -> Option<PathBuf> {
+        let mut stem = self.pvd.file_stem()?.to_string_lossy().into_owned();
+        if let Some((head, tail)) = stem.rsplit_once('_') {
+            if tail.len() == 4 && tail.bytes().all(|b| b.is_ascii_digit()) {
+                stem = head.to_string();
+            }
+        }
+        if let Some(head) = stem.strip_suffix("_thermal") {
+            stem = head.to_string();
+        }
+        let toml = self.pvd.with_file_name(format!("{stem}.toml"));
+        let model = maille_io::model::parse(&fs::read_to_string(&toml).ok()?).ok()?;
+        Some(toml.with_file_name(model.mesh))
+    }
+
+    /// Lit le `.msh` `path` pour en montrer les Sets ; erreur s'il n'a pas les Nodes et les Elements
+    /// des résultats (ce n'est pas le maillage du calcul).
+    pub fn read_mesh(&mut self, path: &Path) -> Result<MshFile, Box<dyn Error>> {
+        let text = fs::read_to_string(path)
+            .map_err(|e| format!("impossible de lire {} : {e}", path.display()))?;
+        let file = msh::read(&text)?;
+        let r = self.get(0)?;
+        if (file.nodes.len(), file.cells.len(), file.kind) != (r.nodes.len(), r.cells.len(), r.kind)
+        {
+            return Err(format!(
+                "{} n'est pas le maillage de ces résultats : {} Nodes et {} Elements, contre {} et {}",
+                path.display(),
+                file.nodes.len(),
+                file.cells.len(),
+                r.nodes.len(),
+                r.cells.len()
+            )
+            .into());
+        }
+        Ok(file)
     }
 
     /// Le Node `node` au fil des Increments : une valeur de la grandeur `label` (voir `readings`) par
@@ -387,6 +428,23 @@ mod tests {
         assert_eq!(fy[0], [0.0, 0.0]);
         // la force croît avec l'enfoncement
         assert!(fy.windows(2).all(|w| w[1][1] > w[0][1]));
+    }
+
+    #[test]
+    fn the_mesh_of_the_results_is_found_and_checked() {
+        let pvd = hertz();
+        let mut series = Series::open(&pvd).unwrap();
+        let path = series.mesh_path().unwrap();
+        assert_eq!(path, pvd.with_file_name("hertz.msh"));
+        let file = series.read_mesh(&path).unwrap();
+        assert!(!file.sets.is_empty());
+        // un Increment seul retrouve aussi son modèle
+        let vtu = Series::open(&pvd.with_file_name("hertz_0003.vtu")).unwrap();
+        assert_eq!(vtu.mesh_path(), Some(path));
+        // un autre maillage est refusé
+        let other = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/plaque.msh");
+        let err = series.read_mesh(&other).unwrap_err().to_string();
+        assert!(err.contains("n'est pas le maillage"), "{err}");
     }
 
     #[test]

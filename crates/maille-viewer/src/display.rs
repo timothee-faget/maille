@@ -9,6 +9,14 @@ use crate::render::Renderer;
 use crate::scene::{range, Quantity, Scene};
 use crate::vec3::V3;
 
+/// Couleur du surlignage (sélection, sonde) : orange opaque.
+const HIGHLIGHT: [u8; 4] = [255, 140, 0, 255];
+/// Opacité d'un Set montré : le champ reste lisible dessous.
+const SET_ALPHA: u8 = 140;
+
+/// Un Set montré : sa couleur RGB et ses triangles (sommets dans les coordonnées de la pièce).
+pub type ShownSet = ([u8; 3], Vec<[[f64; 3]; 3]>);
+
 /// Plan de coupe perpendiculaire à un axe, à une fraction de la boîte du Mesh (0 : au minimum,
 /// 1 : au maximum). On garde le côté des petites coordonnées, ou des grandes si `flipped`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -27,8 +35,10 @@ pub struct Display {
     /// Vrai tant que l'utilisateur n'a ni zoomé ni déplacé : la vue se recadre avec la fenêtre.
     pub follow_window: bool,
     pub cut: Option<Cut>,
-    /// Triangles surlignés (sélection), par-dessus le Mesh non déformé.
+    /// Triangles surlignés (sélection), en orange par-dessus le Mesh non déformé.
     pub highlight: Vec<[[f64; 3]; 3]>,
+    /// Sets montrés : une couleur RGB et ses triangles, translucides, sous le surlignage.
+    pub sets: Vec<ShownSet>,
     /// Intervalle de la légende imposé (animation : la même échelle à chaque Increment) ; sinon celui
     /// des valeurs affichées.
     pub range_lock: Option<(f64, f64)>,
@@ -45,6 +55,7 @@ impl Display {
             follow_window: true,
             cut: None,
             highlight: Vec::new(),
+            sets: Vec::new(),
             range_lock: None,
         }
     }
@@ -135,14 +146,24 @@ impl Display {
             surface.triangles.as_flattened(),
             &lines.iter().map(to_f32).collect::<Vec<_>>(),
         );
-        renderer.set_highlight(
-            &self
-                .highlight
-                .iter()
-                .flatten()
-                .map(to_f32)
-                .collect::<Vec<_>>(),
-        );
+        // les Sets d'abord, coupés comme la peau : le surlignage (sélection, sonde) reste par-dessus
+        let plane = self.plane().map(|(plane, _)| plane);
+        let colored = self
+            .sets
+            .iter()
+            .flat_map(|(rgb, triangles)| {
+                let [r, g, b] = *rgb;
+                clip_set(triangles, plane)
+                    .into_iter()
+                    .map(move |t| (t, [r, g, b, SET_ALPHA]))
+            })
+            .chain(self.highlight.iter().map(|&t| (t, HIGHLIGHT)));
+        let (mut corners, mut colors) = (Vec::new(), Vec::new());
+        for (t, color) in colored {
+            corners.extend(t.iter().map(to_f32));
+            colors.extend([color; 3]);
+        }
+        renderer.set_highlight(&corners, &colors);
         renderer.set_range((lo, hi));
         // la déformée ou un autre Increment peut déborder de la boîte du dernier cadrage
         self.camera.enclose(self.scene.bounds(scale));
@@ -156,4 +177,20 @@ impl Display {
         );
         renderer.set_legend(&layout, &title);
     }
+}
+
+/// Les triangles d'un Set, du côté gardé du plan de coupe (tous s'il n'y en a pas).
+fn clip_set(triangles: &[[V3; 3]], plane: Option<Plane>) -> Vec<[V3; 3]> {
+    let Some(plane) = plane else {
+        return triangles.to_vec();
+    };
+    let positions = triangles.as_flattened();
+    let corners: Vec<[u32; 3]> = (0..triangles.len() as u32)
+        .map(|k| [3 * k, 3 * k + 1, 3 * k + 2])
+        .collect();
+    let kept = clip_triangles(positions, &vec![0.0; positions.len()], &corners, plane);
+    kept.triangles
+        .iter()
+        .map(|t| t.map(|i| kept.positions[i as usize]))
+        .collect()
 }

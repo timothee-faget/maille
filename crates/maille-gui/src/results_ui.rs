@@ -1,16 +1,32 @@
-//! Les outils de l'espace Résultats qui parcourent un calcul : Increments (curseur et animation), Sonde
-//! (valeurs en un Node), Courbe XY (dans le temps, forces de contact) et Capture PNG. Les calculs sont
-//! dans `series` (pur, testé) ; ici, seulement l'affichage et la vue.
+//! Les outils de l'espace Résultats qui parcourent un calcul : Sets (montrés sur la vue), Increments
+//! (curseur et animation), Sonde (valeurs en un Node), Courbe XY (dans le temps, forces de contact) et
+//! Capture PNG. Les calculs sont dans `series` (pur, testé) ; ici, seulement l'affichage et la vue.
 
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::fs;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, Pos2, Sense, Stroke, Vec2};
+use maille_io::msh::MshFile;
 
 use crate::app::Open;
+use crate::mesh_pick::{self, SkinFace};
 use crate::results;
 use crate::series::{self, Series};
+
+/// Couleurs des Sets, attribuées dans l'ordre des noms (la même couleur à chaque ouverture).
+const SET_COLORS: [[u8; 3]; 8] = [
+    [230, 25, 75],
+    [60, 180, 75],
+    [255, 225, 25],
+    [0, 130, 200],
+    [245, 130, 48],
+    [145, 30, 180],
+    [70, 240, 240],
+    [240, 50, 230],
+];
 
 /// Rayon, en pixels, dans lequel un clic désigne un Node.
 pub(crate) const PICK_RADIUS: f64 = 16.0;
@@ -37,12 +53,30 @@ pub(crate) struct Playback {
     pub probe: Option<usize>,
     pub curve: Option<Curve>,
     pub note: Option<String>,
+    /// Le `.msh` du calcul (outil « Sets ») : lu, ou son chemin (trouvé ou à taper) et, s'il n'a pas
+    /// pu être lu, pourquoi.
+    pub sets: Option<MeshSets>,
+    pub mesh_path: String,
+    pub mesh_note: Option<String>,
+}
+
+/// Les Sets du `.msh` du calcul et ceux qu'on montre. Les Nodes du fichier suivent la vue (déformée,
+/// Increment affiché) : le surlignage se calcule dessus.
+pub(crate) struct MeshSets {
+    file: MshFile,
+    skin: Vec<SkinFace>,
+    shown: BTreeSet<String>,
 }
 
 impl Playback {
     pub(crate) fn new(series: Series) -> Self {
         let index = series.len() - 1;
         let fixed_range = series.len() > 1;
+        // le `.msh` ne se lit qu'à la première ouverture de l'outil « Sets »
+        let found = series.mesh_path();
+        let mesh_note = found.is_none().then(|| {
+            "Le modèle de ces résultats n'est pas à côté : tape le chemin du .msh.".to_string()
+        });
         Self {
             series,
             index,
@@ -54,6 +88,19 @@ impl Playback {
             probe: None,
             curve: None,
             note: None,
+            sets: None,
+            mesh_path: found.map(|p| p.display().to_string()).unwrap_or_default(),
+            mesh_note,
+        }
+    }
+}
+
+impl MeshSets {
+    fn new(file: MshFile) -> Self {
+        Self {
+            skin: mesh_pick::skin(&file),
+            file,
+            shown: BTreeSet::new(),
         }
     }
 }
@@ -68,7 +115,49 @@ impl Open {
         play.index = k;
         self.view.set_results(&nodal)?;
         self.refresh_marker();
+        self.refresh_sets();
         Ok(())
+    }
+
+    /// Les Sets cochés, chacun dans sa couleur, sur la pièce telle qu'elle est affichée.
+    pub(crate) fn refresh_sets(&mut self) {
+        let Some(sets) = self.play.as_mut().and_then(|p| p.sets.as_mut()) else {
+            return;
+        };
+        if sets.shown.is_empty() {
+            self.view.set_sets(Vec::new());
+            return;
+        }
+        for (node, p) in sets.file.nodes.iter_mut().zip(self.view.node_positions()) {
+            (node.x, node.y, node.z) = (p[0], p[1], p[2]);
+        }
+        let shown = sets
+            .file
+            .sets
+            .iter()
+            .zip(SET_COLORS.iter().cycle())
+            .filter(|((name, _), _)| sets.shown.contains(*name))
+            .map(|((_, set), &color)| {
+                (color, mesh_pick::highlight_set(&sets.file, &sets.skin, set))
+            })
+            .collect();
+        self.view.set_sets(shown);
+    }
+
+    /// Lit le `.msh` tapé dans l'outil « Sets ».
+    fn load_mesh(&mut self) {
+        let Some(play) = self.play.as_mut() else {
+            return;
+        };
+        let path = Path::new(play.mesh_path.trim()).to_path_buf();
+        match play.series.read_mesh(&path) {
+            Ok(file) => {
+                play.sets = Some(MeshSets::new(file));
+                play.mesh_note = None;
+            }
+            Err(e) => play.mesh_note = Some(e.to_string()),
+        }
+        self.refresh_sets();
     }
 
     /// Fixe (ou libère) l'intervalle de la légende : celui du champ affiché sur tous les Increments.
@@ -169,6 +258,73 @@ impl Open {
             play.curve = None;
         }
         self.refresh_marker();
+    }
+}
+
+/// Inspecteur « Sets » : une case par Set du `.msh` du calcul, dans sa couleur.
+pub(crate) fn sets_tool(ui: &mut egui::Ui, open: &mut Open) {
+    if open
+        .play
+        .as_ref()
+        .is_some_and(|p| p.sets.is_none() && p.mesh_note.is_none())
+    {
+        open.load_mesh();
+    }
+    let Some(play) = open.play.as_mut() else {
+        return;
+    };
+    let mut changed = false;
+    match play.sets.as_mut() {
+        Some(sets) if sets.file.sets.is_empty() => {
+            ui.label("Le maillage de ce calcul n'a pas de Set.");
+        }
+        Some(sets) => {
+            ui.horizontal(|ui| {
+                if ui.button("Tous").clicked() {
+                    sets.shown = sets.file.sets.keys().cloned().collect();
+                    changed = true;
+                }
+                if ui.button("Aucun").clicked() {
+                    sets.shown.clear();
+                    changed = true;
+                }
+            });
+            for ((name, set), &[r, g, b]) in sets.file.sets.iter().zip(SET_COLORS.iter().cycle()) {
+                ui.horizontal(|ui| {
+                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                    ui.painter()
+                        .rect_filled(rect, 2.0, Color32::from_rgb(r, g, b));
+                    let mut on = sets.shown.contains(name);
+                    if ui.checkbox(&mut on, name).changed() {
+                        if on {
+                            sets.shown.insert(name.clone());
+                        } else {
+                            sets.shown.remove(name);
+                        }
+                        changed = true;
+                    }
+                    ui.weak(mesh_pick::describe(set));
+                });
+            }
+        }
+        None => {
+            if let Some(note) = &play.mesh_note {
+                ui.label(note);
+            }
+            ui.horizontal(|ui| {
+                ui.text_edit_singleline(&mut play.mesh_path);
+                if ui.button("Lire").clicked() {
+                    changed = true;
+                }
+            });
+            if changed {
+                open.load_mesh();
+            }
+            return;
+        }
+    }
+    if changed {
+        open.refresh_sets();
     }
 }
 
