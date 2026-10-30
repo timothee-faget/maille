@@ -3,7 +3,6 @@
 //! rien : l'état est dans `state`.
 
 use std::error::Error;
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use eframe::egui::{
@@ -15,6 +14,7 @@ use maille_io::meshing::Source;
 use maille_viewer::{Cut, NodalResults, ResultsView};
 
 use crate::compute::{ComputeState, Job, Running};
+use crate::files::{self, Written};
 use crate::library;
 use crate::mesh_pick::{self, Rect as PickRect};
 use crate::mesh_space::{self, Built, Cad, Imported};
@@ -174,6 +174,29 @@ pub struct App {
     /// À ouvrir dès la première image (argument de la ligne de commande).
     pending: Option<PathBuf>,
     error: Option<String>,
+    /// Ce que l'interface a écrit pendant la session, pour ne pas écraser le travail de l'utilisateur.
+    written: Written,
+    /// Des fichiers à écrire qui existent et ont été modifiés en dehors de l'interface : on attend
+    /// l'accord de l'utilisateur.
+    confirm: Option<Confirm>,
+}
+
+/// Écriture en attente d'accord, voir `App::write_or_ask`.
+struct Confirm {
+    files: Vec<files::File>,
+    conflicts: Vec<PathBuf>,
+    then: AfterWrite,
+}
+
+/// Ce qui suit l'écriture des fichiers.
+#[derive(Clone, Copy)]
+enum AfterWrite {
+    /// Le maillage seul (« Écrire le .msh »).
+    Mesh,
+    /// Le modèle (et son maillage) ; le dernier fichier est le TOML.
+    Model,
+    /// Le modèle, puis le calcul sur ce TOML.
+    Run,
 }
 
 impl App {
@@ -218,6 +241,8 @@ impl App {
             mesh_path: String::new(),
             pending: open,
             error: None,
+            written: Written::default(),
+            confirm: None,
         }
     }
 
@@ -744,14 +769,12 @@ impl App {
             self.state.set_tool(target);
         }
         match todo {
-            Some(Todo::SaveModel) => {
-                self.save_model();
-            }
+            Some(Todo::SaveModel) => self.save_model(AfterWrite::Model, ctx),
             Some(Todo::Run) => self.start_run(ctx),
             Some(Todo::Open(path)) => self.load(&path, frame),
             Some(Todo::Import(path)) => self.import(&path, frame),
             Some(Todo::Remesh) => self.remesh(frame),
-            Some(Todo::Save) => self.save(),
+            Some(Todo::Save) => self.save(ctx),
             Some(Todo::CreateSet) => self.create_set(),
             Some(Todo::CreateMeshSet) => self.create_mesh_set(),
             Some(Todo::RemainingSet) => self.create_remaining_set(),
@@ -1069,77 +1092,157 @@ impl App {
     }
 
     /// Écrit le modèle (et le maillage, pour une géométrie) à côté de la source : `<source>_modele.toml`.
-    fn save_model(&mut self) -> Option<PathBuf> {
-        let built = self.mesh.built.as_ref()?;
-        let result = (|| -> Result<PathBuf, Box<dyn Error>> {
-            let (source, msh_path, meshing) = match &self.mesh.imported {
-                Some(Imported::Cad(cad)) => {
-                    let msh_path = mesh_space::save(cad, built)?;
-                    let name = cad
-                        .path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    let recipe =
-                        mesh_space::recipe(&name, self.mesh.size, self.mesh.quadratic, &built.user);
-                    (cad.path.clone(), msh_path, Some(recipe))
-                }
-                Some(Imported::Mesh(path, _)) if built.mesh_sets.is_empty() => {
-                    (path.clone(), path.clone(), None)
-                }
-                // les Sets tirés sur le Mesh : un `.msh` à côté, l'original reste intact
-                Some(Imported::Mesh(path, _)) => {
-                    let stem = path
-                        .file_stem()
-                        .map(|s| s.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    let with_sets = path.with_file_name(format!("{stem}_sets.msh"));
-                    fs::write(&with_sets, maille_io::msh::write(&built.file)?).map_err(|e| {
-                        format!("impossible d'écrire {} : {e}", with_sets.display())
-                    })?;
-                    (path.clone(), with_sets, None)
-                }
-                None => return Err("rien n'est importé".into()),
-            };
-            let mesh_name = msh_path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let text = self.model.draft.to_toml(&mesh_name, &built.file, meshing)?;
-            let stem = source
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let path = source.with_file_name(format!("{stem}_modele.toml"));
-            fs::write(&path, text)
-                .map_err(|e| format!("impossible d'écrire {} : {e}", path.display()))?;
-            Ok(path)
-        })();
-        match result {
-            Ok(path) => {
-                self.model.note = Some(format!("Écrit : {}", path.display()));
-                self.error = None;
-                Some(path)
+    fn save_model(&mut self, then: AfterWrite, ctx: &egui::Context) {
+        match self.model_files() {
+            Ok(files) => self.write_or_ask(files, then, ctx),
+            Err(e) => self.error = Some(e.to_string()),
+        }
+    }
+
+    /// Les fichiers du modèle, à côté de la source : le maillage s'il faut l'écrire, puis
+    /// `<source>_modele.toml` en dernier.
+    fn model_files(&self) -> Result<Vec<files::File>, Box<dyn Error>> {
+        let built = self.mesh.built.as_ref().ok_or("rien n'est maillé")?;
+        let mut out = Vec::new();
+        let (source, msh_path, meshing) = match &self.mesh.imported {
+            Some(Imported::Cad(cad)) => {
+                let msh = mesh_space::mesh_file(cad, built)?;
+                let msh_path = msh.0.clone();
+                out.push(msh);
+                let name = cad
+                    .path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let recipe =
+                    mesh_space::recipe(&name, self.mesh.size, self.mesh.quadratic, &built.user);
+                (cad.path.clone(), msh_path, Some(recipe))
             }
-            Err(e) => {
-                self.error = Some(e.to_string());
-                None
+            Some(Imported::Mesh(path, _)) if built.mesh_sets.is_empty() => {
+                (path.clone(), path.clone(), None)
             }
+            // les Sets tirés sur le Mesh : un `.msh` à côté, l'original reste intact
+            Some(Imported::Mesh(path, _)) => {
+                let stem = path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let with_sets = path.with_file_name(format!("{stem}_sets.msh"));
+                out.push((
+                    with_sets.clone(),
+                    maille_io::msh::write(&built.file)?.into_bytes(),
+                ));
+                (path.clone(), with_sets, None)
+            }
+            None => return Err("rien n'est importé".into()),
+        };
+        let mesh_name = msh_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let text = self.model.draft.to_toml(&mesh_name, &built.file, meshing)?;
+        let stem = source
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        out.push((
+            source.with_file_name(format!("{stem}_modele.toml")),
+            text.into_bytes(),
+        ));
+        Ok(out)
+    }
+
+    /// Écrit les fichiers, sauf si l'un d'eux a été modifié en dehors de l'interface : on demande
+    /// alors avant de l'écraser (voir `confirm_dialog`).
+    fn write_or_ask(&mut self, files: Vec<files::File>, then: AfterWrite, ctx: &egui::Context) {
+        let conflicts = self.written.conflicts(&files);
+        if conflicts.is_empty() {
+            self.write(files, then, ctx);
+        } else {
+            self.confirm = Some(Confirm {
+                files,
+                conflicts,
+                then,
+            });
+        }
+    }
+
+    fn write(&mut self, files: Vec<files::File>, then: AfterWrite, ctx: &egui::Context) {
+        if let Err(e) = self.written.write(&files) {
+            self.error = Some(e);
+            return;
+        }
+        self.error = None;
+        let Some((last, _)) = files.last() else {
+            return;
+        };
+        let note = Some(format!("Écrit : {}", last.display()));
+        match then {
+            AfterWrite::Mesh => self.mesh.note = note,
+            AfterWrite::Model => self.model.note = note,
+            AfterWrite::Run => {
+                self.model.note = note;
+                let ctx = ctx.clone();
+                self.model.job = Some(Job::start(last, move || ctx.request_repaint()));
+                self.model.compute = ComputeState::Running(Running::default());
+                self.model.launched = self.model.key.clone();
+            }
+        }
+    }
+
+    /// Demande avant d'écraser des fichiers modifiés en dehors de l'interface.
+    fn confirm_dialog(&mut self, ctx: &egui::Context) {
+        let Some(confirm) = &self.confirm else {
+            return;
+        };
+        let mut choice = None;
+        let modal = egui::Modal::new(egui::Id::unique("confirm-overwrite")).show(ctx, |ui| {
+            ui.set_max_width(420.0);
+            ui.heading("Écraser des fichiers ?");
+            ui.label("Ces fichiers existent déjà et ont été modifiés en dehors de Maille :");
+            for path in &confirm.conflicts {
+                ui.monospace(path.display().to_string());
+            }
+            ui.label("Les écraser fait perdre ces modifications.");
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Écraser").clicked() {
+                    choice = Some(true);
+                }
+                if ui.button("Annuler").clicked() {
+                    choice = Some(false);
+                }
+            });
+        });
+        if modal.should_close() && choice.is_none() {
+            choice = Some(false);
+        }
+        match choice {
+            Some(true) => {
+                if let Some(Confirm { files, then, .. }) = self.confirm.take() {
+                    self.write(files, then, ctx);
+                }
+            }
+            Some(false) => {
+                if let Some(Confirm { then, .. }) = self.confirm.take() {
+                    let note =
+                        Some("Rien n'a été écrit : les fichiers existants sont gardés.".into());
+                    match then {
+                        AfterWrite::Mesh => self.mesh.note = note,
+                        AfterWrite::Model | AfterWrite::Run => self.model.note = note,
+                    }
+                }
+            }
+            None => {}
         }
     }
 
     /// Enregistre le modèle puis lance le calcul dans un thread.
     fn start_run(&mut self, ctx: &egui::Context) {
-        if self.model.job.is_some() {
+        if self.model.job.is_some() || self.confirm.is_some() {
             return;
         }
-        let Some(path) = self.save_model() else {
-            return;
-        };
-        let ctx = ctx.clone();
-        self.model.job = Some(Job::start(&path, move || ctx.request_repaint()));
-        self.model.compute = ComputeState::Running(Running::default());
-        self.model.launched = self.model.key.clone();
+        self.save_model(AfterWrite::Run, ctx);
     }
 
     /// Prend les messages du calcul ; à la fin, ouvre les résultats dans l'espace Résultats.
@@ -1209,13 +1312,10 @@ impl App {
     }
 
     /// Écrit le maillage à côté de la source, comme `maille mesh`.
-    fn save(&mut self) {
+    fn save(&mut self, ctx: &egui::Context) {
         if let (Some(Imported::Cad(cad)), Some(built)) = (&self.mesh.imported, &self.mesh.built) {
-            match mesh_space::save(cad, built) {
-                Ok(path) => {
-                    self.mesh.note = Some(format!("Écrit : {}", path.display()));
-                    self.error = None;
-                }
+            match mesh_space::mesh_file(cad, built) {
+                Ok(file) => self.write_or_ask(vec![file], AfterWrite::Mesh, ctx),
                 Err(e) => self.error = Some(e.to_string()),
             }
         }
@@ -1780,6 +1880,7 @@ impl eframe::App for App {
         self.inspector(&ctx, frame);
         self.compute_panel(&ctx);
         self.stale_banner(&ctx);
+        self.confirm_dialog(&ctx);
         if self.refresh_model() {
             ctx.request_repaint();
         }
