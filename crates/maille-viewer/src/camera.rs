@@ -20,7 +20,9 @@ pub struct Camera {
     pub pitch: f64,
     /// Pixels par unité de longueur du Mesh (identique en x et en y : pas de déformation).
     pub zoom: f64,
-    /// Rayon de la sphère qui contient le Mesh : la profondeur [-rayon, rayon] devient [1, 0].
+    /// Centre et rayon de la sphère qui contient le Mesh : la profondeur [-rayon, rayon] autour du
+    /// centre devient [1, 0].
+    center: V3,
     pub depth_radius: f64,
     /// Décalage de la cible vers la droite, en pixels (place laissée à la légende).
     shift_x: f64,
@@ -35,6 +37,7 @@ impl Camera {
             yaw: 0.0,
             pitch: 0.0,
             zoom: 1.0,
+            center: [0.0; 3],
             depth_radius: 1.0,
             shift_x: 0.0,
         };
@@ -67,6 +70,14 @@ impl Camera {
         self.zoom = if zoom.is_finite() { zoom } else { 1.0 };
         self.target = center;
         self.shift_x = reserved_left / 2.0;
+        self.enclose(bounds);
+    }
+
+    /// Règle la profondeur sur la sphère qui contient la boîte (min, max), sans toucher au cadrage :
+    /// la profondeur se mesure depuis le centre de la boîte, pas depuis la cible que le zoom et le
+    /// déplacement emmènent ailleurs, donc rien de la boîte n'est coupé, quelle que soit la vue.
+    pub fn enclose(&mut self, (lo, hi): (V3, V3)) {
+        self.center = scale(add(lo, hi), 0.5);
         self.depth_radius = (0.5 * crate::vec3::norm(sub(hi, lo))).max(f64::MIN_POSITIVE);
     }
 
@@ -122,7 +133,7 @@ impl Camera {
         [
             (dot(d, right) * self.zoom + self.shift_x) * 2.0 / size[0],
             dot(d, up) * self.zoom * 2.0 / size[1],
-            0.5 - dot(d, eye) / (2.0 * self.depth_radius),
+            0.5 - dot(sub(p, self.center), eye) / (2.0 * self.depth_radius),
         ]
     }
 
@@ -135,6 +146,7 @@ impl Camera {
             -0.5 / self.depth_radius,
         );
         let offset = |axis: V3, k: f64, shift: f64| shift - dot(self.target, axis) * k;
+        let depth_offset = 0.5 - dot(self.center, eye) * kz;
         let rows = [
             [
                 right[0] * kx,
@@ -143,12 +155,7 @@ impl Camera {
                 offset(right, kx, self.shift_x * 2.0 / size[0]),
             ],
             [up[0] * ky, up[1] * ky, up[2] * ky, offset(up, ky, 0.0)],
-            [
-                eye[0] * kz,
-                eye[1] * kz,
-                eye[2] * kz,
-                offset(eye, kz, 0.0) + 0.5,
-            ],
+            [eye[0] * kz, eye[1] * kz, eye[2] * kz, depth_offset],
             [0.0, 0.0, 0.0, 1.0],
         ];
         std::array::from_fn(|col| std::array::from_fn(|row| rows[row][col] as f32))
@@ -279,6 +286,40 @@ mod tests {
                 assert!(c[0].abs() <= 1.0 && c[1].abs() <= 0.9 + 1e-9, "{c:?}");
                 assert!((0.0..=1.0).contains(&c[2]), "profondeur {c:?}");
             }
+        }
+    }
+
+    #[test]
+    fn zooming_on_a_corner_then_turning_does_not_cut_the_mesh() {
+        // le zoom au curseur éloigne la cible du centre ; après un quart de tour, cet écart est
+        // dans l'axe de vue : la profondeur doit rester dans [0, 1] pour toute la boîte
+        let bounds = ([0.0; 3], [40.0, 40.0, 10.0]);
+        let mut camera = Camera::fit(bounds, SIZE, 0.0);
+        camera.zoom_at(50.0, [10.0, 590.0], SIZE);
+        camera.pan([300.0, -200.0]);
+        camera.rotate([157.0, 0.0]);
+        for corner in corners(bounds.0, bounds.1) {
+            let depth = camera.project(corner, SIZE)[2];
+            assert!(
+                (0.0..=1.0).contains(&depth),
+                "{corner:?} : profondeur {depth}"
+            );
+        }
+    }
+
+    #[test]
+    fn enclosing_a_larger_box_keeps_it_in_depth_range() {
+        // la déformée déborde de la boîte du cadrage, sans recadrage puisqu'on a zoomé
+        let mut camera = Camera::fit(([0.0; 3], [1.0; 3]), SIZE, 0.0);
+        camera.rotate([80.0, 40.0]);
+        let larger = ([-2.0; 3], [3.0; 3]);
+        camera.enclose(larger);
+        for corner in corners(larger.0, larger.1) {
+            let depth = camera.project(corner, SIZE)[2];
+            assert!(
+                (0.0..=1.0).contains(&depth),
+                "{corner:?} : profondeur {depth}"
+            );
         }
     }
 
