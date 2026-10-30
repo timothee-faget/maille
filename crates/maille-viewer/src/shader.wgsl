@@ -8,6 +8,8 @@ struct Uniforms {
     range: vec2<f32>,
     // direction de l'œil : de la cible vers l'observateur (xyz)
     eye: vec4<f32>,
+    // couleur des arêtes
+    edge: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -83,5 +85,5 @@ fn fs_highlight(in: VertexOut) -> @location(0) vec4<f32> {
 
 @fragment
 fn fs_edge(in: VertexOut) -> @location(0) vec4<f32> {
-    return vec4<f32>(0.15, 0.15, 0.15, 1.0);
+    return u.edge;
 }

@@ -20,6 +20,7 @@ mod vec3;
 
 pub use display::Cut;
 pub use embed::ResultsView;
+pub use render::Theme;
 pub use scene::NodalResults;
 
 use maille_core::mesh::Mesh;
@@ -111,12 +112,16 @@ pub fn screenshot_nodal(
     results: &NodalResults,
     shot: &Shot,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let pixels = render_shot(results, shot)?;
+    let pixels = render_shot(results, shot, Theme::Light)?;
     Ok(png::encode(shot.width.max(1), shot.height.max(1), &pixels))
 }
 
 /// Pixels RGBA de la capture, ligne par ligne du haut vers le bas.
-fn render_shot(results: &NodalResults, shot: &Shot) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+fn render_shot(
+    results: &NodalResults,
+    shot: &Shot,
+    theme: Theme,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut display = display::Display::new(scene::Scene::from_nodal(results)?);
     let quantities = display.scene.quantities();
     display.quantity = *quantities.get(shot.quantity).ok_or_else(|| {
@@ -138,6 +143,7 @@ fn render_shot(results: &NodalResults, shot: &Shot) -> Result<Vec<u8>, Box<dyn s
     display.camera.yaw = shot.yaw.to_radians();
     display.camera.pitch = shot.pitch.to_radians();
     let mut renderer = render::Renderer::new_offscreen(shot.width, shot.height, display.colormap)?;
+    renderer.set_theme(theme);
     display.refit(&renderer);
     display.refresh(&mut renderer);
     renderer.render_pixels()
@@ -151,7 +157,11 @@ mod tests {
 
     /// Résultat sans GPU : on saute le test sur une machine qui n'en a pas.
     fn render(results: &NodalResults, shot: &Shot) -> Option<Vec<u8>> {
-        match render_shot(results, shot) {
+        render_themed(results, shot, Theme::Light)
+    }
+
+    fn render_themed(results: &NodalResults, shot: &Shot, theme: Theme) -> Option<Vec<u8>> {
+        match render_shot(results, shot, theme) {
             Ok(pixels) => Some(pixels),
             Err(e) if e.to_string().contains("aucune carte graphique") => {
                 eprintln!("test sauté : {e}");
@@ -231,11 +241,36 @@ mod tests {
         // un peu plus bas et à gauche)
         let inside = pixel(&pixels, &shot, cx - 30, cy + 30);
         assert_color(inside, Colormap::Rainbow.lut()[0], "triangle");
-        // coin bas droit : fond gris clair, sRGB de 0,95 linéaire
+        // coin bas droit : fond gris clair, ni blanc ni noir
         assert_color(
             pixel(&pixels, &shot, shot.width - 1, shot.height - 1),
-            [249, 249, 249, 255],
+            [204, 204, 204, 255],
             "fond",
+        );
+    }
+
+    #[test]
+    fn the_dark_theme_draws_a_dark_background_and_keeps_the_field_color() {
+        let results = NodalResults {
+            nodes: vec![[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 2.0, 0.0]],
+            cells: vec![vec![0, 1, 2]],
+            temperatures: vec![5.0; 3],
+            ..NodalResults::default()
+        };
+        let shot = Shot::default();
+        let Some(pixels) = render_themed(&results, &shot, Theme::Dark) else {
+            return;
+        };
+        let (cx, cy) = center(&shot);
+        assert_color(
+            pixel(&pixels, &shot, cx - 30, cy + 30),
+            Colormap::Rainbow.lut()[0],
+            "triangle",
+        );
+        assert_color(
+            pixel(&pixels, &shot, shot.width - 1, shot.height - 1),
+            [37, 39, 43, 255],
+            "fond sombre",
         );
     }
 

@@ -15,6 +15,7 @@ pub mod results;
 mod results_ui;
 pub mod series;
 pub mod sets;
+mod settings;
 pub mod state;
 mod triad;
 
