@@ -13,7 +13,7 @@ use maille_io::msh::CellKind;
 
 use crate::compute::ComputeState;
 use crate::library;
-use crate::model_space::{Diagnostic, Draft, Severity, UnitSystem};
+use crate::model_space::{Diagnostic, Draft, MaterialForm, Region, Severity, UnitSystem};
 use crate::state::Tool;
 
 /// Un formulaire « Set, DOF, valeur » pour ajouter une BC ou un Load.
@@ -113,6 +113,8 @@ impl ContactForm {
 pub struct MeshInfo<'a> {
     /// Sets de bord du maillage.
     pub sets: &'a [&'a str],
+    /// Sets d'Elements (le domaine compris) : ce qu'un Material peut recevoir.
+    pub element_sets: &'a [&'a str],
     pub kind: CellKind,
 }
 
@@ -211,7 +213,12 @@ impl LibraryUi {
 }
 
 /// Inspecteur « Material » : unités, Material élastique, état plan et épaisseur.
-pub fn material_tool(ui: &mut egui::Ui, draft: &mut Draft, mesh: &MeshInfo, lib: &mut LibraryUi) {
+pub fn material_tool(
+    ui: &mut egui::Ui,
+    draft: &mut Draft,
+    mesh: &MeshInfo,
+    lib: &mut LibraryUi,
+) -> Option<MaterialAction> {
     ui.label("Unités (cohérentes, rien n'est converti) :");
     let mut system = match &draft.units {
         UnitSystem::Si => 0,
@@ -238,76 +245,99 @@ pub fn material_tool(ui: &mut egui::Ui, draft: &mut Draft, mesh: &MeshInfo, lib:
     ui.separator();
     let units = draft.units.clone();
     let library_units = library::library_units(&units);
-    library_picker(ui, draft, library_units, lib);
-    ui.separator();
-    match &mut draft.material {
-        None => {
-            if ui.button("Définir un Material").clicked() {
-                draft.material = Some(draft.steel());
-            }
-            ui.weak("Un acier pour commencer : règle ensuite E et ν.");
+    let mut action = None;
+    if draft.material.is_none() {
+        if ui.button("Définir un Material").clicked() {
+            draft.material = Some(draft.steel());
         }
-        Some(m) => {
-            ui.label("Nom :");
-            ui.text_edit_singleline(&mut m.name);
-            ui.label(with_unit("Module d'Young E", units.stress()));
-            let speed = (m.young.abs() * 0.01).max(1e-9);
-            ui.add(
-                egui::DragValue::new(&mut m.young)
-                    .speed(speed)
-                    .range(0.0..=f64::MAX),
-            );
-            ui.label("Coefficient de Poisson ν :");
-            ui.add(egui::DragValue::new(&mut m.poisson).speed(0.005));
-            let k = if units == UnitSystem::Si { 1e6 } else { 1.0 };
-            ui.separator();
-            ui.label("Propriétés facultatives :");
-            optional(ui, "conductivité k", &mut m.conductivity, 1.0);
-            optional(ui, "masse volumique ρ", &mut m.density, 1.0);
-            optional(ui, "chaleur massique c", &mut m.specific_heat, 1.0);
-            optional(ui, "dilatation α [1/K]", &mut m.expansion, 1.2e-5);
-            optional(
-                ui,
-                "limite élastique σy (plasticité)",
-                &mut m.yield_stress,
-                lib.yield_hint.unwrap_or(250.0 * k),
-            );
-            if m.yield_stress.is_some() {
-                let mut h = m.hardening.unwrap_or(0.0);
-                ui.horizontal(|ui| {
-                    ui.label(with_unit("écrouissage H", units.stress()));
-                    ui.add(
-                        egui::DragValue::new(&mut h)
-                            .speed(1.0)
-                            .range(0.0..=f64::MAX),
-                    );
-                });
-                m.hardening = Some(h);
+        ui.weak("Un acier pour commencer : règle ensuite E et ν.");
+        ui.label("Ou prends-en un dans la bibliothèque :");
+        if let Some(form) = library_picker(ui, "library-first", library_units, lib) {
+            draft.material = Some(form);
+        }
+    } else {
+        let large = draft.large;
+        let several = !draft.regions.is_empty();
+        let mut remove = None;
+        // le premier Material, puis les autres
+        egui::CollapsingHeader::new(format!(
+            "{} · {}",
+            draft.material.as_ref().map_or("", |m| &m.name),
+            draft.material_set
+        ))
+        .id_salt("material-0")
+        .default_open(true)
+        .show(ui, |ui| {
+            if several || draft.material_set != maille_io::msh::DOMAIN_SET {
+                ui.label("Set d'Elements :");
+                set_picker(
+                    ui,
+                    "material-0-set",
+                    mesh.element_sets,
+                    &mut draft.material_set,
+                );
+                if several && ui.button("Elements restants").clicked() {
+                    action = Some(MaterialAction::RemainingSet);
+                }
+                ui.weak("« Elements restants » crée le Set de ce qui n'a pas d'autre Material.");
             }
-            ui.separator();
-            ui.checkbox(&mut draft.large, "Grandes déformations");
-            if draft.large {
-                ui.checkbox(&mut m.neo_hookean, "loi néo-hookéenne");
-            }
-            ui.separator();
-            if let (Some(path), Some(lu)) = (&lib.path, library_units) {
-                if ui.button("Enregistrer dans ma bibliothèque").clicked() {
-                    let saved = LibraryMaterial::from_def(&m.to_def(draft.large), lu, "");
-                    lib.note = Some(match library::save(path, &m.name, saved) {
-                        Ok((library, note)) => {
-                            lib.library = library;
-                            note.unwrap_or_else(|| {
-                                format!("« {} » est dans {}.", m.name, path.display())
-                            })
-                        }
-                        Err(e) => format!("Enregistrement impossible : {e}"),
-                    });
+            if let Some(m) = &mut draft.material {
+                material_editor(ui, m, &units, large, library_units, lib, "library-0");
+                ui.separator();
+                if !several && ui.button("Retirer le Material").clicked() {
+                    draft.material = None;
                 }
             }
-            if ui.button("Retirer le Material").clicked() {
-                draft.material = None;
-            }
+        });
+        for (i, region) in draft.regions.iter_mut().enumerate() {
+            egui::CollapsingHeader::new(format!("{} · {}", region.material.name, region.set))
+                .id_salt(format!("material-{}", i + 1))
+                .default_open(true)
+                .show(ui, |ui| {
+                    ui.label("Set d'Elements :");
+                    set_picker(
+                        ui,
+                        &format!("material-{}-set", i + 1),
+                        mesh.element_sets,
+                        &mut region.set,
+                    );
+                    material_editor(
+                        ui,
+                        &mut region.material,
+                        &units,
+                        large,
+                        library_units,
+                        lib,
+                        &format!("library-{}", i + 1),
+                    );
+                    ui.separator();
+                    if ui.button("Retirer ce Material").clicked() {
+                        remove = Some(i);
+                    }
+                });
         }
+        if let Some(i) = remove {
+            draft.regions.remove(i);
+        }
+        ui.separator();
+        if ui.button("Ajouter un Material sur un autre Set").clicked() {
+            let mut material = draft.steel();
+            material.name = format!("materiau{}", draft.regions.len() + 2);
+            let used: Vec<&str> = draft.sections().iter().map(|(set, _)| *set).collect();
+            let set = mesh
+                .element_sets
+                .iter()
+                .find(|s| !used.contains(s))
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            draft.regions.push(Region { set, material });
+        }
+        ui.weak(
+            "Chaque Element a un seul Material : les Sets d'Elements se créent avec « Cadre → Set » \
+             (mode Elements).",
+        );
+        ui.separator();
+        ui.checkbox(&mut draft.large, "Grandes déformations");
     }
     if mesh.planar() {
         ui.separator();
@@ -332,21 +362,96 @@ pub fn material_tool(ui: &mut egui::Ui, draft: &mut Draft, mesh: &MeshInfo, lib:
                 .range(0.0..=f64::MAX),
         );
     }
+    action
 }
 
-/// Choisir un Material de la bibliothèque : il est converti dans les unités du brouillon.
+/// Ce que l'inspecteur « Material » demande à l'application, qui détient le Mesh.
+pub enum MaterialAction {
+    /// Créer le Set des Elements que les autres Materials ne couvrent pas, et le donner au premier.
+    RemainingSet,
+}
+
+/// Le formulaire d'un Material : nom, E, ν, propriétés facultatives, bibliothèque, enregistrement.
+fn material_editor(
+    ui: &mut egui::Ui,
+    m: &mut MaterialForm,
+    units: &UnitSystem,
+    large: bool,
+    library_units: Option<maille_io::materials::UnitSystem>,
+    lib: &mut LibraryUi,
+    id: &str,
+) {
+    ui.label("Nom :");
+    ui.text_edit_singleline(&mut m.name);
+    ui.label(with_unit("Module d'Young E", units.stress()));
+    let speed = (m.young.abs() * 0.01).max(1e-9);
+    ui.add(
+        egui::DragValue::new(&mut m.young)
+            .speed(speed)
+            .range(0.0..=f64::MAX),
+    );
+    ui.label("Coefficient de Poisson ν :");
+    ui.add(egui::DragValue::new(&mut m.poisson).speed(0.005));
+    let k = if *units == UnitSystem::Si { 1e6 } else { 1.0 };
+    ui.separator();
+    ui.label("Propriétés facultatives :");
+    optional(ui, "conductivité k", &mut m.conductivity, 1.0);
+    optional(ui, "masse volumique ρ", &mut m.density, 1.0);
+    optional(ui, "chaleur massique c", &mut m.specific_heat, 1.0);
+    optional(ui, "dilatation α [1/K]", &mut m.expansion, 1.2e-5);
+    optional(
+        ui,
+        "limite élastique σy (plasticité)",
+        &mut m.yield_stress,
+        lib.yield_hint.unwrap_or(250.0 * k),
+    );
+    if m.yield_stress.is_some() {
+        let mut h = m.hardening.unwrap_or(0.0);
+        ui.horizontal(|ui| {
+            ui.label(with_unit("écrouissage H", units.stress()));
+            ui.add(
+                egui::DragValue::new(&mut h)
+                    .speed(1.0)
+                    .range(0.0..=f64::MAX),
+            );
+        });
+        m.hardening = Some(h);
+    }
+    if large {
+        ui.checkbox(&mut m.neo_hookean, "loi néo-hookéenne");
+    }
+    ui.separator();
+    ui.label("Remplacer par la bibliothèque :");
+    if let Some(form) = library_picker(ui, id, library_units, lib) {
+        *m = form;
+    }
+    if let (Some(path), Some(lu)) = (&lib.path, library_units) {
+        if ui.button("Enregistrer dans ma bibliothèque").clicked() {
+            let saved = LibraryMaterial::from_def(&m.to_def(large), lu, "");
+            lib.note = Some(match library::save(path, &m.name, saved) {
+                Ok((library, note)) => {
+                    lib.library = library;
+                    note.unwrap_or_else(|| format!("« {} » est dans {}.", m.name, path.display()))
+                }
+                Err(e) => format!("Enregistrement impossible : {e}"),
+            });
+        }
+    }
+}
+
+/// Choisir un Material de la bibliothèque : rend son formulaire, converti dans les unités du
+/// brouillon, quand on le prend.
 fn library_picker(
     ui: &mut egui::Ui,
-    draft: &mut Draft,
+    id: &str,
     units: Option<maille_io::materials::UnitSystem>,
     lib: &mut LibraryUi,
-) {
-    ui.label("Bibliothèque :");
+) -> Option<MaterialForm> {
     let Some(units) = units else {
-        ui.weak("Pour l'utiliser, écris les unités « longueur, force, temps », par exemple « mm, N, s ».");
-        return;
+        ui.weak("Pour la bibliothèque, écris les unités « longueur, force, temps », par exemple « mm, N, s ».");
+        return None;
     };
-    egui::ComboBox::from_id_salt("library-material")
+    egui::ComboBox::from_id_salt(id)
         .selected_text(if lib.chosen.is_empty() {
             "choisir…"
         } else {
@@ -357,20 +462,22 @@ fn library_picker(
                 ui.selectable_value(&mut lib.chosen, name.to_string(), name);
             }
         });
+    let mut taken = None;
     if let Some(material) = lib.library.get(&lib.chosen) {
         if !material.description.is_empty() {
             ui.weak(&material.description);
         }
         if ui.button("Prendre ce Material").clicked() {
             let (form, yield_stress) = library::material_form(&lib.chosen, material, units);
-            draft.material = Some(form);
             lib.yield_hint = yield_stress;
+            taken = Some(form);
         }
         ui.weak("Valeurs usuelles : vérifie celles de ta nuance.");
     }
     if let Some(note) = &lib.note {
         ui.weak(note);
     }
+    taken
 }
 
 /// Inspecteur « Encastrement » : les BC (déplacement imposé sur un Set ; 0 = bloqué).

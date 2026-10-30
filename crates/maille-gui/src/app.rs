@@ -153,6 +153,7 @@ enum Todo {
     Save,
     CreateSet,
     CreateMeshSet,
+    RemainingSet,
     DeleteSet(String),
     RenameSet(String, String),
     SaveModel,
@@ -641,18 +642,25 @@ impl App {
                         }
                         Some(built) => {
                             let sets = built.sets();
+                            let element_sets = built.element_sets();
                             let info = MeshInfo {
                                 sets: &sets,
+                                element_sets: &element_sets,
                                 kind: built.file.kind,
                             };
                             let m = &mut self.model;
                             match tool {
-                                Tool::Material => model_tools::material_tool(
-                                    ui,
-                                    &mut m.draft,
-                                    &info,
-                                    &mut m.library,
-                                ),
+                                Tool::Material => {
+                                    let asked = model_tools::material_tool(
+                                        ui,
+                                        &mut m.draft,
+                                        &info,
+                                        &mut m.library,
+                                    );
+                                    if let Some(model_tools::MaterialAction::RemainingSet) = asked {
+                                        todo = Some(Todo::RemainingSet);
+                                    }
+                                }
                                 Tool::Support => model_tools::support_tool(
                                     ui,
                                     &mut m.draft,
@@ -746,6 +754,7 @@ impl App {
             Some(Todo::Save) => self.save(),
             Some(Todo::CreateSet) => self.create_set(),
             Some(Todo::CreateMeshSet) => self.create_mesh_set(),
+            Some(Todo::RemainingSet) => self.create_remaining_set(),
             Some(Todo::DeleteSet(name)) => self.edit_set(&name, None),
             Some(Todo::RenameSet(name, new_name)) => self.edit_set(&name, Some(&new_name)),
             None => {}
@@ -862,6 +871,36 @@ impl App {
     fn set_region(&mut self, region: Option<(Tool, Region)>) {
         self.mesh.region = region;
         self.mesh.region_version += 1;
+    }
+
+    /// Crée le Set des Elements que les autres Materials ne couvrent pas, et le donne au premier.
+    fn create_remaining_set(&mut self) {
+        let Some(built) = self.mesh.built.as_mut() else {
+            return;
+        };
+        let elements = self.model.draft.remaining_elements(&built.file);
+        let name = (1..)
+            .map(|k| {
+                if k == 1 {
+                    "reste".to_string()
+                } else {
+                    format!("reste{k}")
+                }
+            })
+            .find(|n| !built.file.sets.contains_key(n))
+            .unwrap_or_default();
+        match built.add_mesh_set(&name, mesh_pick::element_set(&elements)) {
+            Ok(()) => {
+                self.model.draft.material_set = name.clone();
+                self.mesh.note = Some(format!(
+                    "Set « {name} » créé ({} Elements).",
+                    elements.len()
+                ));
+                self.state.progress.sets = built.sets().len();
+                self.error = None;
+            }
+            Err(e) => self.error = Some(e.to_string()),
+        }
     }
 
     /// Crée un Set sur le Mesh avec la sélection et le nom tapé.
