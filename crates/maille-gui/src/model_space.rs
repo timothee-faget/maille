@@ -306,6 +306,7 @@ impl Draft {
             heat_sources: self.heat_sources.clone(),
             convections: self.convections.clone(),
             pressures: self.pressures.clone(),
+            edge_loads: Vec::new(),
             contacts: self.contacts.clone(),
             temperatures: self.reference_temperature.map(|reference| TemperaturesDef {
                 from: None,

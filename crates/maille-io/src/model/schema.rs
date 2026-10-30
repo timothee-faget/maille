@@ -20,6 +20,10 @@
 //! set = "interieur"
 //! value = 100.0
 //!
+//! [[edge_loads]]                  # force linéique (ex. N/mm) sur un bord : composantes fixes, morte
+//! set = "extremite"               # en 2D, c'est la force par longueur sur toute l'épaisseur (σ·t)
+//! value = [100.0, 0.0]            # [fx, fy] en 2D, [fx, fy, fz] en 3D
+//!
 //! [[contacts]]                    # contact sans frottement contre une surface rigide (statique)
 //! set = "dessus"                  # bord du corps déformable (Set de Nodes)
 //! kind = "cylinder"               # "plane", "cylinder" ou "sphere"
@@ -70,6 +74,8 @@ pub struct ModelFile {
     pub convections: Vec<ConvectionDef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pressures: Vec<PressureDef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edge_loads: Vec<EdgeLoadDef>,
     /// Contacts contre des surfaces rigides : demandent `[step] kind = "quasi_static"`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contacts: Vec<ContactDef>,
@@ -195,6 +201,16 @@ pub struct ConvectionDef {
 pub struct PressureDef {
     pub set: String,
     pub value: f64,
+}
+
+/// Force linéique sur les arêtes d'un bord (statique) : `value` a autant de composantes que le
+/// maillage a de dimensions, par unité de longueur d'arête. Contrairement à la pression, l'épaisseur
+/// du triangle ne la multiplie pas : `value` est la force par longueur sur toute l'épaisseur.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EdgeLoadDef {
+    pub set: String,
+    pub value: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]

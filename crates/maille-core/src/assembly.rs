@@ -673,6 +673,45 @@ pub fn face_pressure(mesh: &Mesh, i: usize, face: usize, value: f64) -> Option<F
     })
 }
 
+/// Force linéique `q` (composantes cartésiennes fixes, par unité de longueur d'arête) sur l'arête
+/// `edge` de l'Element `i` : f_a = q ∫ N_a ds (numérotation de `Element::edge_nodes`). `None` si
+/// l'arête n'existe pas ou pour une Bar ou une Beam. Contrairement à `face_pressure`, l'épaisseur
+/// n'intervient pas : en 2D, `q` est déjà la force par longueur d'arête sur toute l'épaisseur.
+pub fn edge_load(mesh: &Mesh, i: usize, edge: usize, q: [f64; 3]) -> Option<FacePressure> {
+    let e = &mesh.elements[i];
+    let positions = e.edge_positions(edge)?;
+    let global: Vec<usize> = positions.iter().map(|&k| e.nodes()[k]).collect();
+    let (dim, length) = if matches!(e, Element::Tet4(_) | Element::Tet10(_)) {
+        let c = mesh.coords_3d(&global);
+        (
+            3,
+            (0..3)
+                .map(|k| (c[1][k] - c[0][k]).powi(2))
+                .sum::<f64>()
+                .sqrt(),
+        )
+    } else {
+        let c = mesh.coords(&global);
+        (2, (c[1][0] - c[0][0]).hypot(c[1][1] - c[0][1]))
+    };
+    let linear = global.len() == 2;
+    let rule: &[LinePoint] = if linear { &LINE_2 } else { &LINE_3 };
+    let shape = if linear { line2 } else { line3 };
+    let mut forces = vec![0.0; dim * positions.len()];
+    for p in rule {
+        for (a, na) in shape(p.s).iter().enumerate() {
+            for c in 0..dim {
+                forces[dim * a + c] += q[c] * p.weight * length * na;
+            }
+        }
+    }
+    Some(FacePressure {
+        positions,
+        dim,
+        forces,
+    })
+}
+
 /// Pression suiveuse sur une face : forces f_a = −p ∫ N_a n dS sur la face déformée, et leur raideur
 /// ∂f/∂x. Les deux sont indexées comme `FacePressure` (`dim` composantes par Node de la face).
 #[derive(Debug, Clone, PartialEq)]

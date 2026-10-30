@@ -6,7 +6,8 @@ use maille_core::contact::{Contact, RigidSurface};
 use maille_core::material::{Hyperelasticity, Material};
 use maille_core::mesh::{Dof, Element, Mesh, PlaneState, Tet10, Tet4, Tri3, Tri6};
 use maille_core::model::{
-    Amplitude, Analysis, Bc, Convection, HeatSource, Kinematics, Load, Model, Pressure, Step,
+    Amplitude, Analysis, Bc, Convection, EdgeLoad, HeatSource, Kinematics, Load, Model, Pressure,
+    Step,
 };
 
 use super::physics::analysis_of;
@@ -134,6 +135,36 @@ pub fn build(
             }));
         }
         model = model.with_pressures(pressures)?;
+    }
+
+    if !file.edge_loads.is_empty() {
+        let mut edge_loads = Vec::new();
+        for (i, def) in file.edge_loads.iter().enumerate() {
+            let key = format!("edge_loads[{i}]");
+            let set = find(mesh, &key, &def.set)?;
+            let dim = mesh.kind.dim();
+            if dim == 3 {
+                return Err(invalid(format!(
+                    "{key} : les Sets d'arêtes d'un maillage 3D ne sont pas encore pris en charge"
+                )));
+            }
+            let value: [f64; 3] = match def.value[..] {
+                [fx, fy] => [fx, fy, 0.0],
+                _ => {
+                    return Err(invalid(format!(
+                        "{key} : `value` doit avoir {dim} composantes [fx, fy], pas {}",
+                        def.value.len()
+                    )))
+                }
+            };
+            expect(!set.faces.is_empty(), &def.set, "de faces (un bord)")?;
+            edge_loads.extend(set.faces.iter().map(|&(element, edge)| EdgeLoad {
+                element,
+                edge,
+                value,
+            }));
+        }
+        model = model.with_edge_loads(edge_loads)?;
     }
 
     if !file.contacts.is_empty() {

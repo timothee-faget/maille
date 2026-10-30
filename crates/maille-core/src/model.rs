@@ -1,7 +1,7 @@
 use std::ops::Deref;
 
 use crate::assembly::{
-    element_capacity, element_conduction, element_dofs, element_gauss_count,
+    edge_load, element_capacity, element_conduction, element_dofs, element_gauss_count,
     element_heat_flux_operator, element_heat_source, element_large_response, element_response,
     element_stiffness, element_stresses, element_thermal_load, element_thermal_strains,
     face_convection, face_pressure, follower_pressure, FaceConvection, FluxOperator,
@@ -70,6 +70,17 @@ pub struct Pressure {
     pub face: usize,
     /// Une contrainte (ex. MPa), finie.
     pub value: f64,
+}
+
+/// Force linéique sur une arête d'Element (statique) : composantes cartésiennes fixes par unité de
+/// longueur d'arête (ex. N/mm). Numérotation des arêtes : voir `Element::edge_nodes`. En 2D, c'est la
+/// force par longueur sur toute l'épaisseur (q = σ·t) : l'épaisseur ne la multiplie pas.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EdgeLoad {
+    pub element: usize,
+    pub edge: usize,
+    /// (fx, fy, fz) finies ; fz nulle sur un triangle.
+    pub value: [f64; 3],
 }
 
 /// Physique résolue sur le Mesh.
@@ -225,6 +236,7 @@ pub struct Model {
     heat_sources: Vec<HeatSource>,
     convection: Vec<Convection>,
     pressures: Vec<Pressure>,
+    edge_loads: Vec<EdgeLoad>,
     /// Champ de températures aux Nodes et T_ref (statique), voir `with_temperatures`.
     temperatures: Option<(Vec<f64>, f64)>,
     solver: SolverKind,
@@ -294,6 +306,7 @@ impl Model {
             heat_sources: Vec::new(),
             convection: Vec::new(),
             pressures: Vec::new(),
+            edge_loads: Vec::new(),
             temperatures: None,
             solver: SolverKind::default(),
             kinematics: Kinematics::default(),
@@ -438,6 +451,39 @@ impl Model {
             }
         }
         self.pressures = pressures;
+        Ok(self)
+    }
+
+    /// Forces linéiques sur des arêtes, en statique seulement : triangles (Tri3, Tri6) et tétraèdres
+    /// (Tet4, Tet10). Charge morte, aussi en grandes déformations : elle garde sa direction et sa
+    /// valeur par longueur de la configuration de référence. En quasi-statique, elle suit
+    /// l'Amplitude comme les Load.
+    pub fn with_edge_loads(mut self, edge_loads: Vec<EdgeLoad>) -> Result<Self, MailleError> {
+        if self.analysis != Analysis::Static {
+            return Err(MailleError::EdgeLoadStaticOnly);
+        }
+        for l in &edge_loads {
+            let e = self.element(l.element)?;
+            if matches!(e, Element::Bar(_) | Element::Beam(_)) {
+                return Err(MailleError::UnsupportedEdgeLoadElement { element: l.element });
+            }
+            if e.edge_positions(l.edge).is_none() {
+                return Err(MailleError::UnknownEdge {
+                    element: l.element,
+                    edge: l.edge,
+                });
+            }
+            if let Some(&v) = l.value.iter().find(|v| !v.is_finite()) {
+                return Err(MailleError::NonFinite {
+                    name: "q (force linéique)",
+                    value: v,
+                });
+            }
+            if matches!(e, Element::Tri3(_) | Element::Tri6(_)) && l.value[2].abs() > 0.0 {
+                return Err(MailleError::EdgeLoadOutOfPlane { element: l.element });
+            }
+        }
+        self.edge_loads = edge_loads;
         Ok(self)
     }
 
@@ -1071,6 +1117,12 @@ impl Model {
         {
             if let Some(terms) = face_pressure(mesh, p.element, p.face, p.value) {
                 terms.add_load(&dofs[p.element], &mut f);
+            }
+        }
+        // charge morte, y compris en grandes déformations : seule la pression suit la face
+        for l in &self.edge_loads {
+            if let Some(terms) = edge_load(mesh, l.element, l.edge, l.value) {
+                terms.add_load(&dofs[l.element], &mut f);
             }
         }
         for (terms, element_dofs) in faces.iter().zip(&dofs) {

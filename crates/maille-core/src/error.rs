@@ -186,6 +186,21 @@ pub enum MailleError {
     UnsupportedPressureElement {
         element: usize,
     },
+    /// Arête inexistante (triangle : 0 à 2, tétraèdre : 0 à 5 ; aucune pour Bar et Beam).
+    UnknownEdge {
+        element: usize,
+        edge: usize,
+    },
+    /// Force linéique demandée sur un Model thermique.
+    EdgeLoadStaticOnly,
+    /// Force linéique sur une Bar ou une Beam, qui n'ont pas d'arête.
+    UnsupportedEdgeLoadElement {
+        element: usize,
+    },
+    /// Composante z non nulle d'une force linéique sur un triangle.
+    EdgeLoadOutOfPlane {
+        element: usize,
+    },
     /// Bar et Beam n'ont pas de version thermique.
     UnsupportedThermalElement {
         element: usize,
@@ -451,6 +466,22 @@ impl fmt::Display for MailleError {
             Self::UnsupportedPressureElement { element } => write!(
                 f,
                 "l'Element {element} est une Bar ou une Beam, qui n'a pas de face : la pression s'applique aux triangles et aux tétraèdres (pour une Bar ou une Beam, utiliser une charge répartie)"
+            ),
+            Self::UnknownEdge { element, edge } => write!(
+                f,
+                "l'Element {element} n'a pas d'arête {edge} : un triangle a les arêtes 0 à 2 (0-1, 1-2, 2-0), un tétraèdre les arêtes 0 à 5 (0-1, 1-2, 2-0, 0-3, 1-3, 2-3)"
+            ),
+            Self::EdgeLoadStaticOnly => write!(
+                f,
+                "la force linéique n'existe qu'en statique : en thermique, utiliser la convection ou une source de chaleur"
+            ),
+            Self::UnsupportedEdgeLoadElement { element } => write!(
+                f,
+                "l'Element {element} est une Bar ou une Beam, qui n'a pas d'arête : la force linéique s'applique aux triangles et aux tétraèdres (pour une Bar ou une Beam, utiliser une charge répartie)"
+            ),
+            Self::EdgeLoadOutOfPlane { element } => write!(
+                f,
+                "l'Element {element} est un triangle : sa force linéique n'a que les composantes x et y, mettre la composante z à 0"
             ),
             Self::ThermalOnly => write!(
                 f,
