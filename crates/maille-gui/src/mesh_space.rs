@@ -323,10 +323,53 @@ pub fn summary(built: &Built) -> String {
     )
 }
 
+/// Ce qu'un nouvel import ferait perdre : les Sets créés (sur la géométrie ou tirés sur le Mesh), et
+/// le modèle commencé, qui reste mais peut citer des Sets disparus. Vide : rien à demander.
+pub fn at_stake(built: Option<&Built>, model_started: bool) -> Vec<String> {
+    let mut lost = Vec::new();
+    if let Some(built) = built {
+        let names: Vec<&str> = built
+            .user
+            .keys()
+            .chain(&built.mesh_sets)
+            .map(String::as_str)
+            .collect();
+        if !names.is_empty() {
+            lost.push(format!(
+                "les Sets créés seront perdus : {}",
+                names.join(", ")
+            ));
+        }
+    }
+    if model_started {
+        lost.push(
+            "le modèle commencé reste, mais ses BC et ses Load peuvent citer des Sets qui \
+             n'existeront plus"
+                .to_string(),
+        );
+    }
+    lost
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use maille_io::msh::CellKind;
+
+    #[test]
+    fn only_created_sets_or_a_started_model_are_at_stake() {
+        let c = cad("plaque.dxf");
+        let mut built = mesh(&c, c.suggested, false, &BTreeMap::new()).unwrap();
+        // les Sets du mailleur (calques) reviennent avec le fichier : rien à perdre
+        assert!(at_stake(None, false).is_empty());
+        assert!(at_stake(Some(&built), false).is_empty());
+        built.user.insert("appui".into(), vec!["gauche".into()]);
+        built.mesh_sets.insert("coin".into());
+        let lost = at_stake(Some(&built), true);
+        assert_eq!(lost.len(), 2);
+        assert!(lost[0].contains("appui, coin"), "{lost:?}");
+        assert!(lost[1].contains("modèle"), "{lost:?}");
+    }
 
     fn example(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
