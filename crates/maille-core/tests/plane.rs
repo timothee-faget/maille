@@ -338,6 +338,15 @@ fn invalid_plane_inputs_are_typed_errors() {
         Mesh::new(aligned, vec![make([0, 1, 2])]),
         Err(MailleError::DegenerateTriangle { element: 0 })
     );
+    // coordonnée non finie : dite telle quelle, pas comme un triangle dégénéré
+    for bad in [f64::NAN, f64::INFINITY] {
+        let mut nodes = unit.clone();
+        nodes[1].x = bad;
+        assert_eq!(
+            Mesh::new(nodes, vec![make([0, 1, 2])]),
+            Err(MailleError::NonFiniteCoordinate { node: 1 })
+        );
+    }
     assert_eq!(
         Mesh::new(unit.clone(), vec![make([0, 1, 7])]),
         Err(MailleError::UnknownNode { node: 7 })

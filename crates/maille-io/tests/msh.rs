@@ -260,6 +260,18 @@ fn refuses_missing_section() {
 }
 
 #[test]
+fn refuses_non_finite_coordinate() {
+    for bad in ["nan", "inf", "-inf"] {
+        let text = TRIANGLE.replace("\n1 0 0\n0 1 0", &format!("\n{bad} 0 0\n0 1 0"));
+        let m = message(&text);
+        assert!(
+            m.contains("ligne 19") && m.contains("Node 2") && m.contains("pas finie"),
+            "{m}"
+        );
+    }
+}
+
+#[test]
 fn refuses_unclosed_section() {
     let text = TRIANGLE.replace("$EndElements\n", "");
     assert!(matches!(read(&text), Err(IoError::Syntax { .. })));

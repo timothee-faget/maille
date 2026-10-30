@@ -220,6 +220,12 @@ fn parse_nodes(body: &Body) -> Result<(Vec<Node>, HashMap<i64, usize>), IoError>
                 num(line, &toks, 1, "y")?,
                 num(line, &toks, 2, "z")?,
             );
+            if !(node.x.is_finite() && node.y.is_finite() && node.z.is_finite()) {
+                return Err(syntax(
+                    line,
+                    format!("une coordonnée du Node {tag} n'est pas finie (NaN ou infinie)"),
+                ));
+            }
             if index.insert(tag, nodes.len()).is_some() {
                 return Err(IoError::DuplicateNodeTag {
                     line: tag_line,

@@ -24,6 +24,10 @@ pub enum MailleError {
     UnknownNode {
         node: usize,
     },
+    /// Coordonnée d'un Node NaN ou infinie.
+    NonFiniteCoordinate {
+        node: usize,
+    },
     ZeroLengthElement {
         element: usize,
     },
@@ -291,6 +295,10 @@ impl fmt::Display for MailleError {
             Self::UnknownNode { node } => {
                 write!(f, "le Node {node} n'existe pas dans le Mesh")
             }
+            Self::NonFiniteCoordinate { node } => write!(
+                f,
+                "une coordonnée du Node {node} n'est pas finie (NaN ou infinie) : corriger le fichier de maillage"
+            ),
             Self::ZeroLengthElement { element } => write!(
                 f,
                 "l'Element {element} a une longueur nulle : séparer ses deux Nodes"
