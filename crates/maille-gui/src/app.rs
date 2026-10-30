@@ -11,7 +11,7 @@ use eframe::egui::{
 use eframe::egui_wgpu::{wgpu, RenderState};
 use egui_lucide::Lucide;
 use maille_io::meshing::Source;
-use maille_viewer::{Cut, NodalResults, ResultsView};
+use maille_viewer::{Cut, NodalResults, ResultsView, Theme};
 
 use crate::compute::{ComputeState, Job, Running};
 use crate::files::{self, Written};
@@ -25,11 +25,13 @@ use crate::results;
 use crate::results_ui::{self, Playback};
 use crate::series::Series;
 use crate::sets::{self, PickFace};
+use crate::settings::{self, ThemeChoice};
 use crate::state::{Action, Item, Space, State, Status, Tool};
 use crate::triad;
 
-/// Fond des panneaux : sombre et translucide, la vue reste lisible derrière.
-const PANEL: Color32 = Color32::from_rgba_premultiplied(26, 28, 34, 224);
+/// Fond des panneaux : translucide, la vue reste lisible derrière.
+const PANEL_DARK: Color32 = Color32::from_rgba_premultiplied(26, 28, 34, 224);
+const PANEL_LIGHT: Color32 = Color32::from_rgba_premultiplied(238, 239, 242, 230);
 const GAP: f32 = 12.0;
 const TOOLBAR_WIDTH: f32 = 36.0;
 const ICON_SIZE: f32 = 18.0;
@@ -168,6 +170,9 @@ pub struct App {
     mesh_view: Option<Open>,
     mesh: MeshUi,
     model: ModelUi,
+    /// Le thème voulu, et le fichier où on le garde.
+    theme: ThemeChoice,
+    settings_path: Option<PathBuf>,
     /// Chemins tapés dans les inspecteurs « Ouvrir » et « Importer ».
     path: String,
     mesh_path: String,
@@ -201,7 +206,10 @@ enum AfterWrite {
 
 impl App {
     pub fn new(open: Option<PathBuf>) -> Self {
+        let settings_path = settings::default_path();
         Self {
+            theme: settings::load(settings_path.as_deref()),
+            settings_path,
             state: State::default(),
             results: None,
             mesh_view: None,
@@ -406,14 +414,20 @@ impl App {
                 "Dépose un dessin .dxf, une surface .stl, une pièce .step\nou un maillage .msh ici, ou utilise l'outil « Importer »"
             }
         };
+        let dark = ui.visuals().dark_mode;
         let (Some(open), Some(gpu)) = (self.view_mut(), frame.wgpu_render_state()) else {
-            ui.painter().rect_filled(rect, 0.0, Color32::from_gray(242));
+            let fill = if dark {
+                Color32::from_rgb(37, 39, 43)
+            } else {
+                Color32::from_gray(204)
+            };
+            ui.painter().rect_filled(rect, 0.0, fill);
             ui.painter().text(
                 rect.center(),
                 Align2::CENTER_CENTER,
                 invitation,
                 egui::FontId::proportional(18.0),
-                Color32::from_gray(110),
+                ui.visuals().weak_text_color(),
             );
             return None;
         };
@@ -431,6 +445,8 @@ impl App {
                 open.texture,
             );
         }
+        open.view
+            .set_theme(if dark { Theme::Dark } else { Theme::Light });
         open.view.draw();
         ui.painter().image(
             open.texture,
@@ -511,7 +527,7 @@ impl App {
 
     fn spaces(&mut self, ctx: &egui::Context) {
         panel("spaces", Align2::CENTER_TOP, [0.0, GAP]).show(ctx, |ui| {
-            floating().show(ui, |ui| {
+            floating(ui).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     for space in Space::ALL {
                         status_dot(ui, self.state.space_status(space));
@@ -529,8 +545,9 @@ impl App {
     fn toolbar(&mut self, ctx: &egui::Context) {
         let groups = crate::state::toolbar(self.state.space);
         let mut clicked = None;
+        let mut theme_clicked = false;
         panel("toolbar", Align2::RIGHT_CENTER, [-GAP, 0.0]).show(ctx, |ui| {
-            floating().show(ui, |ui| {
+            floating(ui).show(ui, |ui| {
                 ui.set_width(TOOLBAR_WIDTH);
                 for (g, group) in groups.iter().enumerate() {
                     if g > 0 {
@@ -550,7 +567,7 @@ impl App {
                             _ => egui::Button::image(
                                 icon(item)
                                     .size(ICON_SIZE)
-                                    .color(Color32::from_gray(228))
+                                    .color(ui.visuals().text_color())
                                     .stroke_width(1.75)
                                     .image(),
                             ),
@@ -562,8 +579,32 @@ impl App {
                         }
                     }
                 }
+                ui.separator();
+                let lucide = match self.theme {
+                    ThemeChoice::System => Lucide::Monitor,
+                    ThemeChoice::Light => Lucide::Sun,
+                    ThemeChoice::Dark => Lucide::Moon,
+                };
+                let button = egui::Button::image(
+                    lucide
+                        .size(ICON_SIZE)
+                        .color(ui.visuals().text_color())
+                        .stroke_width(1.75)
+                        .image(),
+                )
+                .min_size(Vec2::splat(TOOLBAR_WIDTH));
+                let tip = format!("Thème : {} (clic pour changer)", self.theme.label());
+                theme_clicked = ui.add(button).on_hover_text(tip).clicked();
             });
         });
+        if theme_clicked {
+            self.theme = self.theme.next();
+            if let Some(path) = &self.settings_path {
+                if let Err(e) = settings::save(path, self.theme) {
+                    self.error = Some(format!("{} : {e}", path.display()));
+                }
+            }
+        }
         match clicked {
             Some(Item::Tool(t)) => self.state.pick(t),
             Some(Item::Action(a)) => self.act(a),
@@ -585,7 +626,7 @@ impl App {
             [-(GAP * 2.0 + TOOLBAR_WIDTH + 22.0), 0.0],
         )
         .show(ctx, |ui| {
-            floating().show(ui, |ui| {
+            floating(ui).show(ui, |ui| {
                 ui.set_width(INSPECTOR_WIDTH);
                 ui.horizontal(|ui| {
                     ui.heading(tool.label());
@@ -593,7 +634,7 @@ impl App {
                         let close = egui::Button::image(
                             Lucide::PanelRightClose
                                 .size(ICON_SIZE)
-                                .color(Color32::from_gray(200))
+                                .color(ui.visuals().weak_text_color())
                                 .image(),
                         )
                         .frame(false);
@@ -1272,7 +1313,7 @@ impl App {
         };
         let mut cancel = false;
         panel("compute", Align2::CENTER_BOTTOM, [0.0, -GAP]).show(ctx, |ui| {
-            floating().show(ui, |ui| {
+            floating(ui).show(ui, |ui| {
                 ui.set_width(260.0);
                 cancel = model_tools::progress_ui(ui, running);
             });
@@ -1295,7 +1336,7 @@ impl App {
         }
         let mut relaunch = false;
         panel("stale", Align2::CENTER_TOP, [0.0, 60.0]).show(ctx, |ui| {
-            floating().show(ui, |ui| {
+            floating(ui).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.colored_label(
                         Color32::from_rgb(230, 180, 80),
@@ -1336,7 +1377,7 @@ impl App {
         let mut clicked = None;
         let mut close = false;
         panel("card", Align2::LEFT_BOTTOM, [GAP, -GAP]).show(ctx, |ui| {
-            floating().show(ui, |ui| {
+            floating(ui).show(ui, |ui| {
                 ui.set_width(220.0);
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(space.label()).strong());
@@ -1701,7 +1742,11 @@ fn icon(item: Item) -> Lucide {
 fn draw_triad(ui: &egui::Ui, rect: Rect, (right, up, eye): ([f64; 3], [f64; 3], [f64; 3])) {
     let painter = ui.painter();
     let center = rect.right_bottom() - Vec2::splat(TRIAD_MARGIN);
-    painter.circle_filled(center, TRIAD_LENGTH + 14.0, Color32::from_black_alpha(18));
+    painter.circle_filled(
+        center,
+        TRIAD_LENGTH + 14.0,
+        ui.visuals().text_color().gamma_multiply(0.08),
+    );
     for axis in triad::axes(right, up, eye) {
         let index = ["X", "Y", "Z"]
             .iter()
@@ -1738,12 +1783,20 @@ fn panel(id: &str, anchor: Align2, offset: [f32; 2]) -> egui::Area {
 }
 
 /// Cadre commun des panneaux flottants.
-fn floating() -> Frame {
+fn floating(ui: &egui::Ui) -> Frame {
+    let dark = ui.visuals().dark_mode;
     Frame::new()
-        .fill(PANEL)
+        .fill(if dark { PANEL_DARK } else { PANEL_LIGHT })
         .corner_radius(CornerRadius::same(14))
         .inner_margin(Margin::same(10))
-        .stroke(Stroke::new(1.0, Color32::from_white_alpha(24)))
+        .stroke(Stroke::new(
+            1.0,
+            if dark {
+                Color32::from_white_alpha(24)
+            } else {
+                Color32::from_black_alpha(36)
+            },
+        ))
 }
 
 fn status_dot(ui: &mut egui::Ui, status: Status) {
@@ -1849,6 +1902,14 @@ impl eframe::App for App {
             }
         }
 
+        let preference = match self.theme {
+            ThemeChoice::System => egui::ThemePreference::System,
+            ThemeChoice::Light => egui::ThemePreference::Light,
+            ThemeChoice::Dark => egui::ThemePreference::Dark,
+        };
+        if ctx.options(|o| o.theme_preference) != preference {
+            ctx.set_theme(preference);
+        }
         self.poll_job(frame);
         self.refresh_model();
         let mut clicked = None;

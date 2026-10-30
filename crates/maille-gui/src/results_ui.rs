@@ -313,7 +313,12 @@ fn plot(ui: &mut egui::Ui, points: &[[f64; 2]], marker: Option<f64>) {
     let width = ui.available_width();
     let (response, painter) = ui.allocate_painter(Vec2::new(width, PLOT_HEIGHT), Sense::hover());
     let rect = response.rect;
-    painter.rect_filled(rect, 3.0, Color32::from_black_alpha(90));
+    let dark = ui.visuals().dark_mode;
+    painter.rect_filled(
+        rect,
+        3.0,
+        Color32::from_black_alpha(if dark { 90 } else { 24 }),
+    );
     if points.len() < 2 {
         return;
     }
@@ -352,10 +357,17 @@ fn plot(ui: &mut egui::Ui, points: &[[f64; 2]], marker: Option<f64>) {
     }
     painter.add(egui::Shape::line(
         points.iter().map(|p| at(*p)).collect(),
-        Stroke::new(1.6, Color32::from_rgb(120, 190, 255)),
+        Stroke::new(
+            1.6,
+            if dark {
+                Color32::from_rgb(120, 190, 255)
+            } else {
+                Color32::from_rgb(20, 90, 190)
+            },
+        ),
     ));
     let font = egui::FontId::monospace(10.0);
-    let weak = Color32::from_gray(190);
+    let weak = ui.visuals().weak_text_color();
     let corner = |p: Pos2, anchor, text: String| {
         painter.text(p, anchor, text, font.clone(), weak);
     };
