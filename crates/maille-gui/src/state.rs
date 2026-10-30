@@ -63,7 +63,7 @@ impl Tool {
             Tool::Import => "Importer",
             Tool::MeshSize => "Taille h",
             Tool::FaceSets => "Faces → Set",
-            Tool::VertexSets => "Sommets → Set",
+            Tool::VertexSets => "Cadre → Set",
             Tool::ManageSets => "Sets",
             Tool::Quality => "Qualité",
             Tool::Material => "Material",
@@ -92,6 +92,7 @@ impl Tool {
                 | Tool::Import
                 | Tool::MeshSize
                 | Tool::FaceSets
+                | Tool::VertexSets
                 | Tool::ManageSets
                 | Tool::Quality
                 | Tool::Material
@@ -489,11 +490,11 @@ mod tests {
             Tool::Import,
             Tool::MeshSize,
             Tool::FaceSets,
+            Tool::VertexSets,
             Tool::ManageSets,
             Tool::Quality,
         ] {
             assert!(tool.available(), "{tool:?}");
         }
-        assert!(!Tool::VertexSets.available());
     }
 }

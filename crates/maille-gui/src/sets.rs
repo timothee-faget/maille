@@ -52,7 +52,7 @@ fn position(built: &Built, node: usize) -> Point {
 }
 
 /// Distance du point `p` au segment `a`–`b`, dans le plan de l'écran.
-fn segment_distance(p: [f64; 2], a: Point, b: Point) -> f64 {
+pub(crate) fn segment_distance(p: [f64; 2], a: Point, b: Point) -> f64 {
     let (ab, ap) = ([b[0] - a[0], b[1] - a[1]], [p[0] - a[0], p[1] - a[1]]);
     let len2 = ab[0] * ab[0] + ab[1] * ab[1];
     let t = if len2 > 0.0 {
@@ -64,7 +64,7 @@ fn segment_distance(p: [f64; 2], a: Point, b: Point) -> f64 {
 }
 
 /// Profondeur du triangle `t` (pixels, profondeur) au pixel `p`, s'il le couvre.
-fn triangle_depth(p: [f64; 2], t: [Point; 3]) -> Option<f64> {
+pub(crate) fn triangle_depth(p: [f64; 2], t: [Point; 3]) -> Option<f64> {
     let d = (t[1][1] - t[2][1]) * (t[0][0] - t[2][0]) + (t[2][0] - t[1][0]) * (t[0][1] - t[2][1]);
     if d.abs() < 1e-12 {
         return None;

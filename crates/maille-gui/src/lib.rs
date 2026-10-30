@@ -5,6 +5,7 @@
 mod app;
 pub mod compute;
 pub mod library;
+pub mod mesh_pick;
 pub mod mesh_space;
 pub mod model_space;
 mod model_tools;
