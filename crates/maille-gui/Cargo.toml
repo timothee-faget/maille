@@ -12,3 +12,4 @@ maille-io = { path = "../maille-io" }
 maille-viewer = { path = "../maille-viewer" }
 egui-lucide = "0.2.0"
 egui_extras = { version = "0.37.0", default-features = false, features = ["svg"] }
+rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }

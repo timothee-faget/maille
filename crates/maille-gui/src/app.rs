@@ -186,6 +186,8 @@ pub struct App {
     /// Des fichiers à écrire qui existent et ont été modifiés en dehors de l'interface : on attend
     /// l'accord de l'utilisateur.
     confirm: Option<Confirm>,
+    /// Un import en attente d'accord : le fichier, et le travail qu'il ferait perdre.
+    replace: Option<(PathBuf, Vec<String>)>,
 }
 
 /// Écriture en attente d'accord, voir `App::write_or_ask`.
@@ -253,6 +255,7 @@ impl App {
             error: None,
             written: Written::default(),
             confirm: None,
+            replace: None,
         }
     }
 
@@ -297,9 +300,59 @@ impl App {
         }
     }
 
+    /// Importe le fichier, après accord si cela fait perdre du travail (voir `replace_dialog`).
+    fn import(&mut self, path: &Path, frame: &eframe::Frame) {
+        let lost = mesh_space::at_stake(
+            self.mesh.built.as_ref(),
+            self.model.draft != Draft::default(),
+        );
+        if lost.is_empty() {
+            self.import_now(path, frame);
+        } else {
+            self.replace = Some((path.to_path_buf(), lost));
+        }
+    }
+
+    /// Demande avant qu'un import remplace la géométrie sur laquelle on a travaillé.
+    fn replace_dialog(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        let Some((path, lost)) = &self.replace else {
+            return;
+        };
+        let mut choice = None;
+        let modal = egui::Modal::new(egui::Id::unique("confirm-replace")).show(ctx, |ui| {
+            ui.set_max_width(420.0);
+            ui.heading("Remplacer la géométrie ?");
+            ui.monospace(path.display().to_string());
+            for line in lost {
+                ui.label(format!("• {line}"));
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.button("Remplacer").clicked() {
+                    choice = Some(true);
+                }
+                if ui.button("Annuler").clicked() {
+                    choice = Some(false);
+                }
+            });
+        });
+        if modal.should_close() && choice.is_none() {
+            choice = Some(false);
+        }
+        match choice {
+            Some(true) => {
+                if let Some((path, _)) = self.replace.take() {
+                    self.import_now(&path, frame);
+                }
+            }
+            Some(false) => self.replace = None,
+            None => {}
+        }
+    }
+
     /// Importe un dessin, une surface, une pièce ou un maillage. Une géométrie est maillée tout de suite
     /// à la taille proposée, pour qu'il y ait quelque chose à voir ; on règle h ensuite.
-    fn import(&mut self, path: &Path, frame: &eframe::Frame) {
+    fn import_now(&mut self, path: &Path, frame: &eframe::Frame) {
         match mesh_space::import(path) {
             Ok(Imported::Cad(cad)) => {
                 self.mesh.size = cad.suggested;
@@ -656,6 +709,10 @@ impl App {
                         );
                     }
                     Tool::Open => {
+                        if let Some(path) = browse(ui, "Résultats", &["pvd", "vtu"]) {
+                            self.path = path.display().to_string();
+                            todo = Some(Todo::Open(path));
+                        }
                         ui.label("Fichier .pvd ou .vtu :");
                         ui.text_edit_singleline(&mut self.path);
                         if ui.button("Ouvrir").clicked() && !self.path.trim().is_empty() {
@@ -664,6 +721,14 @@ impl App {
                         ui.weak("Ou dépose-le sur la fenêtre.");
                     }
                     Tool::Import => {
+                        if let Some(path) = browse(
+                            ui,
+                            "Géométrie ou maillage",
+                            &["dxf", "stl", "step", "stp", "msh"],
+                        ) {
+                            self.mesh_path = path.display().to_string();
+                            todo = Some(Todo::Import(path));
+                        }
                         ui.label("Dessin .dxf, surface .stl, pièce .step ou maillage .msh :");
                         ui.text_edit_singleline(&mut self.mesh_path);
                         if ui.button("Importer").clicked() && !self.mesh_path.trim().is_empty() {
@@ -1766,6 +1831,17 @@ const AXIS_COLORS: [Color32; 3] = [
     Color32::from_rgb(80, 130, 235),
 ];
 
+/// Bouton « Parcourir… » : le sélecteur de fichier du système, limité à ces extensions. Rend le
+/// fichier choisi, rien si on annule.
+fn browse(ui: &mut egui::Ui, kind: &str, extensions: &[&str]) -> Option<PathBuf> {
+    if !ui.button("Parcourir…").clicked() {
+        return None;
+    }
+    rfd::FileDialog::new()
+        .add_filter(kind, extensions)
+        .pick_file()
+}
+
 /// Icône d'un élément de la barre d'outils.
 fn icon(item: Item) -> Lucide {
     match item {
@@ -2007,6 +2083,7 @@ impl eframe::App for App {
         self.compute_panel(&ctx);
         self.stale_banner(&ctx);
         self.confirm_dialog(&ctx);
+        self.replace_dialog(&ctx, frame);
         if self.refresh_model() {
             ctx.request_repaint();
         }
