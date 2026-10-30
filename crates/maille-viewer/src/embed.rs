@@ -6,7 +6,7 @@
 use std::error::Error;
 
 use crate::display::{Cut, Display};
-use crate::render::Renderer;
+use crate::render::{Renderer, Theme};
 use crate::scene::{NodalResults, Scene};
 
 /// Lacet et tangage des vues le long des axes x, y, z, en degrés (voir `Camera::axes`) : on regarde
@@ -47,6 +47,11 @@ impl ResultsView {
     /// Dessine l'image courante dans la texture.
     pub fn draw(&mut self) {
         self.renderer.draw();
+    }
+
+    /// Apparence de la vue : fond, texte de la légende et arêtes.
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.renderer.set_theme(theme);
     }
 
     /// Change la taille de la texture (en pixels) ; la vue se recadre tant qu'on n'a ni zoomé ni

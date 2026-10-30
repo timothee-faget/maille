@@ -12,16 +12,52 @@ use crate::camera::Camera;
 use crate::colormap::Colormap;
 use crate::legend::{Layout, FONT_SIZE, TITLE_FONT_SIZE};
 
-/// Couleur du texte de la légende, proche du gris foncé des arêtes.
-const TEXT_COLOR: glyphon::Color = glyphon::Color::rgb(38, 38, 38);
+/// Apparence du viewer : fond, texte de la légende et arêtes. Le fond est un gris (jamais du blanc pur),
+/// choisi pour que les couleurs de la colormap restent lisibles.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Theme {
+    #[default]
+    Light,
+    Dark,
+}
 
-/// Fond gris clair, sur lequel les couleurs de la colormap et le texte noir restent lisibles.
-const BACKGROUND: wgpu::Color = wgpu::Color {
-    r: 0.95,
-    g: 0.95,
-    b: 0.95,
-    a: 1.0,
-};
+impl Theme {
+    /// Fond, en sRGB 8 bits.
+    fn background_srgb(self) -> [u8; 3] {
+        match self {
+            Theme::Light => [204, 204, 204],
+            Theme::Dark => [37, 39, 43],
+        }
+    }
+
+    /// Fond pour `LoadOp::Clear` : wgpu attend du linéaire, même sur une cible sRGB.
+    fn background(self) -> wgpu::Color {
+        let [r, g, b] = self.background_srgb().map(|c| {
+            let c = f64::from(c) / 255.0;
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        });
+        wgpu::Color { r, g, b, a: 1.0 }
+    }
+
+    fn text(self) -> glyphon::Color {
+        match self {
+            Theme::Light => glyphon::Color::rgb(38, 38, 38),
+            Theme::Dark => glyphon::Color::rgb(225, 225, 225),
+        }
+    }
+
+    /// Couleur des arêtes et du cadre de la légende (RGBA, sRGB).
+    fn edge(self) -> [f32; 4] {
+        match self {
+            Theme::Light => [0.15, 0.15, 0.15, 1.0],
+            Theme::Dark => [0.85, 0.85, 0.85, 1.0],
+        }
+    }
+}
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// Format des captures hors écran : sRGB, comme la fenêtre, pour des couleurs identiques.
@@ -60,6 +96,7 @@ pub struct Renderer {
     mesh: Option<MeshBuffers>,
     camera: [[f32; 4]; 4],
     eye: [f32; 3],
+    theme: Theme,
     range: (f64, f64),
     /// Barre de couleurs (`vs_screen` + `fs_fill`) et ses traits (`vs_screen` + `fs_edge`).
     legend_fill_pipeline: wgpu::RenderPipeline,
@@ -384,8 +421,8 @@ impl Renderer {
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor::default());
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
-            // matrice 4 × 4, (min, max) complété à 16 octets, direction de l'œil (vec4)
-            size: std::mem::size_of::<[f32; 24]>() as u64,
+            // matrice 4 × 4, (min, max) complété à 16 octets, direction de l'œil (vec4), couleur des arêtes (vec4)
+            size: std::mem::size_of::<[f32; 28]>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -415,6 +452,7 @@ impl Renderer {
             mesh: None,
             camera: Camera::fit(([0.0; 3], [1.0; 3]), [1.0, 1.0], 0.0).matrix([1.0, 1.0]),
             eye: [0.0, 0.0, 1.0],
+            theme: Theme::default(),
             range: (0.0, 1.0),
             legend_fill_pipeline,
             legend_line_pipeline,
@@ -578,6 +616,13 @@ impl Renderer {
         self.write_uniforms();
     }
 
+    pub fn set_theme(&mut self, theme: Theme) {
+        if self.theme != theme {
+            self.theme = theme;
+            self.write_uniforms();
+        }
+    }
+
     pub fn set_camera(&mut self, camera: &Camera) {
         self.camera = camera.matrix(self.size());
         let (_, _, eye) = camera.axes();
@@ -586,11 +631,12 @@ impl Renderer {
     }
 
     fn write_uniforms(&mut self) {
-        let mut data = [0.0_f32; 24];
+        let mut data = [0.0_f32; 28];
         data[..16].copy_from_slice(self.camera.as_flattened());
         data[16] = self.range.0 as f32;
         data[17] = self.range.1 as f32;
         data[20..23].copy_from_slice(&self.eye);
+        data[24..28].copy_from_slice(&self.theme.edge());
         self.queue
             .write_buffer(&self.uniforms, 0, bytemuck::cast_slice(&data));
         self.request_redraw();
@@ -753,7 +799,7 @@ impl Renderer {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(BACKGROUND),
+                        load: wgpu::LoadOp::Clear(self.theme.background()),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -828,7 +874,7 @@ impl Renderer {
             top: at[1],
             scale: 1.0,
             bounds,
-            default_color: TEXT_COLOR,
+            default_color: self.theme.text(),
             custom_glyphs: &[],
         });
         match t.renderer.prepare(
