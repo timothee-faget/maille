@@ -718,6 +718,19 @@ fn hollow_cylinder_converges_to_the_logarithmic_profile() {
 }
 
 #[test]
+fn non_finite_heat_source_is_refused() {
+    let mesh = plane_mesh(1, 1, false);
+    let thermal = Model::with_analysis(mesh, Analysis::Thermal, Vec::new(), Vec::new()).unwrap();
+    assert!(matches!(
+        thermal.with_heat_sources(vec![HeatSource {
+            element: 0,
+            value: f64::NAN
+        }]),
+        Err(MailleError::NonFinite { .. })
+    ));
+}
+
+#[test]
 fn any_finite_fluid_temperature_is_accepted() {
     let mesh = plane_mesh(1, 1, false);
     let thermal =
