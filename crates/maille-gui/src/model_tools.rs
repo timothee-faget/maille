@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use eframe::egui::{self, Color32};
 use maille_io::materials::{Library, LibraryMaterial};
 use maille_io::model::{
-    ContactDef, ContactKind, ConvectionDef, DofDef, HeatSourceDef, PlaneStateDef, PressureDef,
-    ValueDef,
+    ContactDef, ContactKind, ConvectionDef, DofDef, EdgeLoadDef, HeatSourceDef, PlaneStateDef,
+    PressureDef, ValueDef,
 };
 use maille_io::msh::CellKind;
 
@@ -41,6 +41,9 @@ pub struct Forms {
     pub load: ValueForm,
     pub pressure_set: String,
     pub pressure: f64,
+    pub edge_set: String,
+    /// Force linéique (fx, fy, fz) ; fz ne sert qu'en 3D.
+    pub edge_load: [f64; 3],
     /// Température imposée : `set` et `value` de la BC en `t`.
     pub temperature: ValueForm,
     pub heat_set: String,
@@ -115,6 +118,8 @@ pub struct MeshInfo<'a> {
     pub sets: &'a [&'a str],
     /// Sets d'Elements (le domaine compris) : ce qu'un Material peut recevoir.
     pub element_sets: &'a [&'a str],
+    /// Sets qu'une force linéique peut viser : des bords en 2D, des arêtes en 3D.
+    pub edge_sets: &'a [&'a str],
     pub kind: CellKind,
 }
 
@@ -567,6 +572,8 @@ pub fn load_tool(ui: &mut egui::Ui, draft: &mut Draft, mesh: &MeshInfo, forms: &
         });
     }
     ui.separator();
+    edge_load_form(ui, draft, mesh, forms);
+    ui.separator();
     ui.label(with_unit("Load : effort par Node d'un Set", units.force()));
     ui.weak("C'est une force par Node, pas la force totale.");
     for (i, l) in draft.loads.iter().enumerate() {
@@ -591,6 +598,58 @@ pub fn load_tool(ui: &mut egui::Ui, draft: &mut Draft, mesh: &MeshInfo, forms: &
             set: form.set.clone(),
             dof: form.dof,
             value: form.value,
+        });
+    }
+}
+
+/// Force linéique sur un bord (2D) ou des arêtes (3D) : composantes fixes, par unité de longueur.
+fn edge_load_form(ui: &mut egui::Ui, draft: &mut Draft, mesh: &MeshInfo, forms: &mut Forms) {
+    let unit = match (draft.units.force(), draft.units.length()) {
+        ("", _) | (_, "") => String::new(),
+        (force, length) => format!("{force}/{length}"),
+    };
+    let dim = mesh.dim();
+    ui.label(with_unit("Force linéique sur un bord ou des arêtes", &unit));
+    ui.weak(if dim == 2 {
+        "Force par longueur de bord, sur toute l'épaisseur : σ · épaisseur pour une contrainte σ."
+    } else {
+        "Force par longueur d'arête, composantes fixes. Les Sets d'arêtes se tirent avec « Arêtes → Set »."
+    });
+    let mut remove = None;
+    for (i, l) in draft.edge_loads.iter().enumerate() {
+        ui.horizontal(|ui| {
+            ui.label(format!("{} · {:?}", l.set, l.value));
+            if ui.small_button("×").clicked() {
+                remove = Some(i);
+            }
+        });
+    }
+    if let Some(i) = remove {
+        draft.edge_loads.remove(i);
+    }
+    if mesh.edge_sets.is_empty() {
+        ui.weak(if dim == 2 {
+            "Aucun Set de bord."
+        } else {
+            "Aucun Set d'arêtes : trace-en un avec l'outil « Arêtes → Set » (espace Maillage)."
+        });
+        return;
+    }
+    ui.horizontal(|ui| {
+        set_picker(ui, "edge-load-set", mesh.edge_sets, &mut forms.edge_set);
+        for (axis, v) in ["x", "y", "z"]
+            .iter()
+            .zip(forms.edge_load.iter_mut())
+            .take(dim)
+        {
+            ui.label(*axis);
+            ui.add(egui::DragValue::new(v).speed(0.1));
+        }
+    });
+    if ui.button("Ajouter la force linéique").clicked() && !forms.edge_set.is_empty() {
+        draft.edge_loads.push(EdgeLoadDef {
+            set: forms.edge_set.clone(),
+            value: forms.edge_load[..dim].to_vec(),
         });
     }
 }

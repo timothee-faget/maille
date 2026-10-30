@@ -92,6 +92,7 @@ enum Region {
     Nodes(Vec<usize>),
     Elements(Vec<usize>),
     Faces(maille_io::msh::Set),
+    Edges(maille_io::msh::Set),
 }
 
 impl Region {
@@ -100,6 +101,7 @@ impl Region {
             Region::Nodes(n) => format!("{} Nodes", n.len()),
             Region::Elements(e) => format!("{} Elements", e.len()),
             Region::Faces(s) => format!("{} faces, {} Nodes", s.faces.len(), s.nodes.len()),
+            Region::Edges(s) => format!("{} arêtes, {} Nodes", s.edges.len(), s.nodes.len()),
         }
     }
 
@@ -108,7 +110,7 @@ impl Region {
         match self {
             Region::Nodes(n) => mesh_pick::node_set(n),
             Region::Elements(e) => mesh_pick::element_set(e),
-            Region::Faces(s) => s.clone(),
+            Region::Faces(s) | Region::Edges(s) => s.clone(),
         }
     }
 }
@@ -689,6 +691,11 @@ impl App {
                             todo = Some(t);
                         }
                     }
+                    Tool::EdgeSets => {
+                        if let Some(t) = region_tool(ui, &mut self.mesh, Tool::EdgeSets) {
+                            todo = Some(t);
+                        }
+                    }
                     Tool::VertexSets => {
                         if let Some(t) = region_tool(ui, &mut self.mesh, Tool::VertexSets) {
                             todo = Some(t);
@@ -709,8 +716,10 @@ impl App {
                         Some(built) => {
                             let sets = built.sets();
                             let element_sets = built.element_sets();
+                            let edge_sets = built.edge_sets();
                             let info = MeshInfo {
                                 sets: &sets,
+                                edge_sets: &edge_sets,
                                 element_sets: &element_sets,
                                 kind: built.file.kind,
                             };
@@ -829,6 +838,10 @@ impl App {
     /// ou la retire de la sélection ; un clic dans le vide vide la sélection).
     fn pick_at(&mut self, cursor: [f64; 2], add: bool) {
         let on_geometry = matches!(self.mesh.imported, Some(Imported::Cad(_)));
+        if self.state.space == Space::Mesh && self.state.tool() == Tool::EdgeSets {
+            self.pick_edge_at(cursor, add);
+            return;
+        }
         if self.state.space == Space::Mesh
             && self.state.tool() == Tool::FaceSets
             && matches!(self.mesh.imported, Some(Imported::Mesh(..)))
@@ -887,6 +900,43 @@ impl App {
                     }
                 }
                 Some((tool, Region::Faces(set)))
+            }
+            None if add => return,
+            None => None,
+        };
+        self.set_region(region);
+    }
+
+    /// Clic avec « Arêtes → Set » (3D) : l'arête vive sous le curseur, prolongée jusqu'aux coins. Maj :
+    /// ajoute la chaîne à la sélection.
+    fn pick_edge_at(&mut self, cursor: [f64; 2], add: bool) {
+        let (Some(open), Some(built)) = (&self.mesh_view, &self.mesh.built) else {
+            return;
+        };
+        let skin = mesh_pick::skin(&built.file);
+        let sharp = mesh_pick::sharp_edges(&built.file, &skin, self.mesh.angle);
+        let hit = mesh_pick::pick_edge(
+            &built.file,
+            &skin,
+            &sharp,
+            &|p| open.view.project(p),
+            cursor,
+        );
+        let tool = Tool::EdgeSets;
+        let region = match hit {
+            Some(i) => {
+                let mut set = mesh_pick::edge_chain(&built.file, &sharp, i);
+                if let (true, Some((t, Region::Edges(old)))) = (add, &self.mesh.region) {
+                    if *t == tool {
+                        set.edges.extend(&old.edges);
+                        set.nodes.extend(&old.nodes);
+                        set.edges.sort_unstable();
+                        set.edges.dedup();
+                        set.nodes.sort_unstable();
+                        set.nodes.dedup();
+                    }
+                }
+                Some((tool, Region::Edges(set)))
             }
             None if add => return,
             None => None,
@@ -1015,7 +1065,7 @@ impl App {
         }
         let wanted: Vec<String> = match (self.state.space, self.state.tool(), &self.mesh.built) {
             // une sélection sur le Mesh : une clé qui change avec elle (« # » : pas des entités)
-            (Space::Mesh, tool @ (Tool::FaceSets | Tool::VertexSets), _)
+            (Space::Mesh, tool @ (Tool::FaceSets | Tool::EdgeSets | Tool::VertexSets), _)
                 if self.mesh.region.as_ref().is_some_and(|(t, _)| *t == tool) =>
             {
                 vec![format!("#region:{}", self.mesh.region_version)]
@@ -1556,7 +1606,19 @@ fn region_tool(ui: &mut egui::Ui, mesh: &mut MeshUi, tool: Tool) -> Option<Todo>
         ui.label("Importe et maille d'abord une géométrie, ou importe un .msh.");
         return None;
     }
-    if tool == Tool::FaceSets {
+    if tool == Tool::EdgeSets {
+        if mesh.built.as_ref().is_some_and(|b| b.file.kind.dim() == 2) {
+            ui.label(
+                "En 2D, un bord est déjà un Set de faces : utilise « Faces → Set » ou un bord de \
+                 la géométrie.",
+            );
+            return None;
+        }
+        ui.label("Clique une arête vive de la pièce : la sélection se prolonge jusqu'aux coins.");
+        ui.label("Angle minimal entre les deux faces d'une arête vive (degrés) :");
+        ui.add(egui::Slider::new(&mut mesh.angle, 1.0..=90.0));
+        ui.weak("Une arête cachée derrière la pièce ne se désigne pas : tourne la vue. Maj + clic : ajouter.");
+    } else if tool == Tool::FaceSets {
         ui.label("Clique une face de la surface : la région s'étend aux faces voisines.");
         ui.label("Angle maximal entre voisines (degrés) :");
         ui.add(egui::Slider::new(&mut mesh.angle, 1.0..=90.0));
@@ -1644,6 +1706,8 @@ fn manage_sets_tool(ui: &mut egui::Ui, mesh: &mut MeshUi) -> Option<Todo> {
                 format!("{} Elements", set.elements.len())
             } else if !set.faces.is_empty() {
                 format!("{} faces", set.faces.len())
+            } else if !set.edges.is_empty() {
+                format!("{} arêtes", set.edges.len())
             } else {
                 format!("{} Nodes", set.nodes.len())
             }
@@ -1712,6 +1776,7 @@ fn icon(item: Item) -> Lucide {
             Tool::Import => Lucide::FileInput,
             Tool::MeshSize => Lucide::Grid3x3,
             Tool::FaceSets => Lucide::Square,
+            Tool::EdgeSets => Lucide::Minus,
             Tool::VertexSets => Lucide::Dot,
             Tool::ManageSets => Lucide::Layers,
             Tool::Quality => Lucide::Gauge,

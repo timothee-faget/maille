@@ -34,6 +34,7 @@ pub enum Tool {
     Import,
     MeshSize,
     FaceSets,
+    EdgeSets,
     VertexSets,
     ManageSets,
     Quality,
@@ -63,6 +64,7 @@ impl Tool {
             Tool::Import => "Importer",
             Tool::MeshSize => "Taille h",
             Tool::FaceSets => "Faces → Set",
+            Tool::EdgeSets => "Arêtes → Set",
             Tool::VertexSets => "Cadre → Set",
             Tool::ManageSets => "Sets",
             Tool::Quality => "Qualité",
@@ -92,6 +94,7 @@ impl Tool {
                 | Tool::Import
                 | Tool::MeshSize
                 | Tool::FaceSets
+                | Tool::EdgeSets
                 | Tool::VertexSets
                 | Tool::ManageSets
                 | Tool::Quality
@@ -164,7 +167,12 @@ pub fn toolbar(space: Space) -> Vec<Group> {
     let own = match space {
         Space::Mesh => vec![
             group(&[Tool::Import, Tool::MeshSize]),
-            group(&[Tool::FaceSets, Tool::VertexSets, Tool::ManageSets]),
+            group(&[
+                Tool::FaceSets,
+                Tool::EdgeSets,
+                Tool::VertexSets,
+                Tool::ManageSets,
+            ]),
             group(&[Tool::Quality]),
         ],
         Space::Model => vec![
@@ -490,6 +498,7 @@ mod tests {
             Tool::Import,
             Tool::MeshSize,
             Tool::FaceSets,
+            Tool::EdgeSets,
             Tool::VertexSets,
             Tool::ManageSets,
             Tool::Quality,
