@@ -323,6 +323,7 @@ mod tests {
     use maille_io::msh::read;
 
     use super::*;
+    use crate::mesh_space::{import, mesh, Imported};
 
     fn example(name: &str) -> MshFile {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -390,8 +391,13 @@ mod tests {
 
     #[test]
     fn in_3d_the_angle_region_follows_a_smooth_surface_and_stops_at_the_edges() {
-        // un huitième de sphère creuse : la surface extérieure est lisse, ses bords à 90° des plans
-        let file = example("sphere.msh");
+        // un huitième de sphère creuse, maillé depuis le STEP (le .msh n'est pas versionné) : la
+        // surface extérieure est lisse, ses bords sont à 90° des plans de symétrie
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/sphere.step");
+        let Imported::Cad(cad) = import(&path).unwrap() else {
+            panic!("sphere.step est une pièce");
+        };
+        let file = mesh(&cad, 5.0, false, &Default::default()).unwrap().file;
         let skin = skin(&file);
         let outer = &file.sets["exterieur"];
         let seed = skin
