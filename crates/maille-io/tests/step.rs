@@ -604,6 +604,21 @@ fn refus_avec_message() {
         )),
         "{m}"
     );
+    // multiplicité gigantesque : refusée avant de développer les nœuds
+    let mut s = Step::default();
+    quarter_cylinder(&mut s, 2.0);
+    let spline = s
+        .lines
+        .iter()
+        .position(|l| l.contains("B_SPLINE_CURVE_WITH_KNOTS"))
+        .unwrap();
+    s.lines[spline] = s.lines[spline].replace("((3,3)", "((3,1000000000000000)");
+    let m = message(&s.text());
+    assert!(
+        m.contains(&format!("ligne {}", spline + 7))
+            && m.contains("1000000000000003 nœuds au lieu de 6"),
+        "{m}"
+    );
     // sommet hors de son cercle
     let mut s = Step::default();
     quarter_cylinder(&mut s, 2.5);
