@@ -8,6 +8,10 @@ use std::collections::BTreeMap;
 use super::error;
 use crate::IoError;
 
+/// Profondeur maximale des listes imbriquées. Un vrai STEP n'en a que quelques niveaux ; au-delà,
+/// le fichier est corrompu, et la lecture récursive déborderait la pile.
+const MAX_DEPTH: usize = 64;
+
 /// Contenu d'un fichier Part 21.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct Part21 {
@@ -89,6 +93,7 @@ pub(super) fn parse(text: &str) -> Result<Part21, IoError> {
     let mut p = Parser {
         lexer: Lexer::new(text),
         peeked: None,
+        depth: 0,
     };
     p.keyword(
         "ISO-10303-21",
@@ -394,6 +399,8 @@ impl<'a> Lexer<'a> {
 struct Parser<'a> {
     lexer: Lexer<'a>,
     peeked: Option<(usize, Token)>,
+    /// Listes ouvertes, voir `MAX_DEPTH`.
+    depth: usize,
 }
 
 impl Parser<'_> {
@@ -449,6 +456,18 @@ impl Parser<'_> {
 
     /// `(valeur, valeur, …)`, la parenthèse ouvrante comprise.
     fn params(&mut self, line: usize) -> Result<Vec<Value>, IoError> {
+        if self.depth == MAX_DEPTH {
+            return Err(error(format!(
+                "ligne {line} : plus de {MAX_DEPTH} listes imbriquées : fichier corrompu ?"
+            )));
+        }
+        self.depth += 1;
+        let out = self.list(line);
+        self.depth -= 1;
+        out
+    }
+
+    fn list(&mut self, line: usize) -> Result<Vec<Value>, IoError> {
         match self.next()? {
             (_, Token::Punct(b'(')) => {}
             (l, t) => return Err(Self::unexpected(l.max(line), "« ( »", &t)),
@@ -730,6 +749,20 @@ END-ISO-10303-21;";
         let m = p.get(2, 6).unwrap_err().to_string();
         assert!(m.contains("ligne 6") && m.contains("#2 est citée"), "{m}");
         assert!(m.starts_with("STEP : "), "{m}");
+    }
+
+    #[test]
+    fn listes_trop_imbriquees() {
+        let deep = 100_000;
+        let m = message(data(&format!(
+            "#1 = X({}{});",
+            "(".repeat(deep),
+            ")".repeat(deep)
+        )));
+        assert!(m.contains("ligne 6") && m.contains("imbriquées"), "{m}");
+        // une imbrication réaliste passe
+        let ok = format!("#1 = X({}1{});", "(".repeat(10), ")".repeat(10));
+        assert!(data(&ok).is_ok());
     }
 
     #[test]
