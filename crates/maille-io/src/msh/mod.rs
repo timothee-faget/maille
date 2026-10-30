@@ -16,7 +16,7 @@ use maille_core::mesher::{BoundarySet, Tetrahedralization, Triangulation};
 
 use crate::IoError;
 
-pub use numbering::face_positions;
+pub use numbering::{edge_positions, face_positions};
 pub use reader::read;
 pub use writer::write;
 
@@ -69,6 +69,14 @@ impl CellKind {
         }
     }
 
+    /// Type Gmsh d'une arête : ligne à 2 Nodes (Tri3, Tet4) ou à 3 Nodes (Tri6, Tet10).
+    fn edge_gmsh_type(self) -> u32 {
+        match self {
+            Self::Tri3 | Self::Tet4 => 1,
+            Self::Tri6 | Self::Tet10 => 8,
+        }
+    }
+
     fn from_gmsh_type(t: u32) -> Option<Self> {
         match t {
             2 => Some(Self::Tri3),
@@ -84,13 +92,18 @@ impl CellKind {
 ///
 /// - groupe de la dimension du maillage : `elements` ;
 /// - groupe d'une dimension de moins (bord) : `faces` et les `nodes` de ces faces ;
-/// - groupe de dimension inférieure (points, et lignes en 3D) : `nodes` seulement.
+/// - en 3D, groupe de lignes : `edges` (les arêtes de tétraèdre) et les `nodes` de ces arêtes ;
+/// - groupe de dimension inférieure (points) : `nodes` seulement.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Set {
     /// Nodes triés, sans doublon.
     pub nodes: Vec<usize>,
     /// Faces (élément, face) triées, numérotées comme `Element::face_nodes`.
     pub faces: Vec<(usize, usize)>,
+    /// Arêtes (élément, arête) triées, numérotées comme `Element::edge_nodes`, en 3D seulement : en
+    /// 2D, une arête de bord est une face. Une arête partagée est rattachée à l'Element de plus petit
+    /// indice, ce qui ne change rien à son intégrale.
+    pub edges: Vec<(usize, usize)>,
     /// Elements triés, sans doublon.
     pub elements: Vec<usize>,
 }
@@ -169,6 +182,7 @@ fn mesher_sets<'a>(
                 Set {
                     nodes: b.nodes.clone(),
                     faces: b.faces.clone(),
+                    edges: Vec::new(),
                     elements: Vec::new(),
                 },
             );

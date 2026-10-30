@@ -237,7 +237,7 @@ pub fn angle_region(file: &MshFile, skin: &[SkinFace], seed: usize, max_angle: f
     Set {
         nodes,
         faces,
-        elements: Vec::new(),
+        ..Set::default()
     }
 }
 

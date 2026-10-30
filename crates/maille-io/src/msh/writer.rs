@@ -3,12 +3,13 @@
 //! Chaque Set devient un groupe physique. Les entités Gmsh se regroupent par appartenance : les
 //! Elements qui sont dans les mêmes Sets forment une entité, ce qui permet à un Element d'être
 //! dans plusieurs Sets. Un Set de Nodes s'écrit en points, un Set de faces en éléments de bord
-//! (ses Nodes se déduisent des faces), un Set d'Elements en éléments de la dimension du maillage.
+//! (ses Nodes se déduisent des faces), un Set d'arêtes (3D) en lignes (ses Nodes se déduisent des
+//! arêtes), un Set d'Elements en éléments de la dimension du maillage.
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
-use super::numbering::{face_count, face_positions, swap_tet10_mids};
+use super::numbering::{edge_count, edge_positions, face_count, face_positions, swap_tet10_mids};
 use super::{CellKind, MshFile, Set};
 use crate::IoError;
 
@@ -36,6 +37,8 @@ pub fn write(file: &MshFile) -> Result<String, IoError> {
             dim
         } else if !set.faces.is_empty() {
             dim - 1
+        } else if !set.edges.is_empty() {
+            1
         } else {
             0
         }
@@ -43,6 +46,7 @@ pub fn write(file: &MshFile) -> Result<String, IoError> {
 
     let mut cell_sets = vec![Vec::new(); file.cells.len()];
     let mut face_sets: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
+    let mut edge_sets: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
     let mut point_sets: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for (i, (_, set)) in physical.iter().enumerate() {
         let tag = i + 1;
@@ -53,6 +57,10 @@ pub fn write(file: &MshFile) -> Result<String, IoError> {
         } else if !set.faces.is_empty() {
             for &face in &set.faces {
                 face_sets.entry(face).or_default().push(tag);
+            }
+        } else if !set.edges.is_empty() {
+            for &edge in &set.edges {
+                edge_sets.entry(edge).or_default().push(tag);
             }
         } else {
             for &n in &set.nodes {
@@ -91,11 +99,29 @@ pub fn write(file: &MshFile) -> Result<String, IoError> {
         face_groups.entry(tags).or_default().push(nodes);
     }
 
+    let mut edge_groups: BTreeMap<Vec<usize>, Vec<Vec<usize>>> = BTreeMap::new();
+    for ((e, k), mut tags) in edge_sets {
+        tags.dedup();
+        let cell = &file.cells[e];
+        let nodes = edge_positions(file.kind, k)
+            .map(|pos| pos.iter().map(|&p| cell[p]).collect())
+            .unwrap_or_default();
+        edge_groups.entry(tags).or_default().push(nodes);
+    }
+
     let face_entities: Vec<Entity> = face_groups
         .into_iter()
         .map(|(physical, elements)| Entity {
             physical,
             gmsh_type: file.kind.face_gmsh_type(),
+            elements,
+        })
+        .collect();
+    let edge_entities: Vec<Entity> = edge_groups
+        .into_iter()
+        .map(|(physical, elements)| Entity {
+            physical,
+            gmsh_type: file.kind.edge_gmsh_type(),
             elements,
         })
         .collect();
@@ -120,9 +146,11 @@ pub fn write(file: &MshFile) -> Result<String, IoError> {
     }
     let _ = writeln!(out, "$EndPhysicalNames");
 
-    // entités par dimension : points (0), faces (dim - 1), cellules (dim)
+    // entités par dimension : points (0), lignes (1, arêtes d'un maillage 3D), faces (dim - 1),
+    // cellules (dim)
     let mut by_dim: [&[Entity]; 4] = [&[]; 4];
     by_dim[0] = &point_entities;
+    by_dim[1] = &edge_entities;
     by_dim[dim - 1] = &face_entities;
     by_dim[dim] = &cell_entities;
     let _ = writeln!(
@@ -241,12 +269,28 @@ fn validate(file: &MshFile) -> Result<(), IoError> {
                 "le nom de Set « {name} » ne peut pas contenir de guillemet ni de saut de ligne"
             )));
         }
-        if !set.elements.is_empty() && !(set.faces.is_empty() && set.nodes.is_empty()) {
+        if !set.elements.is_empty()
+            && !(set.faces.is_empty() && set.edges.is_empty() && set.nodes.is_empty())
+        {
             return Err(invalid(format!(
-                "le Set « {name} » mélange des Elements avec des faces ou des Nodes : un Set a un seul rôle"
+                "le Set « {name} » mélange des Elements avec des faces, des arêtes ou des Nodes : un Set a un seul rôle"
             )));
         }
-        if set.elements.is_empty() && set.faces.is_empty() && set.nodes.is_empty() {
+        if !set.edges.is_empty() && !set.faces.is_empty() {
+            return Err(invalid(format!(
+                "le Set « {name} » mélange des faces et des arêtes : un Set a un seul rôle"
+            )));
+        }
+        if !set.edges.is_empty() && file.kind.dim() != 3 {
+            return Err(invalid(format!(
+                "le Set « {name} » a des arêtes, qui n'existent en Set que dans un maillage 3D (en 2D, une arête de bord est une face)"
+            )));
+        }
+        if set.elements.is_empty()
+            && set.faces.is_empty()
+            && set.edges.is_empty()
+            && set.nodes.is_empty()
+        {
             return Err(invalid(format!("le Set « {name} » est vide")));
         }
         if let Some(&e) = set.elements.iter().find(|&&e| e >= file.cells.len()) {
@@ -258,6 +302,13 @@ fn validate(file: &MshFile) -> Result<(), IoError> {
             if e >= file.cells.len() || f >= face_count(file.kind) {
                 return Err(invalid(format!(
                     "le Set « {name} » cite la face {f} de l'Element {e}, qui n'existe pas"
+                )));
+            }
+        }
+        for &(e, k) in &set.edges {
+            if e >= file.cells.len() || k >= edge_count(file.kind) {
+                return Err(invalid(format!(
+                    "le Set « {name} » cite l'arête {k} de l'Element {e}, qui n'existe pas"
                 )));
             }
         }

@@ -10,6 +10,7 @@ use maille_core::material::Material;
 use maille_core::mesh::{Dof, Element, Mesh, Node, PlaneState, Tri3, Tri6};
 use maille_core::mesher::{triangulate, Curve, Geometry, MeshOptions};
 use maille_core::model::{Amplitude, Bc, Model, Step};
+use maille_core::shape::TET10_EDGES;
 use maille_core::MailleError;
 use maille_io::model::{build, parse, Loaded, Run};
 use maille_io::msh::{read, write, CellKind, MshFile, Set, DOMAIN_SET};
@@ -721,6 +722,81 @@ fn edge_load_needs_a_boundary_the_right_size_and_a_static_analysis() {
         error(&thermal, &mesh),
         IoError::Model(MailleError::EdgeLoadStaticOnly)
     );
+}
+
+/// Le cube, plus un Set `contour` : les quatre arêtes de la face x = 1, passé par le `.msh`.
+fn cube_with_rim() -> MshFile {
+    let mut file = cube();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut edges = Vec::new();
+    for (e, cell) in file.cells.iter().enumerate() {
+        for (k, &(a, b)) in TET10_EDGES.iter().enumerate() {
+            let (a, b) = (cell[a], cell[b]);
+            let on_end = |n: usize| file.nodes[n].x > 0.5;
+            // une arête du cube le long de y ou de z (la diagonale d'une face change deux coordonnées)
+            let along_edge = (a ^ b).count_ones() == 1;
+            if on_end(a) && on_end(b) && along_edge && seen.insert((a.min(b), a.max(b))) {
+                edges.push((e, k));
+            }
+        }
+    }
+    assert_eq!(edges.len(), 4);
+    file.sets.insert(
+        "contour".to_string(),
+        Set {
+            edges,
+            ..Set::default()
+        },
+    );
+    read(&write(&file).unwrap()).unwrap()
+}
+
+#[test]
+fn edge_load_on_an_edge_set_gives_the_total_force_in_3d() {
+    // q = 25 N/mm sur les 4 arêtes (périmètre 4) : la réaction en x vaut −100 N
+    let mesh = cube_with_rim();
+    assert_eq!(mesh.sets["contour"].edges.len(), 4);
+    let toml = r#"
+units = "N, mm, MPa"
+mesh = "cube.msh"
+analysis = "static"
+[materials.acier]
+young = 200e3
+poisson = 0.25
+[[sections]]
+set = "domaine"
+material = "acier"
+[[bcs]]
+set = "x0"
+dof = "ux"
+value = 0.0
+[[bcs]]
+set = "y0"
+dof = "uy"
+value = 0.0
+[[bcs]]
+set = "z0"
+dof = "uz"
+value = 0.0
+[[edge_loads]]
+set = "contour"
+value = [25.0, 0.0, 0.0]
+"#;
+    let field = load(toml, &mesh).model.solve().unwrap();
+    let reaction: f64 = (0..mesh.nodes.len())
+        .filter(|&n| mesh.nodes[n].x < 0.5)
+        .map(|n| field.reactions[3 * n])
+        .sum();
+    assert!((reaction + 100.0).abs() < 1e-9, "réaction {reaction}");
+
+    // un Set de Nodes, ou un Set de faces, n'est pas un Set d'arêtes ; il faut 3 composantes
+    let on_nodes = toml.replace("set = \"contour\"", "set = \"x1\"");
+    assert!(matches!(
+        error(&on_nodes, &mesh),
+        IoError::WrongSetKind { .. }
+    ));
+    let two = toml.replace("[25.0, 0.0, 0.0]", "[25.0, 0.0]");
+    assert!(error(&two, &mesh).to_string().contains("3 composantes"));
 }
 
 #[test]

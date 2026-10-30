@@ -7,7 +7,9 @@ use std::str::FromStr;
 
 use maille_core::mesh::Node;
 
-use super::numbering::{face_count, face_key, face_positions, orient, swap_tet10_mids};
+use super::numbering::{
+    edge_count, edge_positions, face_count, face_key, face_positions, orient, swap_tet10_mids,
+};
 use super::{CellKind, MshFile, Set};
 use crate::IoError;
 
@@ -369,6 +371,19 @@ fn assemble(
         }
     }
 
+    // arêtes d'un maillage 3D, par paire de sommets : même règle, le plus petit indice gagne
+    let mut edges: HashMap<[usize; 3], (usize, usize)> = HashMap::new();
+    if dim == 3 {
+        for (e, cell) in cells.iter().enumerate() {
+            for k in 0..edge_count(kind) {
+                if let Some(pos) = edge_positions(kind, k) {
+                    let vertices = [cell[pos[0]], cell[pos[1]]];
+                    edges.entry(face_key(&vertices)).or_insert((e, k));
+                }
+            }
+        }
+    }
+
     let mut sets: BTreeMap<String, Set> = BTreeMap::new();
     let mut owner: HashMap<String, Entity> = HashMap::new();
     for b in blocks {
@@ -406,6 +421,18 @@ fn assemble(
                         set.nodes.extend(pos.iter().map(|&p| cells[e][p]));
                     }
                 }
+            } else if b.dim == 1 {
+                for (line, nodes) in &b.elements {
+                    let found = edges.get(&face_key(&nodes[..2])).copied();
+                    let (e, k) = found.ok_or_else(|| IoError::BoundaryEdgeNotFound {
+                        line: *line,
+                        set: name.clone(),
+                    })?;
+                    set.edges.push((e, k));
+                    if let Some(pos) = edge_positions(kind, k) {
+                        set.nodes.extend(pos.iter().map(|&p| cells[e][p]));
+                    }
+                }
             } else {
                 set.nodes
                     .extend(b.elements.iter().flat_map(|(_, n)| n.iter().copied()));
@@ -417,6 +444,8 @@ fn assemble(
         set.nodes.dedup();
         set.faces.sort_unstable();
         set.faces.dedup();
+        set.edges.sort_unstable();
+        set.edges.dedup();
         set.elements.sort_unstable();
         set.elements.dedup();
     }

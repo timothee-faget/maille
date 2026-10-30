@@ -71,6 +71,25 @@ pub fn face_positions(kind: CellKind, face: usize) -> Option<Vec<usize>> {
     }
 }
 
+/// Nombre d'arêtes d'un Element : 3 pour un triangle (ses faces), 6 pour un tétraèdre.
+pub fn edge_count(kind: CellKind) -> usize {
+    match kind {
+        CellKind::Tri3 | CellKind::Tri6 => 3,
+        CellKind::Tet4 | CellKind::Tet10 => 6,
+    }
+}
+
+/// Positions, dans les Nodes de l'Element, de ceux de l'arête `edge` : les deux sommets, puis le
+/// milieu. Même numérotation que `Element::edge_nodes`, et même ordre que les lignes de Gmsh (à 2 ou
+/// 3 Nodes).
+pub fn edge_positions(kind: CellKind, edge: usize) -> Option<Vec<usize>> {
+    match kind {
+        CellKind::Tri3 | CellKind::Tri6 => face_positions(kind, edge),
+        CellKind::Tet4 => TET10_EDGES.get(edge).map(|&(a, b)| vec![a, b]),
+        CellKind::Tet10 => TET10_EDGES.get(edge).map(|&(a, b)| vec![a, b, 4 + edge]),
+    }
+}
+
 /// Clé d'une face indépendante de l'ordre de ses sommets (2 en 2D, 3 en 3D, complétée par MAX).
 pub fn face_key(vertices: &[usize]) -> [usize; 3] {
     let mut key = [usize::MAX; 3];
@@ -99,6 +118,26 @@ mod tests {
             ),
             CellKind::Tet4 => Element::Tet4(Tet4::new([0, 1, 2, 3], m)),
             CellKind::Tet10 => Element::Tet10(Tet10::new(ids.try_into().unwrap(), m)),
+        }
+    }
+
+    #[test]
+    fn edges_as_in_core() {
+        for kind in [
+            CellKind::Tri3,
+            CellKind::Tri6,
+            CellKind::Tet4,
+            CellKind::Tet10,
+        ] {
+            let e = element(kind);
+            for k in 0..edge_count(kind) {
+                assert_eq!(
+                    edge_positions(kind, k),
+                    e.edge_nodes(k),
+                    "{kind:?} arête {k}"
+                );
+            }
+            assert_eq!(edge_positions(kind, edge_count(kind)), None);
         }
     }
 

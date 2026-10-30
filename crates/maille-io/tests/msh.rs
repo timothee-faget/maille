@@ -2,7 +2,7 @@
 //! orientation, refus avec message.
 
 use maille_core::material::Material;
-use maille_core::mesh::{Element, Mesh, Tet10};
+use maille_core::mesh::{Element, Mesh, Node, Tet10};
 use maille_core::mesher::{triangulate, Curve, Geometry, MeshOptions};
 use maille_core::shape::{tet10, TET10_EDGES};
 use maille_io::msh::{read, write, CellKind, MshFile, Set, DOMAIN_SET};
@@ -151,6 +151,107 @@ fn tet10_sets() {
 fn tet10_round_trip_is_exact() {
     let file = read(&tet10_file()).unwrap();
     assert_eq!(read(&write(&file).unwrap()).unwrap(), file);
+}
+
+/// `tet10_file` avec un groupe de lignes `arete` (type 8, à la Gmsh) dont l'unique ligne a les Nodes
+/// `line` (numéros Gmsh, depuis 1).
+fn tet10_file_with_line(line: &str) -> String {
+    tet10_file()
+        .replace("$PhysicalNames\n3\n", "$PhysicalNames\n4\n1 4 \"arete\"\n")
+        .replace(
+            "$Entities\n1 0 1 1\n1 0 0 0 1 3 0 0 1 0 1\n",
+            "$Entities\n1 1 1 1\n1 0 0 0 1 3 0 0 1 0 1\n1 0 0 0 0 0 1 1 4 0\n",
+        )
+        .replace(
+            "$Elements\n3 4 1 4\n0 1 15 1\n1 1\n",
+            &format!("$Elements\n4 5 1 5\n0 1 15 1\n1 1\n1 1 8 1\n5 {line}\n"),
+        )
+}
+
+#[test]
+fn gmsh_line_group_becomes_an_edge_set() {
+    // la ligne 1-4 (milieu 8) est l'arête 3 (0-3) du premier tétraèdre ; milieu (3,0) = position 7
+    let file = read(&tet10_file_with_line("1 4 8")).unwrap();
+    let arete = &file.sets["arete"];
+    assert_eq!(arete.edges, [(0, 3)]);
+    let mut nodes: Vec<usize> = [0, 3, 7].iter().map(|&p| file.cells[0][p]).collect();
+    nodes.sort_unstable();
+    assert_eq!(arete.nodes, nodes);
+    assert!(arete.faces.is_empty() && arete.elements.is_empty());
+    // les autres groupes ne changent pas
+    assert_eq!(file.sets["coin"].nodes, [0]);
+    assert_eq!(file.sets["base"].faces, [(0, 0)]);
+}
+
+#[test]
+fn edge_sets_round_trip_for_tet10_and_tet4() {
+    let file = read(&tet10_file_with_line("1 4 8")).unwrap();
+    assert_eq!(read(&write(&file).unwrap()).unwrap(), file);
+
+    // Tet4 : arêtes 0-1 et 2-3 d'un tétraèdre, écrites en lignes à 2 Nodes
+    let nodes = vec![
+        Node::new(0.0, 0.0, 0.0),
+        Node::new(1.0, 0.0, 0.0),
+        Node::new(0.0, 1.0, 0.0),
+        Node::new(0.0, 0.0, 1.0),
+    ];
+    let mut sets = std::collections::BTreeMap::new();
+    sets.insert(
+        "aretes".to_string(),
+        Set {
+            nodes: vec![0, 1, 2, 3],
+            edges: vec![(0, 0), (0, 5)],
+            ..Set::default()
+        },
+    );
+    sets.insert(
+        DOMAIN_SET.to_string(),
+        Set {
+            elements: vec![0],
+            ..Set::default()
+        },
+    );
+    let tet4 = MshFile {
+        nodes,
+        kind: CellKind::Tet4,
+        cells: vec![vec![0, 1, 2, 3]],
+        sets,
+    };
+    let text = write(&tet4).unwrap();
+    assert_eq!(read(&text).unwrap(), tet4);
+}
+
+#[test]
+fn refuses_line_that_is_not_an_edge() {
+    // les Nodes 1 et 11 sont des sommets de deux tétraèdres différents
+    assert!(matches!(
+        read(&tet10_file_with_line("1 11 5")),
+        Err(IoError::BoundaryEdgeNotFound { set, .. }) if set == "arete"
+    ));
+}
+
+#[test]
+fn write_refuses_misplaced_edges() {
+    let file = read(&tet10_file_with_line("1 4 8")).unwrap();
+
+    let mut mixed = file.clone();
+    mixed.sets.get_mut("base").unwrap().edges.push((0, 0));
+    assert!(matches!(write(&mixed), Err(IoError::Invalid { .. })));
+
+    let mut missing = file.clone();
+    missing.sets.get_mut("arete").unwrap().edges.push((0, 6));
+    assert!(matches!(write(&missing), Err(IoError::Invalid { .. })));
+
+    let t = triangulate(&square_geometry(), &MeshOptions::default()).unwrap();
+    let mut flat = MshFile::from_triangulation(&t).unwrap();
+    flat.sets.insert(
+        "aretes".to_string(),
+        Set {
+            edges: vec![(0, 0)],
+            ..Set::default()
+        },
+    );
+    assert!(matches!(write(&flat), Err(IoError::Invalid { .. })));
 }
 
 #[test]

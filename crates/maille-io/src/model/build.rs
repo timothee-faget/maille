@@ -143,22 +143,29 @@ pub fn build(
             let key = format!("edge_loads[{i}]");
             let set = find(mesh, &key, &def.set)?;
             let dim = mesh.kind.dim();
-            if dim == 3 {
-                return Err(invalid(format!(
-                    "{key} : les Sets d'arêtes d'un maillage 3D ne sont pas encore pris en charge"
-                )));
-            }
-            let value: [f64; 3] = match def.value[..] {
-                [fx, fy] => [fx, fy, 0.0],
+            let value: [f64; 3] = match (dim, def.value[..].len()) {
+                (2, 2) | (3, 3) => {
+                    std::array::from_fn(|k| def.value.get(k).copied().unwrap_or(0.0))
+                }
                 _ => {
                     return Err(invalid(format!(
-                        "{key} : `value` doit avoir {dim} composantes [fx, fy], pas {}",
+                        "{key} : `value` doit avoir {dim} composantes ({}), pas {}",
+                        if dim == 2 { "[fx, fy]" } else { "[fx, fy, fz]" },
                         def.value.len()
                     )))
                 }
             };
-            expect(!set.faces.is_empty(), &def.set, "de faces (un bord)")?;
-            edge_loads.extend(set.faces.iter().map(|&(element, edge)| EdgeLoad {
+            // 2D : une arête de bord est une face ; 3D : un Set d'arêtes tiré sur le Mesh
+            let (refs, expected) = if dim == 2 {
+                (&set.faces, "de faces (un bord)")
+            } else {
+                (
+                    &set.edges,
+                    "d'arêtes (une ligne du .msh, ou tirée sur le Mesh)",
+                )
+            };
+            expect(!refs.is_empty(), &def.set, expected)?;
+            edge_loads.extend(refs.iter().map(|&(element, edge)| EdgeLoad {
                 element,
                 edge,
                 value,
