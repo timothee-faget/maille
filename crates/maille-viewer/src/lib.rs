@@ -421,6 +421,35 @@ mod tests {
     }
 
     #[test]
+    fn a_set_is_cut_with_the_skin() {
+        let shot = Shot::default();
+        let Some(mut view) = embedded(&cube_results(), [shot.width, shot.height]) else {
+            return;
+        };
+        // on garde z ≤ 0 : la face avant (z = +1) disparaît, et le Set posé dessus avec elle
+        view.set_cut(Some(Cut {
+            axis: 2,
+            fraction: 0.5,
+            flipped: false,
+        }));
+        let cut = view.pixels();
+        view.set_sets(vec![(
+            [255, 0, 0],
+            vec![[[-1.0, -1.0, 1.0], [1.0, -1.0, 1.0], [1.0, 1.0, 1.0]]],
+        )]);
+        assert_eq!(view.pixels(), cut);
+        // de l'autre côté, la face avant reste, et le Set se voit
+        view.set_cut(Some(Cut {
+            axis: 2,
+            fraction: 0.5,
+            flipped: true,
+        }));
+        let with_set = view.pixels();
+        view.set_sets(Vec::new());
+        assert_ne!(view.pixels(), with_set);
+    }
+
+    #[test]
     fn a_point_is_projected_where_it_is_drawn() {
         let shot = Shot::default();
         let Some(view) = embedded(&cube_results(), [shot.width, shot.height]) else {

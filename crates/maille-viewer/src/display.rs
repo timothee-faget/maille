@@ -146,15 +146,18 @@ impl Display {
             surface.triangles.as_flattened(),
             &lines.iter().map(to_f32).collect::<Vec<_>>(),
         );
-        // les Sets d'abord : le surlignage (sélection, sonde) reste par-dessus
+        // les Sets d'abord, coupés comme la peau : le surlignage (sélection, sonde) reste par-dessus
+        let plane = self.plane().map(|(plane, _)| plane);
         let colored = self
             .sets
             .iter()
             .flat_map(|(rgb, triangles)| {
                 let [r, g, b] = *rgb;
-                triangles.iter().map(move |t| (t, [r, g, b, SET_ALPHA]))
+                clip_set(triangles, plane)
+                    .into_iter()
+                    .map(move |t| (t, [r, g, b, SET_ALPHA]))
             })
-            .chain(self.highlight.iter().map(|t| (t, HIGHLIGHT)));
+            .chain(self.highlight.iter().map(|&t| (t, HIGHLIGHT)));
         let (mut corners, mut colors) = (Vec::new(), Vec::new());
         for (t, color) in colored {
             corners.extend(t.iter().map(to_f32));
@@ -174,4 +177,20 @@ impl Display {
         );
         renderer.set_legend(&layout, &title);
     }
+}
+
+/// Les triangles d'un Set, du côté gardé du plan de coupe (tous s'il n'y en a pas).
+fn clip_set(triangles: &[[V3; 3]], plane: Option<Plane>) -> Vec<[V3; 3]> {
+    let Some(plane) = plane else {
+        return triangles.to_vec();
+    };
+    let positions = triangles.as_flattened();
+    let corners: Vec<[u32; 3]> = (0..triangles.len() as u32)
+        .map(|k| [3 * k, 3 * k + 1, 3 * k + 2])
+        .collect();
+    let kept = clip_triangles(positions, &vec![0.0; positions.len()], &corners, plane);
+    kept.triangles
+        .iter()
+        .map(|t| t.map(|i| kept.positions[i as usize]))
+        .collect()
 }
