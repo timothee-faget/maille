@@ -5,10 +5,10 @@ mod common;
 
 use std::collections::BTreeSet;
 
-use common::{box_grid, rect_grid, to_quadratic};
+use common::{box_grid, rect_grid, to_quadratic, to_quadratic_tet};
 use maille_core::assembly::edge_load;
 use maille_core::material::Material;
-use maille_core::mesh::{Dof, Element, Mesh, Node, PlaneState, Tet4, Tri3, Tri6};
+use maille_core::mesh::{Dof, Element, Mesh, Node, PlaneState, Tet10, Tet4, Tri3, Tri6};
 use maille_core::model::{Amplitude, Analysis, Bc, EdgeLoad, Kinematics, Model, Pressure, Step};
 use maille_core::MailleError;
 
@@ -250,16 +250,24 @@ fn the_edge_load_follows_the_amplitude() {
 
 // --- 3D, charge morte en grandes déformations ---
 
-fn cube() -> (Mesh, Vec<Bc>, Vec<(usize, usize)>) {
+fn cube(quadratic: bool) -> (Mesh, Vec<Bc>, Vec<(usize, usize)>) {
     let (nodes, tets) = box_grid([2, 2, 2], [1.0, 1.0, 1.0]);
     let material = Material::with_poisson(E, NU).unwrap();
-    let mesh = Mesh::new(
-        nodes,
-        tets.iter()
+    let mesh = if quadratic {
+        let q = to_quadratic_tet(&nodes, &tets);
+        let elements = q
+            .elements
+            .iter()
+            .map(|&t| Element::Tet10(Tet10::new(t, material)))
+            .collect();
+        Mesh::new(q.nodes, elements).unwrap()
+    } else {
+        let elements = tets
+            .iter()
             .map(|&t| Element::Tet4(Tet4::new(t, material)))
-            .collect(),
-    )
-    .unwrap();
+            .collect();
+        Mesh::new(nodes, elements).unwrap()
+    };
     let mut bcs = fixed(&mesh, Dof::Ux, |n| n.x < 1e-9);
     bcs.extend(fixed(&mesh, Dof::Uy, |n| n.y < 1e-9));
     bcs.extend(fixed(&mesh, Dof::Uz, |n| n.z < 1e-9));
@@ -282,10 +290,16 @@ fn reaction_x(mesh: &Mesh, reactions: &[f64]) -> f64 {
 
 #[test]
 fn the_edge_load_resultant_is_q_times_the_rim_length_in_3d() {
-    // périmètre 4 : la réaction vaut −q · 4, en petites déformations comme en grandes (charge morte)
-    let (mesh, bcs, rim) = cube();
-    let q = 25.0;
-    for kinematics in [Kinematics::Small, Kinematics::Large] {
+    // périmètre 4 : la réaction vaut −q · 4, en petites déformations comme en grandes (charge morte),
+    // en Tet4 comme en Tet10
+    for (quadratic, kinematics) in [
+        (false, Kinematics::Small),
+        (false, Kinematics::Large),
+        (true, Kinematics::Small),
+        (true, Kinematics::Large),
+    ] {
+        let (mesh, bcs, rim) = cube(quadratic);
+        let q = 25.0;
         let model = Model::new(mesh.clone(), bcs.clone(), vec![])
             .unwrap()
             .with_kinematics(kinematics)
@@ -308,8 +322,39 @@ fn the_edge_load_resultant_is_q_times_the_rim_length_in_3d() {
         };
         assert!(
             near(reaction_x(&mesh, &field.reactions), -4.0 * q),
-            "{kinematics:?}"
+            "quadratique : {quadratic}, {kinematics:?}"
         );
+    }
+}
+
+#[test]
+fn a_tet10_edge_gets_one_sixth_two_thirds_one_sixth() {
+    let (nodes, tets) = box_grid([1, 1, 1], [1.0, 2.0, 2.0]);
+    let q = to_quadratic_tet(&nodes, &tets);
+    let material = Material::with_poisson(E, NU).unwrap();
+    let mesh = Mesh::new(
+        q.nodes,
+        q.elements
+            .iter()
+            .map(|&t| Element::Tet10(Tet10::new(t, material)))
+            .collect(),
+    )
+    .unwrap();
+    let load = [1.0, -2.0, 3.0];
+    for k in 0..6 {
+        let nodes = mesh.elements[0].edge_nodes(k).unwrap();
+        assert_eq!(nodes.len(), 3);
+        let (a, b) = (mesh.nodes[nodes[0]], mesh.nodes[nodes[1]]);
+        let mid = mesh.nodes[nodes[2]];
+        // le Node milieu est au milieu de l'arête 0-1 de la numérotation
+        assert!(near(mid.x, (a.x + b.x) / 2.0) && near(mid.z, (a.z + b.z) / 2.0));
+        let length = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2) + (b.z - a.z).powi(2)).sqrt();
+        let t = edge_load(&mesh, 0, k, load).unwrap();
+        for (c, qc) in load.iter().enumerate() {
+            for (a, w) in [1.0 / 6.0, 1.0 / 6.0, 2.0 / 3.0].iter().enumerate() {
+                assert!(near(t.forces[3 * a + c], qc * length * w), "arête {k}");
+            }
+        }
     }
 }
 

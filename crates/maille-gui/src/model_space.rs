@@ -1032,7 +1032,7 @@ mod tests {
         let nodes_set = |nodes: Vec<usize>, faces: Vec<(usize, usize)>| Set {
             nodes,
             faces,
-            elements: Vec::new(),
+            ..Set::default()
         };
         sets.insert("gauche".to_string(), nodes_set(vec![0, 3], vec![(1, 2)]));
         sets.insert("droite".to_string(), nodes_set(vec![1, 2], vec![(0, 1)]));
@@ -1043,6 +1043,7 @@ mod tests {
                 nodes: vec![0, 1, 2, 3],
                 faces: Vec::new(),
                 elements: vec![0, 1],
+                ..Set::default()
             },
         );
         MshFile {
@@ -1125,7 +1126,7 @@ mod tests {
             Set {
                 nodes: vec![0],
                 faces: Vec::new(),
-                elements: Vec::new(),
+                ..Set::default()
             },
         );
         let free = free_rigid_modes(&mesh, &[bc("coin", DofDef::Ux), bc("coin", DofDef::Uy)]);
@@ -1143,7 +1144,7 @@ mod tests {
             Set {
                 nodes: vec![0],
                 faces: Vec::new(),
-                elements: Vec::new(),
+                ..Set::default()
             },
         );
         let free = free_rigid_modes(&mesh, &[bc("gauche", DofDef::Ux), bc("coin", DofDef::Uy)]);
@@ -1167,7 +1168,7 @@ mod tests {
             Set {
                 nodes: vec![0, 1, 2],
                 faces: vec![(0, 3)],
-                elements: Vec::new(),
+                ..Set::default()
             },
         );
         let mesh = MshFile {

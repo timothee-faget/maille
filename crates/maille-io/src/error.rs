@@ -58,6 +58,11 @@ pub enum IoError {
         line: usize,
         set: String,
     },
+    /// Une ligne du groupe `set` ne correspond à aucune arête d'Element (maillage 3D).
+    BoundaryEdgeNotFound {
+        line: usize,
+        set: String,
+    },
     /// Fichier de modèle TOML mal formé (le message de `toml` donne la ligne et la colonne).
     Toml(String),
     /// Le cœur refuse le modèle construit.
@@ -169,6 +174,10 @@ impl fmt::Display for IoError {
             Self::BoundaryFaceNotFound { line, set } => write!(
                 f,
                 "ligne {line} : un élément du groupe « {set} » ne correspond à aucune face d'Element : le bord doit être maillé avec le domaine"
+            ),
+            Self::BoundaryEdgeNotFound { line, set } => write!(
+                f,
+                "ligne {line} : une ligne du groupe « {set} » ne correspond à aucune arête d'Element : la ligne doit suivre des arêtes du maillage"
             ),
             Self::Toml(message) => write!(f, "fichier de modèle : {message}"),
             Self::Model(e) => write!(f, "{e}"),
