@@ -1,13 +1,12 @@
 //! Caméra orbitale orthographique : passage des coordonnées du Mesh aux coordonnées de clip de wgpu
 //! (x et y dans [-1, 1], profondeur dans [0, 1], 0 = proche). Vue de face (lacet et tangage nuls) :
 //! on regarde vers −z, x à droite, y en haut, ce qui est la vue d'un Mesh 2D du plan z = 0.
+//! La rotation est un trackball : on tourne autour des axes de l'écran, sans pôle ni borne.
 
-use crate::vec3::{add, cross, dot, scale, sub, V3};
+use crate::vec3::{add, cross, dot, norm, scale, sub, V3};
 
 /// Part de la fenêtre occupée par le Mesh au cadrage.
 const FILL: f64 = 0.9;
-/// Tangage limite, en radians : au pôle la vue tournerait sur elle-même.
-const MAX_PITCH: f64 = 89.0 * std::f64::consts::PI / 180.0;
 /// Radians de rotation par pixel de glissement.
 const RADIANS_PER_PIXEL: f64 = 0.01;
 
@@ -15,9 +14,8 @@ const RADIANS_PER_PIXEL: f64 = 0.01;
 pub struct Camera {
     /// Point du Mesh visé : au centre de la fenêtre, décalé de `shift_x`.
     pub target: V3,
-    /// Rotation autour de y (lacet) puis de l'axe horizontal de l'écran (tangage), en radians.
-    pub yaw: f64,
-    pub pitch: f64,
+    /// Base orthonormée (droite, haut, œil) de la caméra, dans les coordonnées du Mesh.
+    frame: [V3; 3],
     /// Pixels par unité de longueur du Mesh (identique en x et en y : pas de déformation).
     pub zoom: f64,
     /// Centre et rayon de la sphère qui contient le Mesh : la profondeur [-rayon, rayon] autour du
@@ -34,8 +32,7 @@ impl Camera {
     pub fn fit(bounds: (V3, V3), size: [f64; 2], reserved_left: f64) -> Self {
         let mut camera = Self {
             target: [0.0; 3],
-            yaw: 0.0,
-            pitch: 0.0,
+            frame: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             zoom: 1.0,
             center: [0.0; 3],
             depth_radius: 1.0,
@@ -78,23 +75,44 @@ impl Camera {
     /// déplacement emmènent ailleurs, donc rien de la boîte n'est coupé, quelle que soit la vue.
     pub fn enclose(&mut self, (lo, hi): (V3, V3)) {
         self.center = scale(add(lo, hi), 0.5);
-        self.depth_radius = (0.5 * crate::vec3::norm(sub(hi, lo))).max(f64::MIN_POSITIVE);
+        self.depth_radius = (0.5 * norm(sub(hi, lo))).max(f64::MIN_POSITIVE);
     }
 
     /// (droite, haut, œil) : base orthonormée de la caméra ; `œil` va de la cible vers l'observateur.
     pub fn axes(&self) -> (V3, V3, V3) {
-        let (sy, cy) = self.yaw.sin_cos();
-        let (sp, cp) = self.pitch.sin_cos();
+        let [right, up, eye] = self.frame;
+        (right, up, eye)
+    }
+
+    /// Oriente la vue par une rotation `yaw` autour de y (lacet) puis `pitch` autour de l'axe
+    /// horizontal de l'écran (tangage), en radians ; (0, 0) est la vue de face.
+    pub fn look_from(&mut self, yaw: f64, pitch: f64) {
+        let (sy, cy) = yaw.sin_cos();
+        let (sp, cp) = pitch.sin_cos();
         let eye = [sy * cp, sp, cy * cp];
         let right = [cy, 0.0, -sy];
-        (right, cross(eye, right), eye)
+        self.frame = [right, cross(eye, right), eye];
     }
 
     /// Fait tourner le Mesh sous la souris : `delta` est le déplacement du curseur en pixels
-    /// (vers la droite : le Mesh tourne vers la droite ; vers le bas : il bascule vers l'avant).
+    /// (vers la droite : le Mesh tourne vers la droite ; vers le bas : il bascule vers l'avant),
+    /// autour des axes de l'écran, quelle que soit l'orientation.
     pub fn rotate(&mut self, delta: [f64; 2]) {
-        self.yaw -= delta[0] * RADIANS_PER_PIXEL;
-        self.pitch = (self.pitch + delta[1] * RADIANS_PER_PIXEL).clamp(-MAX_PITCH, MAX_PITCH);
+        let [right, up, eye] = self.frame;
+        let axis = add(scale(up, delta[0]), scale(right, delta[1]));
+        let length = norm(axis);
+        if length <= 0.0 {
+            return;
+        }
+        let (axis, angle) = (scale(axis, 1.0 / length), -length * RADIANS_PER_PIXEL);
+        // la caméra tourne autour de la cible en sens inverse du Mesh ; on ré-orthonormalise pour
+        // que les arrondis ne s'accumulent pas au fil des glissements
+        let eye = rotated(eye, axis, angle);
+        let eye = scale(eye, 1.0 / norm(eye));
+        let right = rotated(right, axis, angle);
+        let right = sub(right, scale(eye, dot(right, eye)));
+        let right = scale(right, 1.0 / norm(right));
+        self.frame = [right, cross(eye, right), eye];
     }
 
     /// Fait suivre la souris au Mesh : `delta` est le déplacement du curseur en pixels.
@@ -160,6 +178,15 @@ impl Camera {
         ];
         std::array::from_fn(|col| std::array::from_fn(|row| rows[row][col] as f32))
     }
+}
+
+/// `v` tourné de `angle` radians autour de l'axe unitaire `axis` (formule de Rodrigues).
+fn rotated(v: V3, axis: V3, angle: f64) -> V3 {
+    let (sin, cos) = angle.sin_cos();
+    add(
+        add(scale(v, cos), scale(cross(axis, v), sin)),
+        scale(axis, dot(axis, v) * (1.0 - cos)),
+    )
 }
 
 /// Les huit coins de la boîte (min, max).
@@ -238,34 +265,78 @@ mod tests {
         assert!(c[2] < a[2]);
     }
 
-    #[test]
-    fn the_axes_stay_orthonormal_and_the_horizon_stays_level() {
-        let mut camera = Camera::fit(([0.0; 3], [1.0; 3]), SIZE, 0.0);
-        for (dx, dy) in [(37.0, 12.0), (-250.0, 80.0), (400.0, -900.0), (5.0, 5000.0)] {
-            camera.rotate([dx, dy]);
-            let (r, u, e) = camera.axes();
-            assert!((dot(r, r) - 1.0).abs() < 1e-12 && (dot(u, u) - 1.0).abs() < 1e-12);
-            assert!(dot(r, u).abs() < 1e-12 && dot(r, e).abs() < 1e-12 && dot(u, e).abs() < 1e-12);
-            // droite reste horizontale (y du monde vers le haut) et le haut ne retourne jamais la tête
-            assert!(r[1].abs() < 1e-12 && u[1] > 0.0);
-        }
-        assert!(camera.pitch.abs() <= MAX_PITCH);
+    fn assert_orthonormal(camera: &Camera) {
+        let (r, u, e) = camera.axes();
+        assert!((dot(r, r) - 1.0).abs() < 1e-12 && (dot(u, u) - 1.0).abs() < 1e-12);
+        assert!((dot(e, e) - 1.0).abs() < 1e-12);
+        assert!(dot(r, u).abs() < 1e-12 && dot(r, e).abs() < 1e-12 && dot(u, e).abs() < 1e-12);
+        // base directe : droite × haut = œil
+        assert!(near(cross(r, u), e, 1e-12));
     }
 
     #[test]
-    fn dragging_right_turns_the_mesh_toward_the_right() {
-        let mut camera = Camera::fit(([-1.0; 3], [1.0; 3]), SIZE, 0.0);
-        // le point (0, 0, 1), face avant, passe vers la droite de l'écran
-        camera.rotate([30.0, 0.0]);
-        assert!(camera.project([0.0, 0.0, 1.0], SIZE)[0] > camera.project([0.0; 3], SIZE)[0]);
-        // vers le bas : le haut de la face avant bascule vers l'avant, donc vers le bas de l'écran
-        let mut camera = Camera::fit(([-1.0; 3], [1.0; 3]), SIZE, 0.0);
-        camera.rotate([0.0, 30.0]);
-        assert!(
-            camera.project([0.0, 1.0, 0.0], SIZE)[1]
-                < camera.project([0.0, 1.0, 0.0], SIZE)[1] + 1.0
-        );
-        assert!(camera.project([0.0, 0.0, 1.0], SIZE)[1] < camera.project([0.0; 3], SIZE)[1]);
+    fn the_axes_stay_orthonormal_after_many_drags() {
+        let mut camera = Camera::fit(([0.0; 3], [1.0; 3]), SIZE, 0.0);
+        for k in 0..10_000 {
+            let k = f64::from(k);
+            camera.rotate([37.0 * (0.3 * k).sin(), 12.0 * (0.7 * k).cos()]);
+        }
+        assert_orthonormal(&camera);
+    }
+
+    #[test]
+    fn full_turns_are_possible_in_every_direction_without_jumps() {
+        // un tour = 2π / 0,01 pixels ; glissé par petits pas, vertical, horizontal et en diagonale
+        let turn = 2.0 * std::f64::consts::PI / RADIANS_PER_PIXEL;
+        let steps = 400;
+        for direction in [[0.0, 1.0], [1.0, 0.0], [0.6, -0.8]] {
+            let mut camera = Camera::fit(([0.0; 3], [1.0; 3]), SIZE, 0.0);
+            camera.rotate([25.0, -40.0]);
+            let start = camera.axes();
+            let step = turn / f64::from(steps);
+            let mut eye = start.2;
+            for _ in 0..steps {
+                camera.rotate([direction[0] * step, direction[1] * step]);
+                let next = camera.axes().2;
+                // pas de saut au pôle : l'œil avance d'un pas de rotation, pas plus
+                assert!(norm(sub(next, eye)) < 1.01 * step * RADIANS_PER_PIXEL);
+                eye = next;
+            }
+            // un tour complet ramène la vue de départ
+            let end = camera.axes();
+            assert!(near(end.0, start.0, 1e-9) && near(end.1, start.1, 1e-9));
+            assert!(near(end.2, start.2, 1e-9));
+            assert_orthonormal(&camera);
+        }
+    }
+
+    #[test]
+    fn dragging_moves_the_front_of_the_mesh_with_the_cursor_whatever_the_view() {
+        // même la tête en bas (un demi-tour vertical), glisser vers la droite emmène la face tournée
+        // vers l'observateur vers la droite, et vers le bas, vers le bas de l'écran
+        let half_turn = std::f64::consts::PI / RADIANS_PER_PIXEL;
+        for start in [[0.0, 0.0], [0.0, half_turn], [70.0, 130.0]] {
+            for (delta, axis, sign) in [([30.0, 0.0], 0, 1.0), ([0.0, 30.0], 1, -1.0)] {
+                let mut camera = Camera::fit(([-1.0; 3], [1.0; 3]), SIZE, 0.0);
+                camera.rotate(start);
+                let front = camera.axes().2;
+                camera.rotate(delta);
+                let moved =
+                    camera.project(front, SIZE)[axis] - camera.project([0.0; 3], SIZE)[axis];
+                assert!(sign * moved > 0.0, "{start:?} {delta:?} : {moved}");
+            }
+        }
+    }
+
+    #[test]
+    fn look_from_gives_the_views_along_the_axes() {
+        let mut camera = Camera::fit(([0.0; 3], [1.0; 3]), SIZE, 0.0);
+        camera.look_from(std::f64::consts::FRAC_PI_2, 0.0);
+        assert!(near(camera.axes().2, [1.0, 0.0, 0.0], 1e-12));
+        // depuis +y, au pôle : la base reste définie
+        camera.look_from(0.0, std::f64::consts::FRAC_PI_2);
+        assert!(near(camera.axes().2, [0.0, 1.0, 0.0], 1e-12));
+        assert_orthonormal(&camera);
     }
 
     #[test]

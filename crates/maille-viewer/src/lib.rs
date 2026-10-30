@@ -140,8 +140,9 @@ fn render_shot(
             fraction: fraction.clamp(0.0, 1.0),
             flipped: false,
         });
-    display.camera.yaw = shot.yaw.to_radians();
-    display.camera.pitch = shot.pitch.to_radians();
+    display
+        .camera
+        .look_from(shot.yaw.to_radians(), shot.pitch.to_radians());
     let mut renderer = render::Renderer::new_offscreen(shot.width, shot.height, display.colormap)?;
     renderer.set_theme(theme);
     display.refit(&renderer);
