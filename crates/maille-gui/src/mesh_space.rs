@@ -11,6 +11,7 @@ use maille_io::msh::{self, MshFile, Set, DOMAIN_SET};
 use maille_io::IoError;
 use maille_viewer::NodalResults;
 
+use crate::files::File;
 use crate::quality::{self, Quality};
 
 /// Un fichier CAO lu, prêt à être maillé.
@@ -277,12 +278,12 @@ pub fn recipe(
     }
 }
 
-/// Écrit le maillage à côté de la source, comme `maille mesh` (`<source>.msh`) ; rend le chemin.
-pub fn save(cad: &Cad, built: &Built) -> Result<PathBuf, Box<dyn Error>> {
-    let path = cad.path.with_extension("msh");
-    fs::write(&path, msh::write(&built.file)?)
-        .map_err(|e| format!("impossible d'écrire {} : {e}", path.display()))?;
-    Ok(path)
+/// Le maillage à écrire à côté de la source, comme `maille mesh` (`<source>.msh`).
+pub fn mesh_file(cad: &Cad, built: &Built) -> Result<File, Box<dyn Error>> {
+    Ok((
+        cad.path.with_extension("msh"),
+        msh::write(&built.file)?.into_bytes(),
+    ))
 }
 
 /// Une phrase sur le maillage : Nodes, Elements, ordre.
@@ -470,20 +471,16 @@ mod tests {
     }
 
     #[test]
-    fn saving_writes_the_msh_next_to_the_source() {
-        let dir = std::env::temp_dir().join(format!("maille-gui-save-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        fs::copy(example("plaque.dxf"), dir.join("plaque.dxf")).unwrap();
-        let c = match import(&dir.join("plaque.dxf")).unwrap() {
+    fn the_msh_goes_next_to_the_source() {
+        let c = match import(&example("plaque.dxf")).unwrap() {
             Imported::Cad(c) => c,
             other => panic!("{other:?}"),
         };
         let built = mesh(&c, c.suggested, false, &BTreeMap::new()).unwrap();
-        let path = save(&c, &built).unwrap();
-        assert_eq!(path, dir.join("plaque.msh"));
-        let again = msh::read(&fs::read_to_string(&path).unwrap()).unwrap();
+        let (path, bytes) = mesh_file(&c, &built).unwrap();
+        assert_eq!(path, example("plaque.msh"));
+        let again = msh::read(std::str::from_utf8(&bytes).unwrap()).unwrap();
         assert_eq!(again, built.file);
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
