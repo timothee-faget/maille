@@ -308,9 +308,17 @@ fn invalid_plane_inputs_are_typed_errors() {
     for nu in [0.5, -1.0, f64::NAN] {
         assert!(matches!(
             Material::with_poisson(210e3, nu),
-            Err(MailleError::InvalidProperty { .. })
+            Err(MailleError::PoissonOutOfRange { .. })
         ));
     }
+    // le message ne dit pas « strictement positif » pour un ν positif mais trop grand
+    let message = Material::with_poisson(210e3, 0.6).unwrap_err().to_string();
+    assert!(
+        message.contains("ν = 0.6")
+            && message.contains("entre -1 et 0,5")
+            && !message.contains("positif"),
+        "{message}"
+    );
     assert!(matches!(
         Tri3::new([0, 1, 2], m, 0.0, PlaneState::Stress),
         Err(MailleError::InvalidProperty { .. })

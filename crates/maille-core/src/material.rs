@@ -144,10 +144,7 @@ impl Material {
     /// Matériau élastique isotrope pour les triangles et tétraèdres, avec −1 < ν < 0,5.
     pub fn with_poisson(young: f64, poisson: f64) -> Result<Self, MailleError> {
         if !(poisson > -1.0 && poisson < 0.5) {
-            return Err(MailleError::InvalidProperty {
-                name: "ν (coefficient de Poisson, entre -1 et 0,5 exclus)",
-                value: poisson,
-            });
+            return Err(MailleError::PoissonOutOfRange { poisson });
         }
         Ok(Self {
             poisson: Some(poisson),
