@@ -24,6 +24,10 @@ pub enum MailleError {
     UnknownNode {
         node: usize,
     },
+    /// Coordonnée d'un Node NaN ou infinie.
+    NonFiniteCoordinate {
+        node: usize,
+    },
     ZeroLengthElement {
         element: usize,
     },
@@ -89,6 +93,10 @@ pub enum MailleError {
     /// θ hors de [½, 1] : en dessous de ½, le schéma n'est stable que pour de petits Δt.
     ThetaOutOfRange {
         theta: f64,
+    },
+    /// Coefficient de Poisson hors de ]−1 ; 0,5[ (ou non fini).
+    PoissonOutOfRange {
+        poisson: f64,
     },
     /// Champ de températures (condition initiale d'une Step, températures d'un calcul statique) qui
     /// n'a pas une valeur par Node.
@@ -287,6 +295,10 @@ impl fmt::Display for MailleError {
             Self::UnknownNode { node } => {
                 write!(f, "le Node {node} n'existe pas dans le Mesh")
             }
+            Self::NonFiniteCoordinate { node } => write!(
+                f,
+                "une coordonnée du Node {node} n'est pas finie (NaN ou infinie) : corriger le fichier de maillage"
+            ),
             Self::ZeroLengthElement { element } => write!(
                 f,
                 "l'Element {element} a une longueur nulle : séparer ses deux Nodes"
@@ -349,6 +361,10 @@ impl fmt::Display for MailleError {
             Self::ThetaOutOfRange { theta } => write!(
                 f,
                 "θ = {theta} : doit être entre 0,5 (Crank-Nicolson) et 1 (Euler implicite) ; en dessous de 0,5, le calcul diverge si Δt est trop grand"
+            ),
+            Self::PoissonOutOfRange { poisson } => write!(
+                f,
+                "ν = {poisson} : le coefficient de Poisson doit être entre -1 et 0,5 (exclus) ; 0,5 serait un matériau incompressible, que ces éléments ne savent pas calculer"
             ),
             Self::TemperatureCount { expected, got } => write!(
                 f,

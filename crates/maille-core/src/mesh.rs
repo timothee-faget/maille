@@ -237,6 +237,12 @@ impl Mesh {
         if nodes.is_empty() || elements.is_empty() {
             return Err(MailleError::EmptyMesh);
         }
+        if let Some(node) = nodes
+            .iter()
+            .position(|n| !(n.x.is_finite() && n.y.is_finite() && n.z.is_finite()))
+        {
+            return Err(MailleError::NonFiniteCoordinate { node });
+        }
         let mesh = Self { nodes, elements };
         let family = mesh.elements[0].family();
         for (i, e) in mesh.elements.iter().enumerate() {

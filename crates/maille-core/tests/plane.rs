@@ -308,9 +308,17 @@ fn invalid_plane_inputs_are_typed_errors() {
     for nu in [0.5, -1.0, f64::NAN] {
         assert!(matches!(
             Material::with_poisson(210e3, nu),
-            Err(MailleError::InvalidProperty { .. })
+            Err(MailleError::PoissonOutOfRange { .. })
         ));
     }
+    // le message ne dit pas « strictement positif » pour un ν positif mais trop grand
+    let message = Material::with_poisson(210e3, 0.6).unwrap_err().to_string();
+    assert!(
+        message.contains("ν = 0.6")
+            && message.contains("entre -1 et 0,5")
+            && !message.contains("positif"),
+        "{message}"
+    );
     assert!(matches!(
         Tri3::new([0, 1, 2], m, 0.0, PlaneState::Stress),
         Err(MailleError::InvalidProperty { .. })
@@ -330,6 +338,15 @@ fn invalid_plane_inputs_are_typed_errors() {
         Mesh::new(aligned, vec![make([0, 1, 2])]),
         Err(MailleError::DegenerateTriangle { element: 0 })
     );
+    // coordonnée non finie : dite telle quelle, pas comme un triangle dégénéré
+    for bad in [f64::NAN, f64::INFINITY] {
+        let mut nodes = unit.clone();
+        nodes[1].x = bad;
+        assert_eq!(
+            Mesh::new(nodes, vec![make([0, 1, 2])]),
+            Err(MailleError::NonFiniteCoordinate { node: 1 })
+        );
+    }
     assert_eq!(
         Mesh::new(unit.clone(), vec![make([0, 1, 7])]),
         Err(MailleError::UnknownNode { node: 7 })

@@ -593,6 +593,17 @@ impl<'a> Reader<'a> {
                 "ligne {line} : autant de multiplicités que de nœuds attendu"
             )));
         }
+        // compté avant d'être développé : une multiplicité corrompue réserverait une mémoire énorme
+        let count = multiplicities
+            .iter()
+            .fold(0usize, |sum, &m| sum.saturating_add(m));
+        let expected = points.len() + degree + 1;
+        if count != expected {
+            return Err(error(format!(
+                "ligne {line} : B-spline à {} points de degré {degree} : {count} nœuds au lieu de {expected}",
+                points.len()
+            )));
+        }
         let knots = values
             .iter()
             .zip(&multiplicities)

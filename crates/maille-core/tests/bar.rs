@@ -2,7 +2,7 @@
 
 use maille_core::material::{Material, Section};
 use maille_core::mesh::{Bar, Dof, Element, Mesh, Node};
-use maille_core::model::{Bc, Load, Model};
+use maille_core::model::{Bc, DistributedLoad, Load, Model};
 use maille_core::MailleError;
 
 const RTOL: f64 = 1e-10;
@@ -234,4 +234,43 @@ fn invalid_inputs_are_typed_errors() {
             node: 0
         })
     );
+}
+
+#[test]
+fn non_finite_bc_and_load_values_are_refused() {
+    let mesh = uniform_bar(2, 1.0, 1.0, 1.0);
+    let fixed = Bc {
+        dof: Dof::U,
+        node: 0,
+        value: 0.0,
+    };
+    for bad in [f64::NAN, f64::INFINITY] {
+        let bc = Bc {
+            value: bad,
+            ..fixed
+        };
+        let error = Model::new(mesh.clone(), vec![bc], vec![]).unwrap_err();
+        assert!(
+            matches!(error, MailleError::NonFinite { .. }) && error.to_string().contains("BC"),
+            "{error}"
+        );
+        let load = Load {
+            dof: Dof::U,
+            node: 2,
+            value: bad,
+        };
+        let error = Model::new(mesh.clone(), vec![fixed], vec![load]).unwrap_err();
+        assert!(
+            matches!(error, MailleError::NonFinite { .. }) && error.to_string().contains("Load"),
+            "{error}"
+        );
+        let model = Model::new(mesh.clone(), vec![fixed], vec![]).unwrap();
+        assert!(matches!(
+            model.with_distributed_loads(vec![DistributedLoad {
+                element: 0,
+                value: bad
+            }]),
+            Err(MailleError::NonFinite { .. })
+        ));
+    }
 }

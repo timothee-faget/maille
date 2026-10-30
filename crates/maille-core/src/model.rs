@@ -273,6 +273,7 @@ impl Model {
         let mut seen = vec![false; mesh.nodes.len() * dofs_per_node(&mesh, analysis)];
         for bc in &bcs {
             let i = dof_index(&mesh, analysis, bc.node, bc.dof)?;
+            finite("valeur imposée par une BC", bc.value)?;
             if std::mem::replace(&mut seen[i], true) {
                 return Err(MailleError::DuplicateBc {
                     node: bc.node,
@@ -282,6 +283,7 @@ impl Model {
         }
         for l in &loads {
             dof_index(&mesh, analysis, l.node, l.dof)?;
+            finite("valeur d'un Load", l.value)?;
         }
         Ok(Self {
             mesh,
@@ -371,6 +373,7 @@ impl Model {
     ) -> Result<Self, MailleError> {
         for d in &distributed {
             self.element(d.element)?;
+            finite("charge répartie", d.value)?;
         }
         self.distributed = distributed;
         Ok(self)
@@ -381,6 +384,7 @@ impl Model {
         self.require_thermal()?;
         for s in &sources {
             self.element(s.element)?;
+            finite("source de chaleur", s.value)?;
         }
         self.heat_sources = sources;
         Ok(self)
@@ -1226,6 +1230,15 @@ fn quasi_static_field(
 }
 
 /// Une température finie par Node.
+/// `NonFinite` si `value` est NaN ou infinie.
+fn finite(name: &'static str, value: f64) -> Result<(), MailleError> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(MailleError::NonFinite { name, value })
+    }
+}
+
 fn check_temperatures(mesh: &Mesh, t: &[f64]) -> Result<(), MailleError> {
     if t.len() != mesh.nodes.len() {
         return Err(MailleError::TemperatureCount {
