@@ -197,6 +197,27 @@ impl Element {
         }
     }
 
+    /// Nodes de l'arête `edge`, en positions dans `nodes()` : les deux sommets, puis le milieu pour
+    /// les Elements quadratiques. Arêtes d'un triangle : 0-1, 1-2, 2-0 (ce sont ses faces) ; d'un
+    /// tétraèdre : 0-1, 1-2, 2-0, 0-3, 1-3, 2-3. `None` si l'arête n'existe pas (ou pour une Bar ou
+    /// une Beam).
+    pub(crate) fn edge_positions(&self, edge: usize) -> Option<Vec<usize>> {
+        match self {
+            Self::Bar(_) | Self::Beam(_) => None,
+            Self::Tri3(_) | Self::Tri6(_) => self.face_positions(edge),
+            Self::Tet4(_) => TET10_EDGES.get(edge).map(|&(a, b)| vec![a, b]),
+            Self::Tet10(_) => TET10_EDGES.get(edge).map(|&(a, b)| vec![a, b, 4 + edge]),
+        }
+    }
+
+    /// Indices (dans `Mesh::nodes`) des Nodes de l'arête `edge`, voir `edge_positions` pour la
+    /// numérotation. `None` si l'arête n'existe pas.
+    pub fn edge_nodes(&self, edge: usize) -> Option<Vec<usize>> {
+        let nodes = self.nodes();
+        self.edge_positions(edge)
+            .map(|p| p.into_iter().map(|k| nodes[k]).collect())
+    }
+
     /// Indices (dans `Mesh::nodes`) des Nodes de la face `face`, voir `face_positions` pour la
     /// numérotation. `None` si la face n'existe pas.
     pub fn face_nodes(&self, face: usize) -> Option<Vec<usize>> {

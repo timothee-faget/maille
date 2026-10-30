@@ -679,6 +679,51 @@ fn pressure_needs_a_boundary_and_a_static_analysis() {
 }
 
 #[test]
+fn edge_load_on_a_boundary_pulls_without_the_thickness() {
+    // q = σ·t = 200 N/mm sur x = 4 (t = 2), déformations planes : σx = 100, εx = (1 − ν²) σ / E
+    let mesh = rectangle(4.0, 2.0, 0.7, true);
+    let toml = UNIAXIAL
+        .replace("plane_state = \"stress\"", "plane_state = \"strain\"")
+        .replace("value = 0.004", "value = 0.0")
+        .replace("[[bcs]]\nset = \"droite\"\ndof = \"ux\"\nvalue = 0.0\n", "")
+        + "\n[[edge_loads]]\nset = \"droite\"\nvalue = [200.0, 0.0]\n";
+    let field = load(&toml, &mesh).model.solve().unwrap();
+    let strain = (1.0 - 0.3 * 0.3) * 100.0 / 210e3;
+    for (i, p) in mesh.nodes.iter().enumerate() {
+        assert!(
+            (field.displacements[2 * i] - strain * p.x).abs() < 1e-12,
+            "x = {}",
+            p.x
+        );
+    }
+}
+
+#[test]
+fn edge_load_needs_a_boundary_the_right_size_and_a_static_analysis() {
+    let mesh = plate();
+    let on_domain = format!("{UNIAXIAL}\n[[edge_loads]]\nset = \"domaine\"\nvalue = [1.0, 0.0]\n");
+    assert!(matches!(
+        error(&on_domain, &mesh),
+        IoError::WrongSetKind { .. }
+    ));
+    let unknown = format!("{UNIAXIAL}\n[[edge_loads]]\nset = \"dessus\"\nvalue = [1.0, 0.0]\n");
+    assert!(
+        matches!(&error(&unknown, &mesh), IoError::UnknownSet { key, .. } if key == "edge_loads[0]")
+    );
+    let three = format!("{UNIAXIAL}\n[[edge_loads]]\nset = \"droite\"\nvalue = [1.0, 0.0, 0.0]\n");
+    assert!(error(&three, &mesh).to_string().contains("2 composantes"));
+    let out_of_plane = format!("{UNIAXIAL}\n[[edge_loads]]\nset = \"droite\"\nvalue = [1.0]\n");
+    assert!(error(&out_of_plane, &mesh)
+        .to_string()
+        .contains("edge_loads[0]"));
+    let thermal = format!("{THERMAL}\n[[edge_loads]]\nset = \"droite\"\nvalue = [1.0, 0.0]\n");
+    assert_eq!(
+        error(&thermal, &mesh),
+        IoError::Model(MailleError::EdgeLoadStaticOnly)
+    );
+}
+
+#[test]
 fn large_strain_keys_build_a_quasi_static_model() {
     let mesh = rectangle(4.0, 2.0, 0.8, false);
     let toml = |kinematics: &str, material: &str, step: &str| {

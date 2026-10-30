@@ -1,7 +1,7 @@
 //! Quel calcul le fichier demande-t-il ? Avec `analysis`, ce qu'elle dit. Sans elle, le contenu décide :
 //! des BC ou des chargements thermiques (DOF `t`, `[[heat_sources]]`, `[[convections]]`) donnent un
 //! calcul thermique, des BC ou des efforts mécaniques (`ux`, `uy`, `uz`, `[[pressures]]`,
-//! `[[contacts]]`, `kinematics`, `[temperatures]`) un calcul statique, et les deux un calcul couplé :
+//! `[[edge_loads]]`, `[[contacts]]`, `kinematics`, `[temperatures]`) un calcul statique, et les deux un calcul couplé :
 //! `split` coupe alors le fichier en sa partie thermique et sa partie mécanique.
 
 use super::schema::*;
@@ -48,6 +48,7 @@ pub fn physics(file: &ModelFile) -> Result<Physics, IoError> {
     let mechanical = file.bcs.iter().any(|d| !thermal_dof(d))
         || file.loads.iter().any(|d| !thermal_dof(d))
         || !file.pressures.is_empty()
+        || !file.edge_loads.is_empty()
         || !file.contacts.is_empty()
         || file.kinematics.is_some()
         || file.temperatures.is_some()
@@ -112,6 +113,7 @@ pub fn split(file: &ModelFile) -> Result<(ModelFile, ModelFile), IoError> {
         bcs: file.bcs.iter().filter(on_t).cloned().collect(),
         loads: file.loads.iter().filter(on_t).cloned().collect(),
         pressures: vec![],
+        edge_loads: vec![],
         contacts: vec![],
         temperatures: None,
         step: thermal_step.map(|t| StepDef {
