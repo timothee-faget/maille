@@ -25,7 +25,7 @@ Chaque élément et chaque physique sont validés contre une solution analytique
   avec des diagnostics en clair, lancer le calcul en tâche de fond, parcourir les résultats (incréments,
   sonde, courbe, capture) ; le modèle reste un fichier TOML rejouable par `maille solve`
 
-Jalons M0 à M13 terminés (version 0.13.0). Le projet est en cours de développement : l'API n'est pas stable.
+Jalons M0 à M13b terminés (version 0.14.0). Le projet est en cours de développement : l'API n'est pas stable.
 
 ## Démarrer
 
