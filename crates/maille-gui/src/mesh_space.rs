@@ -83,7 +83,11 @@ impl Built {
         if self.file.sets.contains_key(&name) || name == DOMAIN_SET {
             return Err(IoError::DuplicateSetName { name });
         }
-        if set.nodes.is_empty() && set.faces.is_empty() && set.elements.is_empty() {
+        if set.nodes.is_empty()
+            && set.faces.is_empty()
+            && set.edges.is_empty()
+            && set.elements.is_empty()
+        {
             return Err(IoError::InvalidModel {
                 problem: "rien n'est sélectionné : trace un cadre ou clique une face d'abord"
                     .to_string(),
@@ -193,6 +197,23 @@ impl Built {
             .sets
             .iter()
             .filter(|(_, set)| !set.elements.is_empty())
+            .map(|(name, _)| name.as_str())
+            .collect()
+    }
+
+    /// Noms des Sets qu'une force linéique peut viser : des bords (faces) en 2D, des arêtes en 3D.
+    pub fn edge_sets(&self) -> Vec<&str> {
+        let dim = self.file.kind.dim();
+        self.file
+            .sets
+            .iter()
+            .filter(|(_, set)| {
+                if dim == 2 {
+                    !set.faces.is_empty()
+                } else {
+                    !set.edges.is_empty()
+                }
+            })
             .map(|(name, _)| name.as_str())
             .collect()
     }

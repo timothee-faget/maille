@@ -3,9 +3,9 @@
 //! en TOML par `model::write`. `app` ne fait que l'afficher.
 
 use maille_io::model::{
-    self, ContactDef, ContactKind, ConvectionDef, DofDef, HeatSourceDef, HyperelasticityDef,
-    KinematicsDef, MeshingDef, ModelFile, Physics, PlaneStateDef, PressureDef, SectionDef, StepDef,
-    StepKind, TemperaturesDef, ThermalStepDef, ValueDef,
+    self, ContactDef, ContactKind, ConvectionDef, DofDef, EdgeLoadDef, HeatSourceDef,
+    HyperelasticityDef, KinematicsDef, MeshingDef, ModelFile, Physics, PlaneStateDef, PressureDef,
+    SectionDef, StepDef, StepKind, TemperaturesDef, ThermalStepDef, ValueDef,
 };
 use maille_io::msh::{CellKind, MshFile, DOMAIN_SET};
 use maille_io::IoError;
@@ -128,6 +128,8 @@ pub struct Draft {
     /// Efforts par Node (`Load`).
     pub loads: Vec<ValueDef>,
     pub pressures: Vec<PressureDef>,
+    /// Forces linéiques (N/mm) sur des bords (2D) ou des arêtes (3D).
+    pub edge_loads: Vec<EdgeLoadDef>,
     pub heat_sources: Vec<HeatSourceDef>,
     pub convections: Vec<ConvectionDef>,
     pub contacts: Vec<ContactDef>,
@@ -153,6 +155,7 @@ impl Default for Draft {
             bcs: Vec::new(),
             loads: Vec::new(),
             pressures: Vec::new(),
+            edge_loads: Vec::new(),
             heat_sources: Vec::new(),
             convections: Vec::new(),
             contacts: Vec::new(),
@@ -233,6 +236,7 @@ impl Draft {
         self.bcs.iter().any(|b| b.dof != DofDef::T)
             || self.loads.iter().any(|l| l.dof != DofDef::T)
             || !self.pressures.is_empty()
+            || !self.edge_loads.is_empty()
             || !self.contacts.is_empty()
             || self.large
             || self.reference_temperature.is_some()
@@ -306,7 +310,7 @@ impl Draft {
             heat_sources: self.heat_sources.clone(),
             convections: self.convections.clone(),
             pressures: self.pressures.clone(),
-            edge_loads: Vec::new(),
+            edge_loads: self.edge_loads.clone(),
             contacts: self.contacts.clone(),
             temperatures: self.reference_temperature.map(|reference| TemperaturesDef {
                 from: None,
@@ -339,6 +343,7 @@ impl Draft {
     pub fn has_loading(&self) -> bool {
         !self.loads.is_empty()
             || !self.pressures.is_empty()
+            || !self.edge_loads.is_empty()
             || !self.heat_sources.is_empty()
             || !self.convections.is_empty()
             || !self.contacts.is_empty()
@@ -352,6 +357,7 @@ impl Draft {
             .chain(&self.loads)
             .map(|v| v.set.as_str())
             .chain(self.pressures.iter().map(|p| p.set.as_str()))
+            .chain(self.edge_loads.iter().map(|l| l.set.as_str()))
             .chain(self.heat_sources.iter().map(|h| h.set.as_str()))
             .chain(self.convections.iter().map(|c| c.set.as_str()))
             .chain(self.contacts.iter().map(|c| c.set.as_str()))
@@ -575,6 +581,14 @@ fn warning(tool: Tool, message: String) -> Diagnostic {
     }
 }
 
+/// Ce qu'une charge demande d'un Set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Needs {
+    Any,
+    Faces,
+    Edges,
+}
+
 /// Ce qui ne va pas dans le brouillon, avant le calcul. `user_sets` : les Sets créés par l'utilisateur,
 /// dont on signale ceux que rien n'utilise.
 pub fn diagnose(draft: &Draft, mesh: &MshFile, user_sets: &[&str]) -> Vec<Diagnostic> {
@@ -618,7 +632,7 @@ pub fn diagnose(draft: &Draft, mesh: &MshFile, user_sets: &[&str]) -> Vec<Diagno
         ));
     }
 
-    let mut check_set = |tool: Tool, what: &str, set: &str, needs_faces: bool| {
+    let mut check_set = |tool: Tool, what: &str, set: &str, needs: Needs| {
         match mesh
         .sets
         .get(set)
@@ -627,9 +641,13 @@ pub fn diagnose(draft: &Draft, mesh: &MshFile, user_sets: &[&str]) -> Vec<Diagno
             tool,
             format!("{what} renvoie au Set « {set} », qui n'existe pas dans le maillage (remaillage ?) : choisis un autre Set."),
         )),
-        Some(s) if needs_faces && s.faces.is_empty() => out.push(error(
+        Some(s) if needs == Needs::Faces && s.faces.is_empty() => out.push(error(
             tool,
             format!("{what} demande un bord, et le Set « {set} » n'a pas de faces : choisis un Set de bord."),
+        )),
+        Some(s) if needs == Needs::Edges && s.edges.is_empty() => out.push(error(
+            tool,
+            format!("{what} demande des arêtes, et le Set « {set} » n'en a pas : trace-le avec l'outil « Arêtes → Set »."),
         )),
         Some(_) => {}
     }
@@ -643,7 +661,7 @@ pub fn diagnose(draft: &Draft, mesh: &MshFile, user_sets: &[&str]) -> Vec<Diagno
             },
             &format!("La BC « {} »", dof_name(bc.dof)),
             &bc.set,
-            false,
+            Needs::Any,
         );
     }
     for load in &draft.loads {
@@ -651,20 +669,28 @@ pub fn diagnose(draft: &Draft, mesh: &MshFile, user_sets: &[&str]) -> Vec<Diagno
             Tool::Load,
             &format!("Le Load « {} »", dof_name(load.dof)),
             &load.set,
-            false,
+            Needs::Any,
         );
     }
     for p in &draft.pressures {
-        check_set(Tool::Load, "La Pressure", &p.set, true);
+        check_set(Tool::Load, "La Pressure", &p.set, Needs::Faces);
+    }
+    for l in &draft.edge_loads {
+        let needs = if mesh.kind.dim() == 2 {
+            Needs::Faces
+        } else {
+            Needs::Edges
+        };
+        check_set(Tool::Load, "La force linéique", &l.set, needs);
     }
     for h in &draft.heat_sources {
-        check_set(Tool::Thermal, "La HeatSource", &h.set, false);
+        check_set(Tool::Thermal, "La HeatSource", &h.set, Needs::Any);
     }
     for c in &draft.convections {
-        check_set(Tool::Thermal, "La Convection", &c.set, true);
+        check_set(Tool::Thermal, "La Convection", &c.set, Needs::Faces);
     }
     for c in &draft.contacts {
-        check_set(Tool::Contact, "Le Contact", &c.set, false);
+        check_set(Tool::Contact, "Le Contact", &c.set, Needs::Any);
     }
 
     for name in user_sets {

@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
-use maille_io::msh::{face_positions, MshFile, Set};
+use maille_io::msh::{edge_positions, face_positions, MshFile, Set};
 
 use crate::sets::{segment_distance, triangle_depth, EDGE_TOLERANCE_PX};
 
@@ -294,6 +294,182 @@ pub fn highlight_elements(
     }
 }
 
+/// Une arête vive de la peau d'un maillage 3D : celle que se partagent deux faces dont les normales
+/// font plus que l'angle demandé (le pli d'un cube, le bord d'un trou).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SharpEdge {
+    /// Ses deux sommets, `nodes[0] < nodes[1]`.
+    pub nodes: [usize; 2],
+}
+
+/// Les arêtes vives de la peau : entre deux faces dont l'angle des normales dépasse `max_angle`
+/// degrés. Vide en 2D, où un bord est déjà une face.
+pub fn sharp_edges(file: &MshFile, skin: &[SkinFace], max_angle: f64) -> Vec<SharpEdge> {
+    if file.kind.dim() != 3 {
+        return Vec::new();
+    }
+    let min_cos = max_angle.to_radians().cos();
+    let normals: Vec<Point> = skin.iter().map(|f| outward_normal(file, f)).collect();
+    let mut by_edge: HashMap<[usize; 2], Vec<usize>> = HashMap::new();
+    for (i, f) in skin.iter().enumerate() {
+        for part in parts(&f.corners) {
+            by_edge.entry([part[0], part[1]]).or_default().push(i);
+        }
+    }
+    let mut edges: Vec<SharpEdge> = by_edge
+        .into_iter()
+        .filter(|(_, faces)| {
+            faces.len() == 2
+                && (0..3)
+                    .map(|k| normals[faces[0]][k] * normals[faces[1]][k])
+                    .sum::<f64>()
+                    < min_cos
+        })
+        .map(|(nodes, _)| SharpEdge { nodes })
+        .collect();
+    edges.sort_by_key(|e| e.nodes);
+    edges
+}
+
+/// Point de `a`–`b` le plus proche de `p` à l'écran : sa distance et sa profondeur.
+fn nearest_on_segment(p: [f64; 2], a: Point, b: Point) -> (f64, [f64; 2], f64) {
+    let (ab, ap) = ([b[0] - a[0], b[1] - a[1]], [p[0] - a[0], p[1] - a[1]]);
+    let len2 = ab[0] * ab[0] + ab[1] * ab[1];
+    let t = if len2 > 0.0 {
+        ((ap[0] * ab[0] + ap[1] * ab[1]) / len2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let at = [a[0] + t * ab[0], a[1] + t * ab[1]];
+    let depth = a[2] + t * (b[2] - a[2]);
+    ((p[0] - at[0]).hypot(p[1] - at[1]), at, depth)
+}
+
+/// L'arête vive sous le pixel `cursor` : la plus proche (à moins de `EDGE_TOLERANCE_PX`) parmi celles
+/// qu'aucune face ne cache.
+pub fn pick_edge(
+    file: &MshFile,
+    skin: &[SkinFace],
+    edges: &[SharpEdge],
+    project: &dyn Fn(Point) -> Point,
+    cursor: [f64; 2],
+) -> Option<usize> {
+    let tri = |f: &SkinFace| [0, 1, 2].map(|k| project(position(file, f.corners[k])));
+    let mut best: Option<(f64, usize)> = None;
+    for (i, e) in edges.iter().enumerate() {
+        let (a, b) = (
+            project(position(file, e.nodes[0])),
+            project(position(file, e.nodes[1])),
+        );
+        let (distance, at, depth) = nearest_on_segment(cursor, a, b);
+        if distance > EDGE_TOLERANCE_PX || best.is_some_and(|(d, _)| d <= distance) {
+            continue;
+        }
+        // une face plus proche de l'observateur au même pixel cache l'arête
+        let front = skin
+            .iter()
+            .filter_map(|f| triangle_depth(at, tri(f)))
+            .fold(f64::INFINITY, f64::min);
+        if depth <= front + 1e-6 + 1e-4 * front.abs() {
+            best = Some((distance, i));
+        }
+    }
+    best.map(|(_, i)| i)
+}
+
+/// Le Set d'arêtes qui prolonge l'arête vive `seed` : on avance de sommet en sommet tant que le
+/// sommet touche exactement deux arêtes vives, et on s'arrête à un coin (trois arêtes ou plus) ou à un
+/// bout. Un pli de cube donne ses segments, le bord d'un trou toute sa boucle.
+pub fn edge_chain(file: &MshFile, edges: &[SharpEdge], seed: usize) -> Set {
+    let mut at_node: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (i, e) in edges.iter().enumerate() {
+        for n in e.nodes {
+            at_node.entry(n).or_default().push(i);
+        }
+    }
+    let mut chain = BTreeSet::from([seed]);
+    let mut queue = VecDeque::from([seed]);
+    while let Some(i) = queue.pop_front() {
+        for n in edges[i].nodes {
+            if let [a, b] = at_node[&n][..] {
+                let next = if a == i { b } else { a };
+                if chain.insert(next) {
+                    queue.push_back(next);
+                }
+            }
+        }
+    }
+    let pairs: Vec<[usize; 2]> = chain.iter().map(|&i| edges[i].nodes).collect();
+    edge_set(file, &pairs)
+}
+
+/// Le Set d'arêtes de ces paires de sommets, chacune rattachée à l'Element de plus petit indice qui la
+/// porte (comme le fait la lecture d'un `.msh`), avec les Nodes des arêtes, milieux compris.
+pub fn edge_set(file: &MshFile, pairs: &[[usize; 2]]) -> Set {
+    let wanted: BTreeSet<[usize; 2]> = pairs
+        .iter()
+        .map(|p| [p[0].min(p[1]), p[0].max(p[1])])
+        .collect();
+    let mut found: HashMap<[usize; 2], (usize, usize)> = HashMap::new();
+    let mut nodes = Vec::new();
+    for (element, cell) in file.cells.iter().enumerate() {
+        for k in 0.. {
+            let Some(positions) = edge_positions(file.kind, k) else {
+                break;
+            };
+            let (a, b) = (cell[positions[0]], cell[positions[1]]);
+            let key = [a.min(b), a.max(b)];
+            if wanted.contains(&key) && !found.contains_key(&key) {
+                found.insert(key, (element, k));
+                nodes.extend(positions.iter().map(|&p| cell[p]));
+            }
+        }
+    }
+    let mut edges: Vec<(usize, usize)> = found.into_values().collect();
+    edges.sort_unstable();
+    nodes.sort_unstable();
+    nodes.dedup();
+    Set {
+        nodes,
+        edges,
+        ..Set::default()
+    }
+}
+
+/// Les triangles à surligner pour des arêtes : les faces de la peau qui les touchent, un ruban de
+/// chaque côté (un trait d'un pixel ne se verrait pas).
+pub fn highlight_edges(
+    file: &MshFile,
+    skin: &[SkinFace],
+    edges: &[(usize, usize)],
+) -> Vec<[Point; 3]> {
+    let mut at_node: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (i, f) in skin.iter().enumerate() {
+        for &n in &f.corners {
+            at_node.entry(n).or_default().push(i);
+        }
+    }
+    let mut touched = BTreeSet::new();
+    for &(element, k) in edges {
+        let Some(positions) = edge_positions(file.kind, k) else {
+            continue;
+        };
+        let (a, b) = (
+            file.cells[element][positions[0]],
+            file.cells[element][positions[1]],
+        );
+        for &i in at_node.get(&a).into_iter().flatten() {
+            if skin[i].corners.contains(&b) {
+                touched.insert(i);
+            }
+        }
+    }
+    touched
+        .into_iter()
+        .map(|i| [0, 1, 2].map(|k| position(file, skin[i].corners[k])))
+        .collect()
+}
+
 /// Les triangles à surligner pour un Set du `.msh`, quel que soit son rôle (Elements, faces, Nodes).
 pub fn highlight_set(file: &MshFile, skin: &[SkinFace], set: &Set) -> Vec<[Point; 3]> {
     if !set.elements.is_empty() {
@@ -310,6 +486,8 @@ pub fn highlight_set(file: &MshFile, skin: &[SkinFace], set: &Set) -> Vec<[Point
                 .map(|f| tri(&f.corners))
                 .collect()
         }
+    } else if !set.edges.is_empty() {
+        highlight_edges(file, skin, &set.edges)
     } else {
         highlight_nodes(file, skin, &set.nodes)
     }
@@ -430,6 +608,88 @@ mod tests {
         assert!(region.faces.len() < skin.len());
     }
 
+    /// Les coordonnées du cube unité qui valent 0 ou 1 pour tous les Nodes de l'ensemble : une arête
+    /// du cube est une droite où deux de ces coordonnées sont fixées.
+    fn fixed_coordinates(file: &MshFile, nodes: &[usize]) -> usize {
+        (0..3)
+            .filter(|&c| {
+                let v = |n: usize| [file.nodes[n].x, file.nodes[n].y, file.nodes[n].z][c];
+                let first = v(nodes[0]);
+                (first.abs() < 1e-9 || (first - 1.0).abs() < 1e-9)
+                    && nodes.iter().all(|&n| (v(n) - first).abs() < 1e-9)
+            })
+            .count()
+    }
+
+    #[test]
+    fn in_3d_the_sharp_edges_of_a_cube_follow_its_creases() {
+        let file = example("cube.msh");
+        let skin = skin(&file);
+        let sharp = sharp_edges(&file, &skin, 30.0);
+        assert!(!sharp.is_empty());
+        // aucune diagonale de face : tous les segments suivent un pli du cube
+        for e in &sharp {
+            assert_eq!(fixed_coordinates(&file, &e.nodes), 2, "{e:?}");
+        }
+        // à 100° le pli à 90° n'est plus vif ; en 2D il n'y a pas d'arête
+        assert!(sharp_edges(&file, &skin, 100.0).is_empty());
+        let flat = example("plaque.msh");
+        assert!(sharp_edges(&flat, &super::skin(&flat), 30.0).is_empty());
+    }
+
+    #[test]
+    fn a_click_picks_the_visible_sharp_edge_and_the_chain_stops_at_the_corners() {
+        let file = example("cube.msh");
+        let skin = skin(&file);
+        let sharp = sharp_edges(&file, &skin, 30.0);
+        // vue de face : l'arête y = 0, z = 1 (devant) cache celle de y = 0, z = 0 au même pixel
+        let i = pick_edge(&file, &skin, &sharp, &front, [50.0, 300.0]).expect("une arête");
+        assert!(sharp[i].nodes.iter().all(|&n| {
+            let p = file.nodes[n];
+            p.y.abs() < 1e-9 && (p.z - 1.0).abs() < 1e-9
+        }));
+        // loin de toute arête vive : rien
+        assert_eq!(pick_edge(&file, &skin, &sharp, &front, [50.0, 250.0]), None);
+
+        let chain = edge_chain(&file, &sharp, i);
+        // tout le pli, rien que lui : autant d'arêtes que de segments du maillage sur cette droite
+        let on_line = |n: usize| {
+            let p = file.nodes[n];
+            p.y.abs() < 1e-9 && (p.z - 1.0).abs() < 1e-9
+        };
+        let expected = sharp
+            .iter()
+            .filter(|e| e.nodes.iter().all(|&n| on_line(n)))
+            .count();
+        assert!(expected >= 1);
+        assert_eq!(chain.edges.len(), expected);
+        assert!(chain.nodes.iter().all(|&n| on_line(n)));
+        assert!(chain.faces.is_empty() && chain.elements.is_empty());
+        // chaque arête (élément, numéro) retombe sur les Nodes du Set
+        for &(e, k) in &chain.edges {
+            let positions = edge_positions(file.kind, k).unwrap();
+            assert!(positions
+                .iter()
+                .all(|&p| chain.nodes.contains(&file.cells[e][p])));
+        }
+    }
+
+    #[test]
+    fn an_edge_set_is_written_read_and_highlighted() {
+        let file = example("cube.msh");
+        let skin = skin(&file);
+        let sharp = sharp_edges(&file, &skin, 30.0);
+        let i = pick_edge(&file, &skin, &sharp, &front, [50.0, 300.0]).unwrap();
+        let chain = edge_chain(&file, &sharp, i);
+        let mut with = file.clone();
+        with.sets.insert("pli".into(), chain.clone());
+        let again = read(&maille_io::msh::write(&with).unwrap()).unwrap();
+        assert_eq!(again.sets["pli"], chain);
+        // le ruban : des faces de la peau qui touchent l'arête, et pas la peau entière
+        let ribbon = highlight_set(&file, &skin, &chain);
+        assert!(!ribbon.is_empty() && ribbon.len() < skin.len());
+    }
+
     #[test]
     fn the_highlight_covers_what_is_selected() {
         let file = example("plaque.msh");
@@ -491,6 +751,112 @@ mod tests {
             let (ux, uy) = (field.displacements[2 * i], field.displacements[2 * i + 1]);
             assert!((ux - 0.001 * p.x).abs() < 1e-9, "ux du Node {i}");
             assert!((uy + 0.3 * 0.001 * p.y).abs() < 1e-9, "uy du Node {i}");
+        }
+    }
+
+    /// Le parcours en 3D : des arêtes tirées sur un cube, écrites dans le `.msh` puis relues, portent une
+    /// force linéique dont la résultante est q × la longueur des arêtes (4 pour le contour de x = 1).
+    #[test]
+    fn edges_picked_on_a_cube_carry_a_line_load_with_the_exact_resultant() {
+        use maille_io::model::{self, DofDef, EdgeLoadDef, ValueDef};
+
+        use crate::mesh_space::Built;
+        use crate::model_space::{diagnose, Draft};
+
+        let mut built = Built::new(example("cube.msh"), None);
+        let skin = skin(&built.file);
+        let sharp = sharp_edges(&built.file, &skin, 30.0);
+        // les quatre plis de la face x = 1, chacun pris en entier par une chaîne
+        let on_end = |e: &SharpEdge| e.nodes.iter().all(|&n| built.file.nodes[n].x > 0.99);
+        let mut rim = Set::default();
+        for i in (0..sharp.len()).filter(|&i| on_end(&sharp[i])) {
+            let chain = edge_chain(&built.file, &sharp, i);
+            rim.edges.extend(chain.edges);
+            rim.nodes.extend(chain.nodes);
+        }
+        rim.edges.sort_unstable();
+        rim.edges.dedup();
+        rim.nodes.sort_unstable();
+        rim.nodes.dedup();
+        assert!(rim.edges.len() >= 4);
+        built.add_mesh_set("contour", rim).unwrap();
+        assert_eq!(built.edge_sets(), ["contour"]);
+
+        let file = read(&maille_io::msh::write(&built.file).unwrap()).unwrap();
+        let q = 25.0;
+        let mut d = Draft::default();
+        d.material = Some(d.steel());
+        let bc = |set: &str, dof| ValueDef {
+            set: set.into(),
+            dof,
+            value: 0.0,
+        };
+        d.bcs = vec![
+            bc("x0", DofDef::Ux),
+            bc("y0", DofDef::Uy),
+            bc("z0", DofDef::Uz),
+        ];
+        // sur un Set de Nodes, le diagnostic le dit ; sur le contour, il se tait
+        d.edge_loads = vec![EdgeLoadDef {
+            set: "x1".into(),
+            value: vec![q, 0.0, 0.0],
+        }];
+        assert!(diagnose(&d, &file, &[])
+            .iter()
+            .any(|x| x.message.contains("arêtes")));
+        d.edge_loads[0].set = "contour".into();
+        assert!(!diagnose(&d, &file, &[])
+            .iter()
+            .any(|x| x.message.contains("arêtes")));
+
+        let text = d.to_toml("cube_contour.msh", &file, None).unwrap();
+        let loaded = model::build(&model::parse(&text).unwrap(), &file, None).unwrap();
+        let field = loaded.model.solve().unwrap();
+        let reaction: f64 = file.sets["x0"]
+            .nodes
+            .iter()
+            .map(|&n| field.reactions[3 * n])
+            .sum();
+        // une arête diagonale de la face x = 1 ajouterait sa longueur : le compte est exact
+        assert!((reaction + 4.0 * q).abs() < 1e-9, "réaction {reaction}");
+    }
+
+    /// En 2D, le bord d'une géométrie est déjà un Set de faces : la force linéique s'y pose, et q = σ · t
+    /// (l'épaisseur n'est pas multipliée) donne la traction exacte.
+    #[test]
+    fn a_boundary_carries_a_line_load_in_2d() {
+        use maille_io::model::{self, DofDef, EdgeLoadDef, ValueDef};
+
+        use crate::mesh_space::Built;
+        use crate::model_space::{diagnose, Draft};
+
+        let file = example("plaque.msh");
+        let built = Built::new(file.clone(), None);
+        assert!(built.edge_sets().contains(&"droite"));
+        let mut d = Draft::default();
+        d.material = Some(d.steel());
+        d.thickness = 2.0;
+        let young = d.steel().young;
+        let bc = |set: &str, dof| ValueDef {
+            set: set.into(),
+            dof,
+            value: 0.0,
+        };
+        d.bcs = vec![bc("gauche", DofDef::Ux), bc("bas", DofDef::Uy)];
+        d.edge_loads = vec![EdgeLoadDef {
+            set: "droite".into(),
+            value: vec![200.0, 0.0],
+        }];
+        assert!(diagnose(&d, &file, &[])
+            .iter()
+            .all(|x| !x.message.contains("force linéique")));
+        let text = d.to_toml("plaque_force.msh", &file, None).unwrap();
+        let loaded = model::build(&model::parse(&text).unwrap(), &file, None).unwrap();
+        let field = loaded.model.solve().unwrap();
+        // σ = 200 / 2 = 100 MPa en contraintes planes : ux = σ x / E
+        for (i, p) in file.nodes.iter().enumerate() {
+            let ux = field.displacements[2 * i];
+            assert!((ux - 100.0 * p.x / young).abs() < 1e-9, "ux du Node {i}");
         }
     }
 }
