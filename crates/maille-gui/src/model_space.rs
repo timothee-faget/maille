@@ -104,11 +104,23 @@ impl MaterialForm {
     }
 }
 
+/// Un Material de plus, sur un Set d'Elements.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Region {
+    pub set: String,
+    pub material: MaterialForm,
+}
+
 /// Ce que l'utilisateur a rempli dans l'espace Modèle.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Draft {
     pub units: UnitSystem,
+    /// Le Material, sur le Set d'Elements `material_set` (tout le domaine tant qu'il est seul).
     pub material: Option<MaterialForm>,
+    pub material_set: String,
+    /// D'autres Materials sur d'autres Sets d'Elements : ensemble, ils couvrent chaque Element une
+    /// seule fois. L'épaisseur et l'état plan sont les mêmes pour tous.
+    pub regions: Vec<Region>,
     /// Triangles seulement.
     pub plane_state: PlaneStateDef,
     pub thickness: f64,
@@ -134,6 +146,8 @@ impl Default for Draft {
         Self {
             units: UnitSystem::MmNMpa,
             material: None,
+            material_set: DOMAIN_SET.to_string(),
+            regions: Vec::new(),
             plane_state: PlaneStateDef::Stress,
             thickness: 1.0,
             bcs: Vec::new(),
@@ -151,6 +165,27 @@ impl Default for Draft {
 }
 
 impl Draft {
+    /// Tous les Materials du modèle avec leur Set d'Elements : le premier, puis les autres.
+    pub fn sections(&self) -> Vec<(&str, &MaterialForm)> {
+        self.material
+            .iter()
+            .map(|m| (self.material_set.as_str(), m))
+            .chain(self.regions.iter().map(|r| (r.set.as_str(), &r.material)))
+            .collect()
+    }
+
+    /// Les Elements que les Sets des autres Materials (`regions`) ne couvrent pas : ce qui reste au
+    /// premier Material quand le modèle en a plusieurs.
+    pub fn remaining_elements(&self, mesh: &MshFile) -> Vec<usize> {
+        let mut taken = vec![false; mesh.cells.len()];
+        for r in &self.regions {
+            for &e in mesh.sets.get(&r.set).map_or(&[][..], |s| &s.elements[..]) {
+                taken[e] = true;
+            }
+        }
+        (0..taken.len()).filter(|&e| !taken[e]).collect()
+    }
+
     /// Un acier, dans le système d'unités choisi.
     pub fn steel(&self) -> MaterialForm {
         MaterialForm {
@@ -218,9 +253,9 @@ impl Draft {
         self.large
             || !self.contacts.is_empty()
             || self
-                .material
-                .as_ref()
-                .is_some_and(|m| m.yield_stress.is_some())
+                .sections()
+                .iter()
+                .any(|(_, m)| m.yield_stress.is_some())
     }
 
     /// Le fichier de modèle correspondant. `meshing` : la recette du maillage si on la connaît.
@@ -233,10 +268,10 @@ impl Draft {
         let planar = is_planar(mesh);
         let mut materials = std::collections::BTreeMap::new();
         let mut sections = Vec::new();
-        if let Some(m) = &self.material {
+        for (set, m) in self.sections() {
             materials.insert(m.name.clone(), m.to_def(self.large));
             sections.push(SectionDef {
-                set: DOMAIN_SET.to_string(),
+                set: set.to_string(),
                 material: m.name.clone(),
                 thickness: (planar && (self.thickness - 1.0).abs() > f64::EPSILON)
                     .then_some(self.thickness),
@@ -319,6 +354,7 @@ impl Draft {
             .chain(self.heat_sources.iter().map(|h| h.set.as_str()))
             .chain(self.convections.iter().map(|c| c.set.as_str()))
             .chain(self.contacts.iter().map(|c| c.set.as_str()))
+            .chain(self.sections().into_iter().map(|(set, _)| set))
             .collect()
     }
 }
@@ -542,35 +578,36 @@ fn warning(tool: Tool, message: String) -> Diagnostic {
 /// dont on signale ceux que rien n'utilise.
 pub fn diagnose(draft: &Draft, mesh: &MshFile, user_sets: &[&str]) -> Vec<Diagnostic> {
     let mut out = Vec::new();
-    match &draft.material {
-        None => out.push(error(
+    if draft.material.is_none() {
+        out.push(error(
             Tool::Material,
             "Aucun Material : définis-en un (module d'Young et coefficient de Poisson).".into(),
-        )),
-        Some(m) => {
-            if m.young <= 0.0 {
-                out.push(error(
-                    Tool::Material,
-                    format!("Le module d'Young de « {} » doit être positif.", m.name),
-                ));
-            }
-            if m.poisson <= -1.0 || m.poisson >= 0.5 {
-                out.push(error(
-                    Tool::Material,
-                    format!(
-                        "Le coefficient de Poisson de « {} » doit être entre -1 et 0,5 (exclus).",
-                        m.name
-                    ),
-                ));
-            } else if m.poisson > 0.45 && matches!(mesh.kind, CellKind::Tri3 | CellKind::Tet4) {
-                out.push(warning(
-                    Tool::MeshSize,
-                    format!(
-                        "ν = {} avec des éléments linéaires : le résultat risque d'être trop raide, coche quadratique.",
-                        m.poisson
-                    ),
-                ));
-            }
+        ));
+    }
+    section_diagnostics(draft, mesh, &mut out);
+    for (_, m) in draft.sections() {
+        if m.young <= 0.0 {
+            out.push(error(
+                Tool::Material,
+                format!("Le module d'Young de « {} » doit être positif.", m.name),
+            ));
+        }
+        if m.poisson <= -1.0 || m.poisson >= 0.5 {
+            out.push(error(
+                Tool::Material,
+                format!(
+                    "Le coefficient de Poisson de « {} » doit être entre -1 et 0,5 (exclus).",
+                    m.name
+                ),
+            ));
+        } else if m.poisson > 0.45 && matches!(mesh.kind, CellKind::Tri3 | CellKind::Tet4) {
+            out.push(warning(
+                Tool::MeshSize,
+                format!(
+                    "ν = {} avec des éléments linéaires : le résultat risque d'être trop raide, coche quadratique.",
+                    m.poisson
+                ),
+            ));
         }
     }
     if is_planar(mesh) && draft.thickness <= 0.0 {
@@ -668,8 +705,11 @@ pub fn diagnose(draft: &Draft, mesh: &MshFile, user_sets: &[&str]) -> Vec<Diagno
     }
 
     if draft.has_thermal() {
-        let material = draft.material.as_ref();
-        if material.is_some_and(|m| m.conductivity.is_none_or(|k| k <= 0.0)) {
+        let materials: Vec<&MaterialForm> = draft.sections().into_iter().map(|(_, m)| m).collect();
+        if materials
+            .iter()
+            .any(|m| m.conductivity.is_none_or(|k| k <= 0.0))
+        {
             out.push(error(
                 Tool::Material,
                 "Le calcul thermique demande une conductivité k > 0 dans le Material.".into(),
@@ -689,7 +729,7 @@ pub fn diagnose(draft: &Draft, mesh: &MshFile, user_sets: &[&str]) -> Vec<Diagno
             ));
         }
         if draft.thermal_step.is_some()
-            && material.is_some_and(|m| {
+            && materials.iter().any(|m| {
                 m.density.is_none_or(|r| r <= 0.0) || m.specific_heat.is_none_or(|c| c <= 0.0)
             })
         {
@@ -707,7 +747,7 @@ pub fn diagnose(draft: &Draft, mesh: &MshFile, user_sets: &[&str]) -> Vec<Diagno
                         .into(),
                 ));
             }
-            if material.is_some_and(|m| m.expansion.is_none()) {
+            if materials.iter().any(|m| m.expansion.is_none()) {
                 out.push(error(
                     Tool::Material,
                     "Le couplage thermo-mécanique demande un coefficient de dilatation α dans le Material."
@@ -755,6 +795,61 @@ pub fn diagnose(draft: &Draft, mesh: &MshFile, user_sets: &[&str]) -> Vec<Diagno
         }
     }
     out
+}
+
+/// Les Materials et leurs Sets d'Elements : chaque Set existe et porte des Elements, chaque Element
+/// a un Material et un seul, deux Materials de même nom ont les mêmes valeurs.
+fn section_diagnostics(draft: &Draft, mesh: &MshFile, out: &mut Vec<Diagnostic>) {
+    let sections = draft.sections();
+    if sections.is_empty() {
+        return;
+    }
+    if !draft.regions.is_empty() && draft.material_set == DOMAIN_SET {
+        out.push(error(
+            Tool::Material,
+            "Le premier Material couvre tout le domaine et chevauche les autres : donne-lui le Set des Elements restants.".into(),
+        ));
+    }
+    let mut count = vec![0usize; mesh.cells.len()];
+    for (set, m) in &sections {
+        match mesh.sets.get(*set) {
+            None => out.push(error(
+                Tool::Material,
+                format!("Le Material « {} » renvoie au Set « {set} », qui n'existe pas dans le maillage : choisis un autre Set.", m.name),
+            )),
+            Some(s) if s.elements.is_empty() => out.push(error(
+                Tool::Material,
+                format!("Le Material « {} » demande un Set d'Elements, et « {set} » n'en a pas : crée-le avec « Cadre → Set » en mode Elements.", m.name),
+            )),
+            Some(s) => s.elements.iter().for_each(|&e| count[e] += 1),
+        }
+    }
+    let twice = count.iter().filter(|&&c| c > 1).count();
+    if twice > 0 && draft.material_set != DOMAIN_SET {
+        out.push(error(
+            Tool::Material,
+            format!("{twice} Elements ont plusieurs Materials : les Sets d'Elements des Materials ne doivent pas se chevaucher."),
+        ));
+    }
+    let none = count.iter().filter(|&&c| c == 0).count();
+    if none > 0 {
+        out.push(error(
+            Tool::Material,
+            format!("{none} Elements n'ont aucun Material : ajoute-en un sur un Set qui les couvre (ou « Elements restants »)."),
+        ));
+    }
+    for (i, (_, a)) in sections.iter().enumerate() {
+        if sections[..i]
+            .iter()
+            .any(|(_, b)| b.name == a.name && b != a)
+        {
+            out.push(error(
+                Tool::Material,
+                format!("Deux Materials s'appellent « {} » mais n'ont pas les mêmes valeurs : change un nom.", a.name),
+            ));
+            break;
+        }
+    }
 }
 
 /// Construit le modèle avec les règles du cœur ; un calcul couplé est coupé, et la partie mécanique
@@ -1436,5 +1531,186 @@ mod tests {
             ..Draft::default()
         };
         assert_eq!(d.steel().young, 210e9);
+    }
+
+    /// `plate()` avec deux Sets d'Elements : « bas » côté triangle 0, « haut » côté triangle 1.
+    fn two_region_plate() -> MshFile {
+        let mut mesh = plate();
+        for (name, element) in [("moitie_a", 0), ("moitie_b", 1)] {
+            mesh.sets.insert(
+                name.to_string(),
+                Set {
+                    elements: vec![element],
+                    ..Set::default()
+                },
+            );
+        }
+        mesh
+    }
+
+    fn two_materials(d: &mut Draft) {
+        d.material_set = "moitie_a".into();
+        let mut other = d.steel();
+        other.name = "alu".into();
+        other.young = 70e3;
+        d.regions = vec![Region {
+            set: "moitie_b".into(),
+            material: other,
+        }];
+    }
+
+    #[test]
+    fn two_materials_on_two_element_sets_have_no_diagnostic_and_two_sections() {
+        let mut d = filled();
+        two_materials(&mut d);
+        let mesh = two_region_plate();
+        assert_eq!(messages(&d, &mesh, &[]), Vec::<String>::new());
+        let file = d.to_file("plate.msh", &mesh, None);
+        assert_eq!(file.materials.len(), 2);
+        let sets: Vec<(&str, &str)> = file
+            .sections
+            .iter()
+            .map(|s| (s.set.as_str(), s.material.as_str()))
+            .collect();
+        assert_eq!(sets, [("moitie_a", "acier"), ("moitie_b", "alu")]);
+        // un Material n'est pas un Set inutile
+        assert!(!messages(&d, &mesh, &["moitie_a"])
+            .iter()
+            .any(|m| m.contains("n'est utilisé")));
+    }
+
+    #[test]
+    fn badly_placed_materials_are_said_in_plain_words() {
+        let mesh = two_region_plate();
+        // le premier garde tout le domaine et chevauche l'autre
+        let mut d = filled();
+        two_materials(&mut d);
+        d.material_set = DOMAIN_SET.into();
+        let m = messages(&d, &mesh, &[]);
+        assert!(
+            m.iter().any(|s| s.contains("couvre tout le domaine")),
+            "{m:?}"
+        );
+        // deux Materials sur le même Set d'Elements
+        let mut d = filled();
+        two_materials(&mut d);
+        d.regions[0].set = "moitie_a".into();
+        let m = messages(&d, &mesh, &[]);
+        assert!(
+            m.iter().any(|s| s.contains("1 Elements ont plusieurs")),
+            "{m:?}"
+        );
+        assert!(
+            m.iter().any(|s| s.contains("1 Elements n'ont aucun")),
+            "{m:?}"
+        );
+        // un Set qui n'existe pas, un Set de bord
+        let mut d = filled();
+        two_materials(&mut d);
+        d.regions[0].set = "fantome".into();
+        let m = messages(&d, &mesh, &[]);
+        assert!(
+            m.iter()
+                .any(|s| s.contains("« fantome », qui n'existe pas")),
+            "{m:?}"
+        );
+        d.regions[0].set = "gauche".into();
+        let m = messages(&d, &mesh, &[]);
+        assert!(
+            m.iter().any(|s| s.contains("demande un Set d'Elements")),
+            "{m:?}"
+        );
+        // deux Materials de même nom, valeurs différentes
+        let mut d = filled();
+        two_materials(&mut d);
+        d.regions[0].material.name = "acier".into();
+        let m = messages(&d, &mesh, &[]);
+        assert!(
+            m.iter().any(|s| s.contains("s'appellent « acier »")),
+            "{m:?}"
+        );
+    }
+
+    #[test]
+    fn the_remaining_elements_are_those_the_other_materials_leave() {
+        let mesh = two_region_plate();
+        let mut d = filled();
+        assert_eq!(d.remaining_elements(&mesh), vec![0, 1]);
+        two_materials(&mut d);
+        assert_eq!(d.remaining_elements(&mesh), vec![0]);
+    }
+
+    #[test]
+    fn plasticity_in_any_material_asks_for_a_quasi_static_step() {
+        let mut d = filled();
+        two_materials(&mut d);
+        assert!(!d.is_nonlinear());
+        d.regions[0].material.yield_stress = Some(250.0);
+        assert!(d.is_nonlinear());
+    }
+
+    /// Deux Materials en série dans la plaque 4 × 2 (ν = 0 pour que les moitiés ne se gênent pas) :
+    /// σ = u / (L1/E1 + L2/E2), et la réaction vaut σ fois la section.
+    #[test]
+    fn two_materials_in_series_follow_the_series_formula() {
+        let mut mesh = example_mesh("plaque.msh");
+        let left: Vec<usize> = (0..mesh.cells.len())
+            .filter(|&e| {
+                mesh.cells[e][..3]
+                    .iter()
+                    .map(|&n| mesh.nodes[n].x)
+                    .sum::<f64>()
+                    / 3.0
+                    <= 2.0
+            })
+            .collect();
+        let right: Vec<usize> = (0..mesh.cells.len())
+            .filter(|e| !left.contains(e))
+            .collect();
+        for (name, elements) in [("gauche_mat", left), ("droite_mat", right)] {
+            mesh.sets.insert(
+                name.to_string(),
+                Set {
+                    elements,
+                    ..Set::default()
+                },
+            );
+        }
+        let mut d = Draft {
+            thickness: 2.0,
+            ..Draft::default()
+        };
+        let mut first = d.steel();
+        first.poisson = 0.0;
+        d.material = Some(first);
+        d.material_set = "gauche_mat".into();
+        let mut second = d.steel();
+        (second.name, second.young, second.poisson) = ("alu".into(), 70e3, 0.0);
+        d.regions = vec![Region {
+            set: "droite_mat".into(),
+            material: second,
+        }];
+        d.bcs = vec![
+            bc("gauche", DofDef::Ux),
+            value("droite", DofDef::Ux, 0.004),
+            bc("bas", DofDef::Uy),
+        ];
+        assert_eq!(messages(&d, &mesh, &[]), Vec::<String>::new());
+        let text = d.to_toml("plaque.msh", &mesh, None).unwrap();
+        let loaded = model::build(&model::parse(&text).unwrap(), &mesh, None).unwrap();
+        let field = loaded.model.solve().unwrap();
+
+        let stress = 0.004 / (2.0 / 210e3 + 2.0 / 70e3);
+        let force: f64 = mesh.sets["droite"]
+            .nodes
+            .iter()
+            .map(|&n| field.reactions[2 * n])
+            .sum();
+        let expected = stress * 2.0 * 2.0;
+        println!("force {force} attendue {expected}");
+        assert!(
+            (force - expected).abs() < 0.02 * expected,
+            "{force} au lieu de {expected}"
+        );
     }
 }

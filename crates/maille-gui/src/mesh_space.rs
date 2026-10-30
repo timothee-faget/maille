@@ -186,6 +186,16 @@ impl Built {
         }
     }
 
+    /// Noms des Sets d'Elements, le domaine compris.
+    pub fn element_sets(&self) -> Vec<&str> {
+        self.file
+            .sets
+            .iter()
+            .filter(|(_, set)| !set.elements.is_empty())
+            .map(|(name, _)| name.as_str())
+            .collect()
+    }
+
     /// Noms des Sets de bord (tous sauf le domaine).
     pub fn sets(&self) -> Vec<&str> {
         self.file
