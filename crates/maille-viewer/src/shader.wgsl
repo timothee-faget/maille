@@ -77,10 +77,23 @@ fn fs_shaded(in: VertexOut) -> @location(0) vec4<f32> {
     return vec4<f32>(color.rgb * shade, color.a);
 }
 
-// Faces sélectionnées : orange uni, par-dessus le Mesh.
+// Faces surlignées : une couleur par sommet, mélangée au Mesh selon son alpha.
+struct HighlightOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) color: vec4<f32>,
+}
+
+@vertex
+fn vs_highlight(@location(0) position: vec3<f32>, @location(1) color: vec4<f32>) -> HighlightOut {
+    var out: HighlightOut;
+    out.clip = u.view_proj * vec4<f32>(position, 1.0);
+    out.color = color;
+    return out;
+}
+
 @fragment
-fn fs_highlight(in: VertexOut) -> @location(0) vec4<f32> {
-    return vec4<f32>(1.0, 0.55, 0.0, 1.0);
+fn fs_highlight(in: HighlightOut) -> @location(0) vec4<f32> {
+    return in.color;
 }
 
 @fragment

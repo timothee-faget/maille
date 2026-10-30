@@ -18,7 +18,7 @@ mod solid;
 mod testmesh;
 mod vec3;
 
-pub use display::Cut;
+pub use display::{Cut, ShownSet};
 pub use embed::ResultsView;
 pub use render::Theme;
 pub use scene::NodalResults;
@@ -387,6 +387,35 @@ mod tests {
         let (x, y) = (cx - 30, cy - 8);
         assert_eq!(pixel(&after, &shot, x, y), pixel(&before, &shot, x, y));
         // le retirer rend l'image d'origine
+        view.set_highlight(Vec::new());
+        assert_eq!(view.pixels(), before);
+    }
+
+    #[test]
+    fn a_set_is_translucent_and_stays_under_the_highlight() {
+        let shot = Shot::default();
+        let Some(mut view) = embedded(&cube_results(), [shot.width, shot.height]) else {
+            return;
+        };
+        let (cx, cy) = center(&shot);
+        let before = view.pixels();
+        let half = vec![[[-1.0, -1.0, 1.0], [1.0, -1.0, 1.0], [1.0, 1.0, 1.0]]];
+        view.set_sets(vec![([255, 0, 0], half.clone())]);
+        let after = view.pixels();
+        // rouge mélangé au champ (bleu ici) : ni le champ seul, ni le rouge pur
+        let (field, set) = (
+            pixel(&before, &shot, cx + 30, cy + 8),
+            pixel(&after, &shot, cx + 30, cy + 8),
+        );
+        assert!(set[0] > field[0] && set[0] < 255, "{field:?} → {set:?}");
+        assert!(set[2] < field[2] && set[2] > 0, "{field:?} → {set:?}");
+        let (x, y) = (cx - 30, cy - 8);
+        assert_eq!(pixel(&after, &shot, x, y), pixel(&before, &shot, x, y));
+        // le surlignage, opaque, couvre le Set
+        view.set_highlight(half.clone());
+        let both = view.pixels();
+        view.set_sets(Vec::new());
+        assert_eq!(view.pixels(), both);
         view.set_highlight(Vec::new());
         assert_eq!(view.pixels(), before);
     }

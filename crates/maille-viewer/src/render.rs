@@ -102,9 +102,9 @@ pub struct Renderer {
     legend_fill_pipeline: wgpu::RenderPipeline,
     legend_line_pipeline: wgpu::RenderPipeline,
     legend: Option<LegendBuffers>,
-    /// Triangles sélectionnés, orange par-dessus le Mesh : le buffer et le nombre de sommets.
+    /// Triangles surlignés par-dessus le Mesh : positions, couleurs (RGBA) et nombre de sommets.
     highlight_pipeline: wgpu::RenderPipeline,
-    highlight: Option<(wgpu::Buffer, u32)>,
+    highlight: Option<(wgpu::Buffer, wgpu::Buffer, u32)>,
     text: Text,
 }
 
@@ -326,41 +326,53 @@ impl Renderer {
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &wgpu::vertex_attr_array![1 => Float32],
         };
-        let pipeline =
-            |vertex, buffers: &[Option<wgpu::VertexBufferLayout>], topology, fragment, depth| {
-                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: None,
-                    layout: Some(&layout),
-                    vertex: wgpu::VertexState {
-                        module: &shader,
-                        entry_point: Some(vertex),
-                        compilation_options: Default::default(),
-                        buffers,
-                    },
-                    // les deux faces se voient : la coupe montre l'intérieur de la peau
-                    primitive: wgpu::PrimitiveState {
+        let color = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<[u8; 4]>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &wgpu::vertex_attr_array![1 => Unorm8x4],
+        };
+        let pipeline = |vertex,
+                        buffers: &[Option<wgpu::VertexBufferLayout>],
                         topology,
-                        cull_mode: None,
-                        ..Default::default()
-                    },
-                    depth_stencil: Some(depth),
-                    multisample: Default::default(),
-                    fragment: Some(wgpu::FragmentState {
-                        module: &shader,
-                        entry_point: Some(fragment),
-                        compilation_options: Default::default(),
-                        targets: &[Some(format.into())],
-                    }),
-                    multiview_mask: None,
-                    cache: None,
-                })
-            };
+                        fragment,
+                        depth,
+                        blend: Option<wgpu::BlendState>| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: None,
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some(vertex),
+                    compilation_options: Default::default(),
+                    buffers,
+                },
+                // les deux faces se voient : la coupe montre l'intérieur de la peau
+                primitive: wgpu::PrimitiveState {
+                    topology,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(depth),
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some(fragment),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        blend,
+                        ..format.into()
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
         let (triangle_list, line_list) = (
             wgpu::PrimitiveTopology::TriangleList,
             wgpu::PrimitiveTopology::LineList,
         );
         let mesh_buffers = [Some(position3.clone()), Some(value.clone())];
-        let line_buffers = [Some(position3)];
+        let line_buffers = [Some(position3.clone())];
         let screen_buffers = [Some(position2), Some(value)];
         let lequal = wgpu::CompareFunction::LessEqual;
         let always = wgpu::CompareFunction::Always;
@@ -370,6 +382,7 @@ impl Renderer {
             triangle_list,
             "fs_shaded",
             depth_state(true, lequal, true),
+            None,
         );
         let edge_pipeline = pipeline(
             "vs_line",
@@ -377,13 +390,15 @@ impl Renderer {
             line_list,
             "fs_edge",
             depth_state(true, lequal, false),
+            None,
         );
         let highlight_pipeline = pipeline(
-            "vs_line",
-            &line_buffers,
+            "vs_highlight",
+            &[Some(position3), Some(color)],
             triangle_list,
             "fs_highlight",
             depth_state(false, lequal, false),
+            Some(wgpu::BlendState::ALPHA_BLENDING),
         );
         let legend_fill_pipeline = pipeline(
             "vs_screen",
@@ -391,6 +406,7 @@ impl Renderer {
             triangle_list,
             "fs_fill",
             depth_state(false, always, false),
+            None,
         );
         let legend_line_pipeline = pipeline(
             "vs_screen",
@@ -398,6 +414,7 @@ impl Renderer {
             line_list,
             "fs_edge",
             depth_state(false, always, false),
+            None,
         );
 
         let fonts = glyphon::FontSystem::new();
@@ -595,17 +612,23 @@ impl Renderer {
         self.request_redraw();
     }
 
-    /// Triangles à surligner (3 sommets chacun), par-dessus le Mesh ; vide : aucun.
-    pub fn set_highlight(&mut self, triangles: &[[f32; 3]]) {
+    /// Triangles à surligner (3 sommets chacun), par-dessus le Mesh, avec la couleur RGBA de chaque
+    /// sommet (l'alpha mélange au Mesh) ; vide : aucun.
+    pub fn set_highlight(&mut self, triangles: &[[f32; 3]], colors: &[[u8; 4]]) {
         self.highlight = (!triangles.is_empty()).then(|| {
-            let buffer = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: None,
-                    contents: bytemuck::cast_slice(triangles),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-            (buffer, triangles.len() as u32)
+            let buffer = |contents: &[u8]| {
+                self.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: None,
+                        contents,
+                        usage: wgpu::BufferUsages::VERTEX,
+                    })
+            };
+            (
+                buffer(bytemuck::cast_slice(triangles)),
+                buffer(bytemuck::cast_slice(colors)),
+                triangles.len() as u32,
+            )
         });
         self.request_redraw();
     }
@@ -821,9 +844,10 @@ impl Renderer {
                 pass.set_vertex_buffer(1, mesh.values.slice(..));
                 pass.set_index_buffer(mesh.triangles.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..mesh.triangle_indices, 0, 0..1);
-                if let Some((buffer, count)) = &self.highlight {
+                if let Some((positions, colors, count)) = &self.highlight {
                     pass.set_pipeline(&self.highlight_pipeline);
-                    pass.set_vertex_buffer(0, buffer.slice(..));
+                    pass.set_vertex_buffer(0, positions.slice(..));
+                    pass.set_vertex_buffer(1, colors.slice(..));
                     pass.draw(0..*count, 0..1);
                 }
                 pass.set_pipeline(&self.edge_pipeline);

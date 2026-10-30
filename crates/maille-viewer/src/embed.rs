@@ -5,7 +5,7 @@
 
 use std::error::Error;
 
-use crate::display::{Cut, Display};
+use crate::display::{Cut, Display, ShownSet};
 use crate::render::{Renderer, Theme};
 use crate::scene::{NodalResults, Scene};
 
@@ -93,6 +93,13 @@ impl ResultsView {
     /// une liste vide retire le surlignage.
     pub fn set_highlight(&mut self, triangles: Vec<[[f64; 3]; 3]>) {
         self.display.highlight = triangles;
+        self.refresh();
+    }
+
+    /// Montre ces Sets, chacun dans sa couleur RGB, en translucide sous le surlignage (sommets dans
+    /// les coordonnées de la pièce) ; une liste vide les retire.
+    pub fn set_sets(&mut self, sets: Vec<ShownSet>) {
+        self.display.sets = sets;
         self.refresh();
     }
 
