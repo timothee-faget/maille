@@ -9,9 +9,9 @@ use crate::display::{Cut, Display};
 use crate::render::{Renderer, Theme};
 use crate::scene::{NodalResults, Scene};
 
-/// Lacet et tangage des vues le long des axes x, y, z, en degrés (voir `Camera::axes`) : on regarde
-/// depuis +x, depuis +y (tangage limité à 89°, la caméra ne passe pas le pôle) et depuis +z.
-const VIEWS: [(f64, f64); 3] = [(90.0, 0.0), (0.0, 89.0), (0.0, 0.0)];
+/// Lacet et tangage des vues le long des axes x, y, z, en degrés (voir `Camera::look_from`) : on
+/// regarde depuis +x, depuis +y et depuis +z.
+const VIEWS: [(f64, f64); 3] = [(90.0, 0.0), (0.0, 90.0), (0.0, 0.0)];
 
 pub struct ResultsView {
     display: Display,
@@ -127,8 +127,9 @@ impl ResultsView {
             return;
         }
         let (yaw, pitch) = VIEWS[axis.min(2)];
-        self.display.camera.yaw = yaw.to_radians();
-        self.display.camera.pitch = pitch.to_radians();
+        self.display
+            .camera
+            .look_from(yaw.to_radians(), pitch.to_radians());
         self.fit();
     }
 

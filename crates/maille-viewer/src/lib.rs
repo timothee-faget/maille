@@ -140,8 +140,9 @@ fn render_shot(
             fraction: fraction.clamp(0.0, 1.0),
             flipped: false,
         });
-    display.camera.yaw = shot.yaw.to_radians();
-    display.camera.pitch = shot.pitch.to_radians();
+    display
+        .camera
+        .look_from(shot.yaw.to_radians(), shot.pitch.to_radians());
     let mut renderer = render::Renderer::new_offscreen(shot.width, shot.height, display.colormap)?;
     renderer.set_theme(theme);
     display.refit(&renderer);
@@ -437,6 +438,31 @@ mod tests {
         fresh.set_quantity(7);
         fresh.look_along(0);
         assert_eq!(view.pixels(), fresh.pixels());
+    }
+
+    #[test]
+    fn a_close_camera_does_not_cut_the_part() {
+        // pièce poussée hors du cadre puis zoom au bord de la fenêtre : la cible est loin du cube ;
+        // un quart de tour met cet écart dans l'axe de vue, et le cube doit rester dessiné au centre,
+        // sans coupe parallèle à l'écran
+        let shot = Shot::default();
+        let Some(mut view) = embedded(&cube_results(), [shot.width, shot.height]) else {
+            return;
+        };
+        view.set_quantity(7);
+        view.drag([-1000.0, 0.0], true);
+        view.zoom_at(
+            4.0,
+            [f64::from(shot.width) - 5.0, f64::from(shot.height) / 2.0],
+        );
+        view.drag([157.0, 0.0], false);
+        // on regarde la face x = −1, où |u| est nul
+        let (cx, cy) = center(&shot);
+        assert_color(
+            pixel(&view.pixels(), &shot, cx, cy),
+            Colormap::Rainbow.lut()[0],
+            "face x = -1",
+        );
     }
 
     #[test]

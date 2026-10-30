@@ -83,7 +83,7 @@ impl Display {
     }
 
     /// Envoie au GPU la géométrie, le champ, la caméra et la légende courants.
-    pub fn refresh(&self, renderer: &mut Renderer) {
+    pub fn refresh(&mut self, renderer: &mut Renderer) {
         let values = self.scene.values(self.quantity);
         let (lo, hi) = self.range_lock.unwrap_or_else(|| range(&values));
         let scale = self.deformation_scale();
@@ -144,6 +144,8 @@ impl Display {
                 .collect::<Vec<_>>(),
         );
         renderer.set_range((lo, hi));
+        // la déformée ou un autre Increment peut déborder de la boîte du dernier cadrage
+        self.camera.enclose(self.scene.bounds(scale));
         renderer.set_camera(&self.camera);
         let layout = legend::layout(
             renderer.size(),
