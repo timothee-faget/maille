@@ -796,6 +796,12 @@ impl App {
                             }
                         }
                     }
+                    Tool::ShowSets => match self.results.as_mut() {
+                        Some(open) => results_ui::sets_tool(ui, open),
+                        None => {
+                            ui.label("Ouvre d'abord un calcul (outil « Ouvrir »).");
+                        }
+                    },
                     Tool::Field | Tool::Deformation | Tool::Cut => match self.results.as_mut() {
                         Some(open) => results_tool(ui, tool, open),
                         None => {
@@ -1702,15 +1708,7 @@ fn manage_sets_tool(ui: &mut egui::Ui, mesh: &mut MeshUi) -> Option<Todo> {
         let set = &built.file.sets[name];
         ui.weak(format!(
             "    sur le maillage : {}",
-            if !set.elements.is_empty() {
-                format!("{} Elements", set.elements.len())
-            } else if !set.faces.is_empty() {
-                format!("{} faces", set.faces.len())
-            } else if !set.edges.is_empty() {
-                format!("{} arêtes", set.edges.len())
-            } else {
-                format!("{} Nodes", set.nodes.len())
-            }
+            mesh_pick::describe(set)
         ));
     }
     if let Some(name) = mesh
@@ -1791,6 +1789,7 @@ fn icon(item: Item) -> Lucide {
             Tool::Field => Lucide::Palette,
             Tool::Deformation => Lucide::Spline,
             Tool::Cut => Lucide::Scissors,
+            Tool::ShowSets => Lucide::Layers,
             Tool::Probe => Lucide::Crosshair,
             Tool::Increments => Lucide::Clock,
             Tool::Curve => Lucide::ChartSpline,
@@ -1895,6 +1894,7 @@ fn results_tool(ui: &mut egui::Ui, tool: Tool, open: &mut Open) {
                 if ui.checkbox(&mut deformed, "Montrer la déformée").changed() {
                     open.view.set_deformed(deformed);
                     open.refresh_marker();
+                    open.refresh_sets();
                 }
             } else {
                 ui.label("Ce calcul n'a pas de déplacements (thermique).");

@@ -51,6 +51,7 @@ pub enum Tool {
     Field,
     Deformation,
     Cut,
+    ShowSets,
     Probe,
     Increments,
     Curve,
@@ -79,6 +80,7 @@ impl Tool {
             Tool::Field => "Champ",
             Tool::Deformation => "Déformée",
             Tool::Cut => "Coupe",
+            Tool::ShowSets => "Sets",
             Tool::Probe => "Sonde",
             Tool::Increments => "Increments",
             Tool::Curve => "Courbe XY",
@@ -109,6 +111,7 @@ impl Tool {
                 | Tool::Field
                 | Tool::Deformation
                 | Tool::Cut
+                | Tool::ShowSets
                 | Tool::Probe
                 | Tool::Increments
                 | Tool::Curve
@@ -182,7 +185,7 @@ pub fn toolbar(space: Space) -> Vec<Group> {
         ],
         Space::Results => vec![
             group(&[Tool::Open]),
-            group(&[Tool::Field, Tool::Deformation, Tool::Cut]),
+            group(&[Tool::Field, Tool::Deformation, Tool::Cut, Tool::ShowSets]),
             group(&[Tool::Probe, Tool::Increments, Tool::Curve, Tool::Capture]),
         ],
     };
