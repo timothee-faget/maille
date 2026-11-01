@@ -63,15 +63,24 @@ pub fn layout(
         Colormap::Rainbow => RAINBOW_BANDS,
         Colormap::Viridis => VIRIDIS_TICKS - 1,
     };
-    let ticks = (0..=intervals)
-        .map(|k| {
-            let t = k as f64 / intervals as f64;
-            Tick {
-                y: bar[3] - t * (bar[3] - bar[1]),
-                label: format_value(range.0 + t * (range.1 - range.0)),
-            }
-        })
-        .collect();
+    // champ constant : une seule graduation, au milieu, plutôt que la même valeur à chaque limite
+    let constant = (range.1 - range.0).abs() <= 1e-9 * range.0.abs().max(range.1.abs());
+    let ticks = if constant {
+        vec![Tick {
+            y: (bar[1] + bar[3]) / 2.0,
+            label: format_value(range.0),
+        }]
+    } else {
+        (0..=intervals)
+            .map(|k| {
+                let t = k as f64 / intervals as f64;
+                Tick {
+                    y: bar[3] - t * (bar[3] - bar[1]),
+                    label: format_value(range.0 + t * (range.1 - range.0)),
+                }
+            })
+            .collect()
+    };
     Layout {
         title: [left, scale * MARGIN],
         bar,
@@ -118,6 +127,16 @@ mod tests {
         // limite entre la 1re et la 2e bande : min + (max − min) / 12 = 10
         assert_eq!(l.ticks[1].label, "+1.000e+01");
         assert!((l.bar[3] - l.bar[1] - BAR_MAX_HEIGHT).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_constant_field_has_a_single_tick_in_the_middle_of_the_bar() {
+        for range in [(0.134, 0.134), (0.0, 0.0), (-5.0, -5.0)] {
+            let l = layout([800.0, 900.0], range, Colormap::Rainbow, 1.0, 1);
+            assert_eq!(l.ticks.len(), 1);
+            assert_eq!(l.ticks[0].label, format_value(range.0));
+            assert!((l.ticks[0].y - (l.bar[1] + l.bar[3]) / 2.0).abs() < 1e-9);
+        }
     }
 
     #[test]
