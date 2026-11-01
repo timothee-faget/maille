@@ -42,6 +42,9 @@ pub struct Display {
     /// Intervalle de la légende imposé (animation : la même échelle à chaque Increment) ; sinon celui
     /// des valeurs affichées.
     pub range_lock: Option<(f64, f64)>,
+    /// Titre et intervalle de la dernière légende, pour un client qui la dessine lui-même.
+    pub legend_title: String,
+    pub legend_range: (f64, f64),
 }
 
 impl Display {
@@ -57,6 +60,8 @@ impl Display {
             highlight: Vec::new(),
             sets: Vec::new(),
             range_lock: None,
+            legend_title: String::new(),
+            legend_range: (0.0, 1.0),
         }
     }
 
@@ -176,6 +181,8 @@ impl Display {
             title.lines().count(),
         );
         renderer.set_legend(&layout, &title);
+        self.legend_title = title;
+        self.legend_range = (lo, hi);
     }
 }
 

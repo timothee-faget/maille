@@ -5,6 +5,7 @@
 mod app;
 pub mod compute;
 pub mod files;
+mod legend_ui;
 pub mod library;
 pub mod mesh_pick;
 pub mod mesh_space;

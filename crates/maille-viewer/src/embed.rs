@@ -7,6 +7,7 @@ use std::error::Error;
 
 use crate::colormap::Colormap;
 use crate::display::{Cut, Display, ShownSet};
+use crate::legend::{self, Legend};
 use crate::render::{Renderer, Theme};
 use crate::scene::{NodalResults, Scene};
 
@@ -55,6 +56,27 @@ impl ResultsView {
             format: Some(wgpu::TextureFormat::Rgba8Unorm),
             ..Default::default()
         })
+    }
+
+    /// Ce que montre la légende, pour la dessiner côté client (voir `set_legend_visible`).
+    pub fn legend(&self) -> Legend {
+        Legend {
+            title: self.display.legend_title.clone(),
+            ticks: legend::ticks(self.display.legend_range, self.display.colormap),
+            colors: self
+                .display
+                .colormap
+                .lut()
+                .iter()
+                .map(|c| [c[0], c[1], c[2]])
+                .collect(),
+        }
+    }
+
+    /// Dessine ou non la légende dans la texture (oui au départ). Un client qui la dessine lui-même
+    /// la retire ici ; la place qu'elle réserve à gauche de la pièce reste.
+    pub fn set_legend_visible(&mut self, visible: bool) {
+        self.renderer.set_legend_visible(visible);
     }
 
     /// Dessine l'image courante dans la texture.
