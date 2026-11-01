@@ -13,6 +13,7 @@ use maille_viewer::{Cut, NodalResults, ResultsView, Theme};
 
 use crate::compute::{ComputeState, Job, Running};
 use crate::files::{self, Written};
+use crate::legend_ui;
 use crate::library;
 use crate::mesh_pick::{self, Rect as PickRect};
 use crate::mesh_space::{self, Built, Cad, Imported};
@@ -1452,6 +1453,17 @@ impl App {
         }
     }
 
+    /// La légende du champ montré, en haut à gauche : une carte, comme les autres panneaux.
+    fn legend_card(&mut self, ctx: &egui::Context) {
+        let height = ctx.content_rect().height();
+        let Some(open) = self.view_mut() else {
+            return;
+        };
+        // la barre laisse sa place à la carte du parcours, en bas
+        let max_bar = (height - 380.0).clamp(80.0, 300.0);
+        legend_ui::card(ctx, &open.view.legend(), max_bar, [GAP, GAP]);
+    }
+
     /// Carte du parcours : la liste de contrôle de l'espace, désactivable.
     fn card(&mut self, ctx: &egui::Context) {
         if !self.state.cards {
@@ -1499,7 +1511,9 @@ impl App {
 
 /// Montre `nodal` : une vue du viewer sur le device d'eframe, et sa texture côté egui.
 fn open_view(gpu: &RenderState, nodal: &NodalResults, path: &Path) -> Result<Open, Box<dyn Error>> {
-    let view = ResultsView::new(gpu.device.clone(), gpu.queue.clone(), nodal, [1, 1], 1.0)?;
+    let mut view = ResultsView::new(gpu.device.clone(), gpu.queue.clone(), nodal, [1, 1], 1.0)?;
+    // la légende est une carte de l'interface (`legend_ui`), pas un dessin de la texture
+    view.set_legend_visible(false);
     let texture = gpu.renderer.write().register_native_texture(
         &gpu.device,
         &view.egui_view(),
@@ -2053,6 +2067,7 @@ impl eframe::App for App {
         }
         self.sync_highlight();
         self.spaces(&ctx);
+        self.legend_card(&ctx);
         self.card(&ctx);
         self.toolbar(&ctx);
         self.inspector(&ctx, frame);

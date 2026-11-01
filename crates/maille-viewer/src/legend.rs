@@ -21,6 +21,50 @@ pub const TITLE_FONT_SIZE: f64 = 16.0;
 /// Graduations de viridis, réparties régulièrement (l'arc-en-ciel en a une par limite de bande).
 const VIRIDIS_TICKS: usize = 6;
 
+/// Ce que montre la légende, pour un client qui la dessine lui-même (l'interface graphique) :
+/// les lignes du titre, les graduations et la table de couleurs (du minimum au maximum).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Legend {
+    /// Une ligne par `\n` : le champ, puis la déformée et la coupe s'il y en a.
+    pub title: String,
+    pub ticks: Vec<LegendTick>,
+    /// Couleurs sRGB, sans interpolation, du minimum (premier) au maximum (dernier).
+    pub colors: Vec<[u8; 3]>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LegendTick {
+    /// Position sur la barre : 0 au minimum, 1 au maximum.
+    pub fraction: f64,
+    pub label: String,
+}
+
+/// Les graduations d'un champ de (min, max) = `range` : une par limite de bande en arc-en-ciel, six
+/// régulières en viridis, une seule au milieu si le champ est constant.
+pub fn ticks(range: (f64, f64), colormap: Colormap) -> Vec<LegendTick> {
+    // champ constant : une seule graduation, au milieu, plutôt que la même valeur à chaque limite
+    let constant = (range.1 - range.0).abs() <= 1e-9 * range.0.abs().max(range.1.abs());
+    if constant {
+        return vec![LegendTick {
+            fraction: 0.5,
+            label: format_value(range.0),
+        }];
+    }
+    let intervals = match colormap {
+        Colormap::Rainbow => RAINBOW_BANDS,
+        Colormap::Viridis => VIRIDIS_TICKS - 1,
+    };
+    (0..=intervals)
+        .map(|k| {
+            let fraction = k as f64 / intervals as f64;
+            LegendTick {
+                fraction,
+                label: format_value(range.0 + fraction * (range.1 - range.0)),
+            }
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Tick {
     /// Ordonnée de la graduation sur la barre.
@@ -59,28 +103,13 @@ pub fn layout(
     let top = scale * (MARGIN + TITLE_HEIGHT + extra * TITLE_LINE);
     let height = (scale * BAR_MAX_HEIGHT).min(size[1] - top - scale * MARGIN);
     let bar = [left, top, left + scale * BAR_WIDTH, top + height.max(0.0)];
-    let intervals = match colormap {
-        Colormap::Rainbow => RAINBOW_BANDS,
-        Colormap::Viridis => VIRIDIS_TICKS - 1,
-    };
-    // champ constant : une seule graduation, au milieu, plutôt que la même valeur à chaque limite
-    let constant = (range.1 - range.0).abs() <= 1e-9 * range.0.abs().max(range.1.abs());
-    let ticks = if constant {
-        vec![Tick {
-            y: (bar[1] + bar[3]) / 2.0,
-            label: format_value(range.0),
-        }]
-    } else {
-        (0..=intervals)
-            .map(|k| {
-                let t = k as f64 / intervals as f64;
-                Tick {
-                    y: bar[3] - t * (bar[3] - bar[1]),
-                    label: format_value(range.0 + t * (range.1 - range.0)),
-                }
-            })
-            .collect()
-    };
+    let ticks = ticks(range, colormap)
+        .into_iter()
+        .map(|t| Tick {
+            y: bar[3] - t.fraction * (bar[3] - bar[1]),
+            label: t.label,
+        })
+        .collect();
     Layout {
         title: [left, scale * MARGIN],
         bar,

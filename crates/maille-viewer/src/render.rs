@@ -102,6 +102,7 @@ pub struct Renderer {
     legend_fill_pipeline: wgpu::RenderPipeline,
     legend_line_pipeline: wgpu::RenderPipeline,
     legend: Option<LegendBuffers>,
+    legend_visible: bool,
     /// Triangles surlignés par-dessus le Mesh : positions, couleurs (RGBA) et nombre de sommets.
     highlight_pipeline: wgpu::RenderPipeline,
     highlight: Option<(wgpu::Buffer, wgpu::Buffer, u32)>,
@@ -475,6 +476,7 @@ impl Renderer {
             legend_fill_pipeline,
             legend_line_pipeline,
             legend: None,
+            legend_visible: true,
             highlight_pipeline,
             highlight: None,
             text,
@@ -493,6 +495,11 @@ impl Renderer {
             Target::Window { window, .. } => window.scale_factor(),
             Target::Offscreen { scale, .. } => *scale,
         }
+    }
+
+    /// Montre ou cache la légende ; son dessin et son texte sont alors sautés.
+    pub fn set_legend_visible(&mut self, visible: bool) {
+        self.legend_visible = visible;
     }
 
     /// Légende : barre de couleurs et graduations de `layout`, et `title` au-dessus (une ligne par
@@ -814,7 +821,7 @@ impl Renderer {
 
     /// Enregistre le dessin de l'image dans `view` : Mesh, contour, légende, texte.
     fn encode(&mut self, view: &wgpu::TextureView) -> wgpu::CommandEncoder {
-        let text_ready = self.prepare_text();
+        let text_ready = self.legend_visible && self.prepare_text();
         let mut encoder = self.device.create_command_encoder(&Default::default());
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -856,7 +863,7 @@ impl Renderer {
                 pass.draw(0..mesh.line_vertices, 0..1);
             }
             // légende par-dessus le Mesh
-            if let Some(legend) = &self.legend {
+            if let Some(legend) = self.legend.as_ref().filter(|_| self.legend_visible) {
                 pass.set_vertex_buffer(0, legend.positions.slice(..));
                 pass.set_vertex_buffer(1, legend.values.slice(..));
                 pass.set_pipeline(&self.legend_fill_pipeline);

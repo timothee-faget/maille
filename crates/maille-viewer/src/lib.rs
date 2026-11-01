@@ -20,6 +20,7 @@ mod vec3;
 
 pub use display::{Cut, ShownSet};
 pub use embed::ResultsView;
+pub use legend::{Legend, LegendTick};
 pub use render::Theme;
 pub use scene::NodalResults;
 
@@ -323,6 +324,30 @@ mod tests {
         let mut view = embedded_as_opened(results, size)?;
         view.next_colormap();
         Some(view)
+    }
+
+    #[test]
+    fn an_embedded_view_gives_its_legend_and_can_hide_it() {
+        let size = [400, 300];
+        let Some(mut view) = embedded_as_opened(&cube_results(), size) else {
+            return;
+        };
+        view.set_quantity(7);
+        // viridis à l'ouverture : six graduations, du minimum (0) au maximum (1), 256 couleurs
+        let legend = view.legend();
+        assert_eq!(legend.ticks.len(), 6);
+        assert!((legend.ticks[0].fraction - 0.0).abs() < 1e-12);
+        assert!((legend.ticks[5].fraction - 1.0).abs() < 1e-12);
+        assert_eq!(legend.colors.len(), 256);
+        assert!(!legend.title.is_empty());
+        // la cacher change l'image (la barre et le texte ne sont plus dessinés), pas le cadrage
+        let shown = view.pixels();
+        view.set_legend_visible(false);
+        let hidden = view.pixels();
+        assert_ne!(shown, hidden);
+        assert_eq!(view.legend(), legend);
+        view.set_legend_visible(true);
+        assert_eq!(view.pixels(), shown);
     }
 
     #[test]
