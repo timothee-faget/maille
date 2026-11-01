@@ -5,6 +5,7 @@
 
 use std::error::Error;
 
+use crate::colormap::Colormap;
 use crate::display::{Cut, Display, ShownSet};
 use crate::render::{Renderer, Theme};
 use crate::scene::{NodalResults, Scene};
@@ -29,7 +30,9 @@ impl ResultsView {
         size: [u32; 2],
         scale: f64,
     ) -> Result<Self, Box<dyn Error>> {
-        let display = Display::new(Scene::from_nodal(results)?);
+        let mut display = Display::new(Scene::from_nodal(results)?);
+        // viridis par défaut dans l'interface : perceptuellement uniforme, lisible par les daltoniens
+        display.colormap = Colormap::Viridis;
         let renderer =
             Renderer::new_shared(device, queue, size[0], size[1], scale, display.colormap);
         let mut view = Self { display, renderer };

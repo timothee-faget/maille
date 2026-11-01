@@ -6,8 +6,8 @@
 //! erreurs : un état « pas encore fait » est neutre (`Palette::pending`).
 
 use eframe::egui::{
-    self, Color32, CornerRadius, FontFamily, FontId, Margin, Stroke, Style, TextStyle, Vec2,
-    Visuals,
+    self, Color32, CornerRadius, FontFamily, FontId, Margin, Shadow, Stroke, Style, TextStyle,
+    Vec2, Visuals,
 };
 
 /// Rayon des panneaux flottants, des cartes et des contrôles.
@@ -35,9 +35,10 @@ pub struct Palette {
     pub dark: bool,
     /// Fond de la vue, quand il n'y a rien à dessiner (même valeur que le fond du viewer).
     pub canvas: Color32,
-    /// Panneau flottant, et son contour.
+    /// Panneau flottant (opaque : la vue ne doit pas se lire à travers), son contour et son ombre.
     pub panel: Color32,
     pub panel_stroke: Color32,
+    pub shadow: Color32,
     /// Contrôle (bouton, champ) au repos, survolé, enfoncé ; fond d'un champ de saisie.
     pub control: Color32,
     pub control_hover: Color32,
@@ -80,8 +81,9 @@ pub fn palette(dark: bool) -> Palette {
         Palette {
             dark,
             canvas: Color32::from_rgb(37, 39, 43),
-            panel: Color32::from_rgba_unmultiplied(30, 31, 36, 236),
+            panel: Color32::from_rgb(30, 31, 36),
             panel_stroke: Color32::from_white_alpha(22),
+            shadow: Color32::from_black_alpha(110),
             control: Color32::from_white_alpha(14),
             control_hover: Color32::from_white_alpha(28),
             control_active: Color32::from_white_alpha(40),
@@ -105,8 +107,9 @@ pub fn palette(dark: bool) -> Palette {
         Palette {
             dark,
             canvas: Color32::from_rgb(204, 204, 204),
-            panel: Color32::from_rgba_unmultiplied(247, 247, 249, 240),
+            panel: Color32::from_rgb(247, 247, 249),
             panel_stroke: Color32::from_black_alpha(30),
+            shadow: Color32::from_black_alpha(48),
             control: Color32::from_black_alpha(10),
             control_hover: Color32::from_black_alpha(20),
             control_active: Color32::from_black_alpha(32),
@@ -137,6 +140,12 @@ pub fn panel_frame(visuals: &Visuals) -> egui::Frame {
         .corner_radius(CornerRadius::same(PANEL_RADIUS))
         .inner_margin(Margin::same(PANEL_MARGIN))
         .stroke(Stroke::new(1.0, p.panel_stroke))
+        .shadow(Shadow {
+            offset: [0, 4],
+            blur: 16,
+            spread: 0,
+            color: p.shadow,
+        })
 }
 
 /// Applique les deux thèmes à egui, une fois, au démarrage.
