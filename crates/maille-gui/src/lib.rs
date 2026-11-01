@@ -17,6 +17,7 @@ pub mod series;
 pub mod sets;
 mod settings;
 pub mod state;
+pub mod theme;
 mod triad;
 
 use std::error::Error;
@@ -38,6 +39,7 @@ pub fn run(open: Option<PathBuf>) -> Result<(), Box<dyn Error>> {
         Box::new(move |cc| {
             // les icônes sont des SVG
             egui_extras::install_image_loaders(&cc.egui_ctx);
+            theme::install(&cc.egui_ctx);
             Ok(Box::new(app::App::new(open)))
         }),
     )
