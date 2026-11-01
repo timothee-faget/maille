@@ -468,23 +468,13 @@ impl App {
         // « Cadre → Set » : le glisser trace un cadre au lieu de tourner la vue
         let box_tool = self.state.space == Space::Mesh && self.state.tool() == Tool::VertexSets;
         let box_start = self.mesh.box_start;
-        let invitation = match self.state.space {
-            Space::Results => {
-                "Dépose un fichier .pvd ou .vtu ici,\nou ouvre-le avec l'outil « Ouvrir »"
-            }
-            _ => {
-                "Dépose un dessin .dxf, une surface .stl, une pièce .step\nou un maillage .msh ici, ou utilise l'outil « Importer »"
-            }
-        };
         let dark = ui.visuals().dark_mode;
         let (Some(open), Some(gpu)) = (self.view_mut(), frame.wgpu_render_state()) else {
-            ui.painter().text(
-                full.center(),
-                Align2::CENTER_CENTER,
-                invitation,
-                egui::FontId::proportional(theme::SIZE_INVITATION),
-                ui.visuals().weak_text_color(),
-            );
+            // centré sur la fenêtre, comme la barre d'espaces, et dans la hauteur libre
+            let center = Pos2::new(full.center().x, rect.center().y);
+            if let Some(path) = empty_state(ui, center, self.state.space) {
+                self.pending = Some(path);
+            }
             return None;
         };
         let pixels = [
@@ -1792,6 +1782,43 @@ fn quality_tool(ui: &mut egui::Ui, mesh: &MeshUi) {
         );
     }
     ui.weak("1 : triangle équilatéral ou tétraèdre régulier. La vue colore le défaut de forme (1 − qualité) : rouge pour un Element écrasé, au pire Element de chaque Node.");
+}
+
+/// La vue d'un espace qui n'a rien à montrer, centrée sur `center`. Rend le fichier choisi au
+/// sélecteur du système, rien tant qu'on n'a pas cliqué ou si on annule.
+fn empty_state(ui: &mut egui::Ui, center: Pos2, space: Space) -> Option<PathBuf> {
+    let (icon, title, hint, action, kind, extensions): (_, _, _, _, _, &[&str]) = match space {
+        Space::Results => (
+            Lucide::FolderOpen,
+            "Aucun résultat à montrer",
+            "Ouvre un calcul (.pvd ou .vtu) pour voir\nles contraintes, les déplacements ou les températures.",
+            "Ouvrir un calcul…",
+            "Résultats",
+            &["pvd", "vtu"],
+        ),
+        _ => (
+            Lucide::FileInput,
+            "Aucune géométrie",
+            "Importe un dessin .dxf, une surface .stl,\nune pièce .step ou un maillage .msh.",
+            "Importer…",
+            "Géométrie ou maillage",
+            &["dxf", "stl", "step", "stp", "msh"],
+        ),
+    };
+    let area = Rect::from_center_size(center, Vec2::new(380.0, 260.0));
+    let mut inner = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(area)
+            .layout(egui::Layout::top_down(egui::Align::Center)),
+    );
+    let clicked = widgets::empty_state(&mut inner, icon, title, hint, action);
+    if clicked {
+        rfd::FileDialog::new()
+            .add_filter(kind, extensions)
+            .pick_file()
+    } else {
+        None
+    }
 }
 
 /// Bouton « Parcourir… » : le sélecteur de fichier du système, limité à ces extensions. Rend le
