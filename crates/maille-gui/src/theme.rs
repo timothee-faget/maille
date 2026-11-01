@@ -192,6 +192,10 @@ fn apply(style: &mut Style, p: &Palette) {
         state.expansion = 0.0;
     }
     w.noninteractive.corner_radius = radius;
+    // cases, ronds et rails de curseur (`bg_fill`) plus marqués que les boutons (`weak_bg_fill`), pour
+    // se voir sur le fond d'une section, qui a la couleur d'un bouton
+    w.inactive.bg_fill = p.control_active;
+    w.hovered.bg_fill = p.control_active;
 
     let s = &mut style.spacing;
     s.item_spacing = Vec2::new(SPACE_M, 6.0);

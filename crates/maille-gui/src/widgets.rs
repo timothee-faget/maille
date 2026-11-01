@@ -240,3 +240,40 @@ pub fn empty_state(ui: &mut Ui, icon: Lucide, title: &str, hint: &str, action: &
     );
     clicked
 }
+
+/// Une section d'un inspecteur : un titre discret, puis son contenu dans un cadre en retrait.
+pub fn section<R>(ui: &mut Ui, title: &str, add_contents: impl FnOnce(&mut Ui) -> R) -> R {
+    let p = Palette::of(ui.visuals());
+    ui.add_space(theme::SPACE_S);
+    ui.label(RichText::new(title).small().color(p.text_weak));
+    egui::Frame::new()
+        .fill(p.control)
+        .corner_radius(CornerRadius::same(theme::CONTROL_RADIUS + 2))
+        .inner_margin(egui::Margin::same(10))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            add_contents(ui)
+        })
+        .inner
+}
+
+/// Une ligne de formulaire : le libellé à gauche, le contrôle aligné à droite. Pour un libellé
+/// court (moins de la moitié de la largeur) ; un contrôle large ou un libellé long va sur sa propre
+/// ligne, sous un `ui.label`.
+pub fn field<R>(ui: &mut Ui, label: &str, add_control: impl FnOnce(&mut Ui) -> R) -> R {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        ui.with_layout(Layout::right_to_left(Align::Center), add_control)
+            .inner
+    })
+    .inner
+}
+
+/// Le suffixe d'une unité pour un champ numérique : « MPa » donne « " MPa" », rien reste rien.
+pub fn unit_suffix(unit: &str) -> String {
+    if unit.is_empty() {
+        String::new()
+    } else {
+        format!(" {unit}")
+    }
+}
