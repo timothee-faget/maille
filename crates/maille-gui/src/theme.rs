@@ -26,8 +26,6 @@ const SIZE_HEADING: f32 = 15.0;
 const SIZE_BODY: f32 = 13.5;
 const SIZE_SMALL: f32 = 11.5;
 const SIZE_MONO: f32 = 12.0;
-/// Texte d'invitation d'une vue vide.
-pub const SIZE_INVITATION: f32 = 16.0;
 
 /// Les couleurs d'un thème. Les fonds translucides sont en alpha non prémultiplié.
 #[derive(Clone, Copy, Debug)]

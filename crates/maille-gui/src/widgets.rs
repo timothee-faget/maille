@@ -17,6 +17,9 @@ const TOOL_ICON_SIZE: f32 = 18.0;
 const ROW_PADDING: f32 = 8.0;
 const DOT: f32 = 10.0;
 const SEGMENT_HEIGHT: f32 = 28.0;
+/// Tuile et icône de l'état vide.
+const EMPTY_TILE: f32 = 64.0;
+const EMPTY_ICON: f32 = 28.0;
 
 /// L'en-tête d'un panneau : son titre, un bouton qui le ferme ou le masque (rend `true` au clic),
 /// puis un filet.
@@ -207,4 +210,33 @@ pub fn tool_button(
         }
     }
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// L'état d'une vue qui n'a encore rien à montrer : une icône dans une tuile, un titre, une phrase
+/// d'aide, l'action principale (rend `true` au clic) et le rappel qu'on peut déposer un fichier.
+pub fn empty_state(ui: &mut Ui, icon: Lucide, title: &str, hint: &str, action: &str) -> bool {
+    let p = Palette::of(ui.visuals());
+    let (tile, _) = ui.allocate_exact_size(Vec2::splat(EMPTY_TILE), Sense::hover());
+    ui.painter()
+        .rect_filled(tile, CornerRadius::same(theme::PANEL_RADIUS), p.control);
+    icon.size(EMPTY_ICON)
+        .color(p.text_weak)
+        .stroke_width(1.5)
+        .image()
+        .paint_at(
+            ui,
+            egui::Rect::from_center_size(tile.center(), Vec2::splat(EMPTY_ICON)),
+        );
+    ui.add_space(theme::SPACE_L);
+    ui.heading(title);
+    ui.add(egui::Label::new(RichText::new(hint).color(p.text_weak)).halign(Align::Center));
+    ui.add_space(theme::SPACE_M);
+    let clicked = primary_button(ui, action).clicked();
+    ui.add_space(theme::SPACE_S);
+    ui.label(
+        RichText::new("Ou dépose le fichier sur la fenêtre.")
+            .small()
+            .color(p.text_weak),
+    );
+    clicked
 }
