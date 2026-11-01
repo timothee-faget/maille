@@ -309,12 +309,35 @@ mod tests {
 
     /// Vue embarquée sur son propre device (comme le ferait l'interface graphique) ; `None` sans carte
     /// graphique.
-    fn embedded(results: &NodalResults, size: [u32; 2]) -> Option<ResultsView> {
+    fn embedded_as_opened(results: &NodalResults, size: [u32; 2]) -> Option<ResultsView> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()?;
         Some(ResultsView::new(device, queue, results, size, 1.0).unwrap())
+    }
+
+    /// Comme `embedded_as_opened`, en arc-en-ciel : la colormap de la capture d'écran, pour comparer
+    /// les mêmes pixels (une vue embarquée s'ouvre en viridis).
+    fn embedded(results: &NodalResults, size: [u32; 2]) -> Option<ResultsView> {
+        let mut view = embedded_as_opened(results, size)?;
+        view.next_colormap();
+        Some(view)
+    }
+
+    #[test]
+    fn an_embedded_view_opens_in_viridis_not_in_the_rainbow() {
+        let size = [300, 200];
+        let (Some(mut opened), Some(mut rainbow)) = (
+            embedded_as_opened(&cube_results(), size),
+            embedded(&cube_results(), size),
+        ) else {
+            return;
+        };
+        assert_ne!(opened.pixels(), rainbow.pixels());
+        // une bascule ramène la vue ouverte à l'arc-en-ciel
+        opened.next_colormap();
+        assert_eq!(opened.pixels(), rainbow.pixels());
     }
 
     #[test]

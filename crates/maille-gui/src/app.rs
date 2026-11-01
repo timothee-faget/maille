@@ -1493,7 +1493,7 @@ impl App {
         let mut close = false;
         panel("card", Align2::LEFT_BOTTOM, [GAP, -GAP]).show(ctx, |ui| {
             floating(ui).show(ui, |ui| {
-                ui.set_width(220.0);
+                ui.set_width(260.0);
                 close = widgets::panel_header(ui, space.label(), Lucide::X, "Masquer les cartes");
                 let required = steps.iter().filter(|s| !s.optional);
                 let done = required
