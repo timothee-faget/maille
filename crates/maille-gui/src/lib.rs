@@ -19,6 +19,7 @@ mod settings;
 pub mod state;
 pub mod theme;
 mod triad;
+mod widgets;
 
 use std::error::Error;
 use std::path::PathBuf;

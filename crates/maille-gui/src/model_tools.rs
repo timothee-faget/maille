@@ -17,6 +17,7 @@ use crate::compute::ComputeState;
 use crate::library;
 use crate::model_space::{Diagnostic, Draft, MaterialForm, Region, Severity, UnitSystem};
 use crate::state::Tool;
+use crate::widgets;
 
 /// Un formulaire « Set, DOF, valeur » pour ajouter une BC ou un Load.
 #[derive(Debug, Clone)]
@@ -686,8 +687,7 @@ pub fn run_tool(
     }
     ui.separator();
     let idle = !compute.is_running();
-    request.run = ui
-        .add_enabled(!blocked && idle, egui::Button::new("▶ Calculer"))
+    request.run = widgets::primary_button_enabled(ui, !blocked && idle, "▶ Calculer")
         .on_hover_text("Enregistre le modèle puis lance le calcul de `maille solve`")
         .clicked();
     match compute {

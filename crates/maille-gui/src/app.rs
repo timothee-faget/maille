@@ -27,6 +27,7 @@ use crate::settings::{self, ThemeChoice};
 use crate::state::{Action, Item, Space, State, Status, Tool};
 use crate::theme::{self, Palette};
 use crate::triad;
+use crate::widgets::{self, status_dot};
 
 const GAP: f32 = 12.0;
 const TOOLBAR_WIDTH: f32 = 36.0;
@@ -674,23 +675,12 @@ impl App {
         .show(ctx, |ui| {
             floating(ui).show(ui, |ui| {
                 ui.set_width(INSPECTOR_WIDTH);
-                ui.horizontal(|ui| {
-                    ui.heading(tool.label());
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let close = egui::Button::image(
-                            Lucide::PanelRightClose
-                                .size(ICON_SIZE)
-                                .color(ui.visuals().weak_text_color())
-                                .image(),
-                        )
-                        .frame(false);
-                        let tip = "Masquer (un clic sur l'outil le remontre)";
-                        if ui.add(close).on_hover_text(tip).clicked() {
-                            hide = true;
-                        }
-                    });
-                });
-                ui.separator();
+                hide = widgets::panel_header(
+                    ui,
+                    tool.label(),
+                    Lucide::PanelRightClose,
+                    "Masquer (un clic sur l'outil le remontre)",
+                );
                 match tool {
                     Tool::Navigate => {
                         ui.label(
@@ -706,7 +696,9 @@ impl App {
                         }
                         ui.label("Fichier .pvd ou .vtu :");
                         ui.text_edit_singleline(&mut self.path);
-                        if ui.button("Ouvrir").clicked() && !self.path.trim().is_empty() {
+                        if widgets::primary_button(ui, "Ouvrir").clicked()
+                            && !self.path.trim().is_empty()
+                        {
                             todo = Some(Todo::Open(PathBuf::from(self.path.trim())));
                         }
                         ui.weak("Ou dépose-le sur la fenêtre.");
@@ -722,7 +714,9 @@ impl App {
                         }
                         ui.label("Dessin .dxf, surface .stl, pièce .step ou maillage .msh :");
                         ui.text_edit_singleline(&mut self.mesh_path);
-                        if ui.button("Importer").clicked() && !self.mesh_path.trim().is_empty() {
+                        if widgets::primary_button(ui, "Importer").clicked()
+                            && !self.mesh_path.trim().is_empty()
+                        {
                             todo = Some(Todo::Import(PathBuf::from(self.mesh_path.trim())));
                         }
                         ui.weak("Ou dépose-le sur la fenêtre.");
@@ -1454,7 +1448,7 @@ impl App {
                         Palette::of(ui.visuals()).warn,
                         "Résultats périmés : le modèle a changé depuis ce calcul.",
                     );
-                    relaunch = ui.button("Relancer le calcul").clicked();
+                    relaunch = widgets::primary_button(ui, "Relancer le calcul").clicked();
                 });
             });
         });
@@ -1491,31 +1485,22 @@ impl App {
         panel("card", Align2::LEFT_BOTTOM, [GAP, -GAP]).show(ctx, |ui| {
             floating(ui).show(ui, |ui| {
                 ui.set_width(220.0);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(space.label()).strong());
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .small_button("×")
-                            .on_hover_text("Masquer les cartes")
-                            .clicked()
-                        {
-                            close = true;
-                        }
-                    });
-                });
-                ui.separator();
+                close = widgets::panel_header(ui, space.label(), Lucide::X, "Masquer les cartes");
+                let required = steps.iter().filter(|s| !s.optional);
+                let done = required
+                    .clone()
+                    .filter(|s| s.status == Status::Done)
+                    .count();
+                ui.weak(format!("{done} sur {}", required.count()));
                 for step in &steps {
-                    ui.horizontal(|ui| {
-                        status_dot(ui, step.status);
-                        let text = if step.optional {
-                            format!("{} (facultatif)", step.label)
-                        } else {
-                            step.label.to_string()
-                        };
-                        if ui.link(text).clicked() {
-                            clicked = Some(step.tool);
-                        }
-                    });
+                    let text = if step.optional {
+                        format!("{} (facultatif)", step.label)
+                    } else {
+                        step.label.to_string()
+                    };
+                    if widgets::step_row(ui, step.status, &text).clicked() {
+                        clicked = Some(step.tool);
+                    }
                 }
             });
         });
@@ -1582,7 +1567,7 @@ fn mesh_size_tool(ui: &mut egui::Ui, mesh: &mut MeshUi) -> Option<Todo> {
         &mut mesh.quadratic,
         "Elements du second ordre (Tri6, Tet10)",
     );
-    if ui.button("Mailler").clicked() {
+    if widgets::primary_button(ui, "Mailler").clicked() {
         todo = Some(Todo::Remesh);
     }
     if let Some(built) = &mesh.built {
@@ -1742,7 +1727,7 @@ fn manage_sets_tool(ui: &mut egui::Ui, mesh: &mut MeshUi) -> Option<Todo> {
     let mut todo = None;
     let pick = |ui: &mut egui::Ui, name: &str, inspected: &mut Option<String>| {
         let selected = inspected.as_deref() == Some(name);
-        if ui.selectable_label(selected, name).clicked() {
+        if widgets::choice_row(ui, selected, name).clicked() {
             *inspected = (!selected).then(|| name.to_string());
         }
     };
@@ -1912,31 +1897,13 @@ fn floating(ui: &egui::Ui) -> Frame {
     theme::panel_frame(ui.visuals())
 }
 
-fn status_dot(ui: &mut egui::Ui, status: Status) {
-    let p = Palette::of(ui.visuals());
-    let (rect, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
-    match status {
-        Status::Done => {
-            ui.painter().circle_filled(rect.center(), 4.5, p.ok);
-        }
-        Status::Warning => {
-            ui.painter().circle_filled(rect.center(), 4.5, p.warn);
-        }
-        // pas encore fait : un anneau neutre, le rouge reste pour les erreurs
-        Status::Missing => {
-            ui.painter()
-                .circle_stroke(rect.center(), 3.75, Stroke::new(1.5, p.pending));
-        }
-    }
-}
-
 /// Inspecteur des outils Champ, Déformée et Coupe : ils règlent la vue des résultats ouverts.
 fn results_tool(ui: &mut egui::Ui, tool: Tool, open: &mut Open) {
     match tool {
         Tool::Field => {
             let current = open.view.quantity();
             for (k, label) in open.view.quantities().into_iter().enumerate() {
-                if ui.selectable_label(current == k, label).clicked() {
+                if widgets::choice_row(ui, current == k, label).clicked() {
                     open.view.set_quantity(k);
                 }
             }
