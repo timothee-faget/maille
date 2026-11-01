@@ -31,6 +31,10 @@ use crate::widgets::{self, status_dot};
 
 const GAP: f32 = 12.0;
 const TOOLBAR_WIDTH: f32 = 36.0;
+/// Ce que les panneaux flottants fixes cachent de la vue : la barre d'espaces en haut, la barre
+/// d'outils à droite. La pièce est cadrée dans le reste.
+const VIEW_INSET_TOP: f32 = 68.0;
+const VIEW_INSET_RIGHT: f32 = GAP + TOOLBAR_WIDTH + 2.0 * theme::PANEL_MARGIN as f32 + 8.0;
 const ICON_SIZE: f32 = 18.0;
 /// Marge du trièdre d'orientation au coin bas droit de la vue, et sa taille.
 const TRIAD_MARGIN: f32 = 56.0;
@@ -453,7 +457,14 @@ impl App {
     /// Dessine la vue dans la zone libre et lit la souris. Sans résultats : une invitation.
     /// Rend le pixel et le Maj d'un clic dans la vue, pour désigner une entité.
     fn viewport(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) -> Option<([f64; 2], bool)> {
-        let rect = ui.max_rect();
+        let full = ui.max_rect();
+        let rect = Rect::from_min_max(
+            Pos2::new(full.min.x, full.min.y + VIEW_INSET_TOP),
+            Pos2::new(full.max.x - VIEW_INSET_RIGHT, full.max.y),
+        );
+        // le fond de la vue est celui du canvas : on ne voit pas où la vue s'arrête
+        let canvas = Palette::of(ui.visuals()).canvas;
+        ui.painter().rect_filled(full, 0.0, canvas);
         let ppp = ui.ctx().pixels_per_point();
         // « Cadre → Set » : le glisser trace un cadre au lieu de tourner la vue
         let box_tool = self.state.space == Space::Mesh && self.state.tool() == Tool::VertexSets;
@@ -468,10 +479,8 @@ impl App {
         };
         let dark = ui.visuals().dark_mode;
         let (Some(open), Some(gpu)) = (self.view_mut(), frame.wgpu_render_state()) else {
-            let fill = Palette::of(ui.visuals()).canvas;
-            ui.painter().rect_filled(rect, 0.0, fill);
             ui.painter().text(
-                rect.center(),
+                full.center(),
                 Align2::CENTER_CENTER,
                 invitation,
                 egui::FontId::proportional(theme::SIZE_INVITATION),
@@ -488,7 +497,7 @@ impl App {
             open.size = pixels;
             gpu.renderer.write().update_egui_texture_from_wgpu_texture(
                 &gpu.device,
-                &open.view.texture().create_view(&Default::default()),
+                &open.view.egui_view(),
                 wgpu::FilterMode::Linear,
                 open.texture,
             );
@@ -1518,7 +1527,7 @@ fn open_view(gpu: &RenderState, nodal: &NodalResults, path: &Path) -> Result<Ope
     let view = ResultsView::new(gpu.device.clone(), gpu.queue.clone(), nodal, [1, 1], 1.0)?;
     let texture = gpu.renderer.write().register_native_texture(
         &gpu.device,
-        &view.texture().create_view(&Default::default()),
+        &view.egui_view(),
         wgpu::FilterMode::Linear,
     );
     Ok(Open {

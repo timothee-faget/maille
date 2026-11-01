@@ -44,6 +44,16 @@ impl ResultsView {
             .expect("une vue embarquée dessine toujours dans une texture")
     }
 
+    /// La vue de la texture à donner à egui. egui attend des octets sRGB qu'il lit tels quels : une vue
+    /// `Rgba8UnormSrgb` (celle de `texture().create_view`) les décoderait en linéaire, et l'image
+    /// s'afficherait deux fois trop sombre.
+    pub fn egui_view(&self) -> wgpu::TextureView {
+        self.texture().create_view(&wgpu::TextureViewDescriptor {
+            format: Some(wgpu::TextureFormat::Rgba8Unorm),
+            ..Default::default()
+        })
+    }
+
     /// Dessine l'image courante dans la texture.
     pub fn draw(&mut self) {
         self.renderer.draw();

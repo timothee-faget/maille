@@ -192,7 +192,8 @@ fn offscreen_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Te
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT
             | wgpu::TextureUsages::COPY_SRC
             | wgpu::TextureUsages::TEXTURE_BINDING,
-        view_formats: &[],
+        // la vue non sRGB que `ResultsView::egui_view` donne à egui
+        view_formats: &[wgpu::TextureFormat::Rgba8Unorm],
     })
 }
 
