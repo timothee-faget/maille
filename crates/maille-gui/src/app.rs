@@ -652,6 +652,8 @@ impl App {
         let mut todo = None;
         let mut goto = None;
         let mut hide = false;
+        // le corps de l'inspecteur : la fenêtre moins l'en-tête, les marges et la ligne d'erreur
+        let max_body = (ctx.content_rect().height() - 140.0).max(160.0);
         panel(
             "inspector",
             Align2::RIGHT_CENTER,
@@ -660,189 +662,213 @@ impl App {
         .show(ctx, |ui| {
             floating(ui).show(ui, |ui| {
                 ui.set_width(INSPECTOR_WIDTH);
+                // sans plafond explicite, un panneau ancré ne sait pas combien de place il a
+                ui.set_max_height(max_body + 60.0);
                 hide = widgets::panel_header(
                     ui,
                     tool.label(),
                     Lucide::PanelRightClose,
                     "Masquer (un clic sur l'outil le remontre)",
                 );
-                match tool {
-                    Tool::Navigate => {
-                        ui.label(
-                            "Glisser : tourner (3D) ou déplacer (2D).\n\
+                // un formulaire long défile au lieu de sortir de la fenêtre
+                let scroll = egui::ScrollArea::vertical()
+                    // une zone par outil : la hauteur mesurée pour l'un ne vaut pas pour l'autre
+                    .id_salt(tool.label())
+                    .max_height(max_body)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| match tool {
+                        Tool::Navigate => {
+                            ui.label(
+                                "Glisser : tourner (3D) ou déplacer (2D).\n\
                              Maj + glisser ou clic droit : déplacer.\n\
                              Molette : zoomer. F : cadrer. X, Y, Z : vues.",
-                        );
-                    }
-                    Tool::Open => {
-                        if let Some(path) = browse(ui, "Résultats", &["pvd", "vtu"]) {
-                            self.path = path.display().to_string();
-                            todo = Some(Todo::Open(path));
-                        }
-                        ui.label("Fichier .pvd ou .vtu :");
-                        ui.text_edit_singleline(&mut self.path);
-                        if widgets::primary_button(ui, "Ouvrir").clicked()
-                            && !self.path.trim().is_empty()
-                        {
-                            todo = Some(Todo::Open(PathBuf::from(self.path.trim())));
-                        }
-                        ui.weak("Ou dépose-le sur la fenêtre.");
-                    }
-                    Tool::Import => {
-                        if let Some(path) = browse(
-                            ui,
-                            "Géométrie ou maillage",
-                            &["dxf", "stl", "step", "stp", "msh"],
-                        ) {
-                            self.mesh_path = path.display().to_string();
-                            todo = Some(Todo::Import(path));
-                        }
-                        ui.label("Dessin .dxf, surface .stl, pièce .step ou maillage .msh :");
-                        ui.text_edit_singleline(&mut self.mesh_path);
-                        if widgets::primary_button(ui, "Importer").clicked()
-                            && !self.mesh_path.trim().is_empty()
-                        {
-                            todo = Some(Todo::Import(PathBuf::from(self.mesh_path.trim())));
-                        }
-                        ui.weak("Ou dépose-le sur la fenêtre.");
-                        if let Some(built) = &self.mesh.built {
-                            ui.separator();
-                            ui.label(mesh_space::summary(built));
-                        }
-                    }
-                    Tool::MeshSize => {
-                        if let Some(t) = mesh_size_tool(ui, &mut self.mesh) {
-                            todo = Some(t);
-                        }
-                    }
-                    Tool::Quality => quality_tool(ui, &self.mesh),
-                    Tool::FaceSets => {
-                        if let Some(t) = face_sets_tool(ui, &mut self.mesh) {
-                            todo = Some(t);
-                        }
-                    }
-                    Tool::ManageSets => {
-                        if let Some(t) = manage_sets_tool(ui, &mut self.mesh) {
-                            todo = Some(t);
-                        }
-                    }
-                    Tool::EdgeSets => {
-                        if let Some(t) = region_tool(ui, &mut self.mesh, Tool::EdgeSets) {
-                            todo = Some(t);
-                        }
-                    }
-                    Tool::VertexSets => {
-                        if let Some(t) = region_tool(ui, &mut self.mesh, Tool::VertexSets) {
-                            todo = Some(t);
-                        }
-                    }
-                    Tool::Material
-                    | Tool::Support
-                    | Tool::Load
-                    | Tool::Thermal
-                    | Tool::Contact
-                    | Tool::StepAmplitude
-                    | Tool::Run => match &self.mesh.built {
-                        None => {
-                            ui.label(
-                                "Importe et maille d'abord une géométrie, ou importe un .msh.",
                             );
                         }
-                        Some(built) => {
-                            let sets = built.sets();
-                            let element_sets = built.element_sets();
-                            let edge_sets = built.edge_sets();
-                            let info = MeshInfo {
-                                sets: &sets,
-                                edge_sets: &edge_sets,
-                                element_sets: &element_sets,
-                                kind: built.file.kind,
-                            };
-                            let m = &mut self.model;
-                            match tool {
-                                Tool::Material => {
-                                    let asked = model_tools::material_tool(
+                        Tool::Open => {
+                            if let Some(path) = browse(ui, "Résultats", &["pvd", "vtu"]) {
+                                self.path = path.display().to_string();
+                                todo = Some(Todo::Open(path));
+                            }
+                            ui.label("Fichier .pvd ou .vtu :");
+                            ui.text_edit_singleline(&mut self.path);
+                            if widgets::primary_button(ui, "Ouvrir").clicked()
+                                && !self.path.trim().is_empty()
+                            {
+                                todo = Some(Todo::Open(PathBuf::from(self.path.trim())));
+                            }
+                            ui.weak("Ou dépose-le sur la fenêtre.");
+                        }
+                        Tool::Import => {
+                            if let Some(path) = browse(
+                                ui,
+                                "Géométrie ou maillage",
+                                &["dxf", "stl", "step", "stp", "msh"],
+                            ) {
+                                self.mesh_path = path.display().to_string();
+                                todo = Some(Todo::Import(path));
+                            }
+                            ui.label("Dessin .dxf, surface .stl, pièce .step ou maillage .msh :");
+                            ui.text_edit_singleline(&mut self.mesh_path);
+                            if widgets::primary_button(ui, "Importer").clicked()
+                                && !self.mesh_path.trim().is_empty()
+                            {
+                                todo = Some(Todo::Import(PathBuf::from(self.mesh_path.trim())));
+                            }
+                            ui.weak("Ou dépose-le sur la fenêtre.");
+                            if let Some(built) = &self.mesh.built {
+                                ui.separator();
+                                ui.label(mesh_space::summary(built));
+                            }
+                        }
+                        Tool::MeshSize => {
+                            if let Some(t) = mesh_size_tool(ui, &mut self.mesh) {
+                                todo = Some(t);
+                            }
+                        }
+                        Tool::Quality => quality_tool(ui, &self.mesh),
+                        Tool::FaceSets => {
+                            if let Some(t) = face_sets_tool(ui, &mut self.mesh) {
+                                todo = Some(t);
+                            }
+                        }
+                        Tool::ManageSets => {
+                            if let Some(t) = manage_sets_tool(ui, &mut self.mesh) {
+                                todo = Some(t);
+                            }
+                        }
+                        Tool::EdgeSets => {
+                            if let Some(t) = region_tool(ui, &mut self.mesh, Tool::EdgeSets) {
+                                todo = Some(t);
+                            }
+                        }
+                        Tool::VertexSets => {
+                            if let Some(t) = region_tool(ui, &mut self.mesh, Tool::VertexSets) {
+                                todo = Some(t);
+                            }
+                        }
+                        Tool::Material
+                        | Tool::Support
+                        | Tool::Load
+                        | Tool::Thermal
+                        | Tool::Contact
+                        | Tool::StepAmplitude
+                        | Tool::Run => match &self.mesh.built {
+                            None => {
+                                ui.label(
+                                    "Importe et maille d'abord une géométrie, ou importe un .msh.",
+                                );
+                            }
+                            Some(built) => {
+                                let sets = built.sets();
+                                let element_sets = built.element_sets();
+                                let edge_sets = built.edge_sets();
+                                let info = MeshInfo {
+                                    sets: &sets,
+                                    edge_sets: &edge_sets,
+                                    element_sets: &element_sets,
+                                    kind: built.file.kind,
+                                };
+                                let m = &mut self.model;
+                                match tool {
+                                    Tool::Material => {
+                                        let asked = model_tools::material_tool(
+                                            ui,
+                                            &mut m.draft,
+                                            &info,
+                                            &mut m.library,
+                                        );
+                                        if let Some(model_tools::MaterialAction::RemainingSet) =
+                                            asked
+                                        {
+                                            todo = Some(Todo::RemainingSet);
+                                        }
+                                    }
+                                    Tool::Support => model_tools::support_tool(
                                         ui,
                                         &mut m.draft,
                                         &info,
-                                        &mut m.library,
-                                    );
-                                    if let Some(model_tools::MaterialAction::RemainingSet) = asked {
-                                        todo = Some(Todo::RemainingSet);
-                                    }
-                                }
-                                Tool::Support => model_tools::support_tool(
-                                    ui,
-                                    &mut m.draft,
-                                    &info,
-                                    &mut m.forms.bc,
-                                ),
-                                Tool::Load => {
-                                    model_tools::load_tool(ui, &mut m.draft, &info, &mut m.forms)
-                                }
-                                Tool::Thermal => {
-                                    model_tools::thermal_tool(ui, &mut m.draft, &info, &mut m.forms)
-                                }
-                                Tool::Contact => model_tools::contact_tool(
-                                    ui,
-                                    &mut m.draft,
-                                    &info,
-                                    &mut m.forms.contact,
-                                ),
-                                Tool::StepAmplitude => model_tools::step_tool(ui, &mut m.draft),
-                                _ => {
-                                    let calculation = model_space::run_label(&m.draft, &built.file);
-                                    let request = model_tools::run_tool(
+                                        &mut m.forms.bc,
+                                    ),
+                                    Tool::Load => model_tools::load_tool(
                                         ui,
-                                        calculation,
-                                        &m.diags,
-                                        m.note.as_deref(),
-                                        &m.compute,
-                                    );
-                                    if request.run {
-                                        todo = Some(Todo::Run);
-                                    } else if request.save {
-                                        todo = Some(Todo::SaveModel);
+                                        &mut m.draft,
+                                        &info,
+                                        &mut m.forms,
+                                    ),
+                                    Tool::Thermal => model_tools::thermal_tool(
+                                        ui,
+                                        &mut m.draft,
+                                        &info,
+                                        &mut m.forms,
+                                    ),
+                                    Tool::Contact => model_tools::contact_tool(
+                                        ui,
+                                        &mut m.draft,
+                                        &info,
+                                        &mut m.forms.contact,
+                                    ),
+                                    Tool::StepAmplitude => model_tools::step_tool(ui, &mut m.draft),
+                                    _ => {
+                                        let calculation =
+                                            model_space::run_label(&m.draft, &built.file);
+                                        let request = model_tools::run_tool(
+                                            ui,
+                                            calculation,
+                                            &m.diags,
+                                            m.note.as_deref(),
+                                            &m.compute,
+                                        );
+                                        if request.run {
+                                            todo = Some(Todo::Run);
+                                        } else if request.save {
+                                            todo = Some(Todo::SaveModel);
+                                        }
+                                        goto = request.goto;
                                     }
-                                    goto = request.goto;
+                                }
+                                if tool != Tool::Run {
+                                    ui.separator();
+                                    goto = model_tools::diagnostics_ui(ui, &m.diags, Some(tool));
                                 }
                             }
-                            if tool != Tool::Run {
-                                ui.separator();
-                                goto = model_tools::diagnostics_ui(ui, &m.diags, Some(tool));
+                        },
+                        Tool::Probe | Tool::Increments | Tool::Curve | Tool::Capture => {
+                            match self.results.as_mut() {
+                                Some(open) => {
+                                    let shown = match tool {
+                                        Tool::Probe => results_ui::probe_tool(ui, open),
+                                        Tool::Increments => results_ui::increments_tool(ui, open),
+                                        Tool::Curve => results_ui::curve_tool(ui, open),
+                                        _ => results_ui::capture_tool(ui, open),
+                                    };
+                                    if let Err(e) = shown {
+                                        self.error = Some(e.to_string());
+                                    }
+                                }
+                                None => {
+                                    ui.label("Ouvre d'abord un calcul (outil « Ouvrir »).");
+                                }
                             }
                         }
-                    },
-                    Tool::Probe | Tool::Increments | Tool::Curve | Tool::Capture => {
-                        match self.results.as_mut() {
-                            Some(open) => {
-                                let shown = match tool {
-                                    Tool::Probe => results_ui::probe_tool(ui, open),
-                                    Tool::Increments => results_ui::increments_tool(ui, open),
-                                    Tool::Curve => results_ui::curve_tool(ui, open),
-                                    _ => results_ui::capture_tool(ui, open),
-                                };
-                                if let Err(e) = shown {
-                                    self.error = Some(e.to_string());
-                                }
-                            }
+                        Tool::ShowSets => match self.results.as_mut() {
+                            Some(open) => results_ui::sets_tool(ui, open),
                             None => {
                                 ui.label("Ouvre d'abord un calcul (outil « Ouvrir »).");
                             }
+                        },
+                        Tool::Field | Tool::Deformation | Tool::Cut => {
+                            match self.results.as_mut() {
+                                Some(open) => results_tool(ui, tool, open),
+                                None => {
+                                    ui.label("Ouvre d'abord un calcul (outil « Ouvrir »).");
+                                }
+                            }
                         }
-                    }
-                    Tool::ShowSets => match self.results.as_mut() {
-                        Some(open) => results_ui::sets_tool(ui, open),
-                        None => {
-                            ui.label("Ouvre d'abord un calcul (outil « Ouvrir »).");
-                        }
-                    },
-                    Tool::Field | Tool::Deformation | Tool::Cut => match self.results.as_mut() {
-                        Some(open) => results_tool(ui, tool, open),
-                        None => {
-                            ui.label("Ouvre d'abord un calcul (outil « Ouvrir »).");
-                        }
-                    },
+                    });
+                // la hauteur d'une zone se mesure à l'image suivante : on la redessine tant qu'elle n'a pas
+                // celle de son contenu (ou le plafond)
+                if scroll.inner_rect.height() + 0.5 < scroll.content_size.y.min(max_body) {
+                    ui.ctx().request_repaint();
                 }
                 if let Some(e) = &self.error {
                     ui.add_space(6.0);
