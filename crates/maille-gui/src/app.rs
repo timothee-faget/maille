@@ -5,7 +5,7 @@
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
-use eframe::egui::{self, Align2, Color32, Frame, Pos2, Rect, RichText, Sense, Stroke, Vec2};
+use eframe::egui::{self, Align2, Color32, Frame, Pos2, Rect, Sense, Stroke, Vec2};
 use eframe::egui_wgpu::{wgpu, RenderState};
 use egui_lucide::Lucide;
 use maille_io::meshing::Source;
@@ -27,7 +27,7 @@ use crate::settings::{self, ThemeChoice};
 use crate::state::{Action, Item, Space, State, Status, Tool};
 use crate::theme::{self, Palette};
 use crate::triad;
-use crate::widgets::{self, status_dot};
+use crate::widgets::{self, ToolFace};
 
 const GAP: f32 = 12.0;
 const TOOLBAR_WIDTH: f32 = 36.0;
@@ -35,7 +35,6 @@ const TOOLBAR_WIDTH: f32 = 36.0;
 /// d'outils à droite. La pièce est cadrée dans le reste.
 const VIEW_INSET_TOP: f32 = 68.0;
 const VIEW_INSET_RIGHT: f32 = GAP + TOOLBAR_WIDTH + 2.0 * theme::PANEL_MARGIN as f32 + 8.0;
-const ICON_SIZE: f32 = 18.0;
 /// Marge du trièdre d'orientation au coin bas droit de la vue, et sa taille.
 const TRIAD_MARGIN: f32 = 56.0;
 const TRIAD_LENGTH: f32 = 34.0;
@@ -584,13 +583,13 @@ impl App {
         panel("spaces", Align2::CENTER_TOP, [0.0, GAP]).show(ctx, |ui| {
             floating(ui).show(ui, |ui| {
                 ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = theme::SPACE_S;
                     for space in Space::ALL {
-                        status_dot(ui, self.state.space_status(space));
                         let selected = self.state.space == space;
-                        if ui.selectable_label(selected, space.label()).clicked() {
+                        let status = self.state.space_status(space);
+                        if widgets::segment(ui, selected, status, space.label()).clicked() {
                             self.state.go(space);
                         }
-                        ui.add_space(6.0);
                     }
                 });
             });
@@ -601,56 +600,42 @@ impl App {
         let groups = crate::state::toolbar(self.state.space);
         let mut clicked = None;
         let mut theme_clicked = false;
-        panel("toolbar", Align2::RIGHT_CENTER, [-GAP, 0.0]).show(ctx, |ui| {
+        panel("toolbar", Align2::RIGHT_TOP, [-GAP, GAP]).show(ctx, |ui| {
             floating(ui).show(ui, |ui| {
                 ui.set_width(TOOLBAR_WIDTH);
                 ui.spacing_mut().item_spacing.y = theme::SPACE_S;
                 for (g, group) in groups.iter().enumerate() {
                     if g > 0 {
-                        ui.separator();
+                        group_break(ui);
                     }
                     for &item in &group.items {
                         let (label, selected) = match item {
                             Item::Tool(t) => (t.label(), self.state.tool() == t),
                             Item::Action(a) => (a.label(), false),
                         };
-                        let button = match item {
-                            Item::Action(Action::View(axis)) => egui::Button::new(
-                                RichText::new(["X", "Y", "Z"][axis])
-                                    .color(Palette::of(ui.visuals()).axes[axis])
-                                    .strong(),
+                        let face = match item {
+                            Item::Action(Action::View(axis)) => ToolFace::Axis(
+                                ["X", "Y", "Z"][axis],
+                                Palette::of(ui.visuals()).axes[axis],
                             ),
-                            _ => egui::Button::image(
-                                icon(item)
-                                    .size(ICON_SIZE)
-                                    .color(ui.visuals().text_color())
-                                    .stroke_width(1.75)
-                                    .image(),
-                            ),
-                        }
-                        .selected(selected)
-                        .min_size(Vec2::splat(TOOLBAR_WIDTH));
-                        if ui.add(button).on_hover_text(label).clicked() {
+                            _ => ToolFace::Icon(icon(item)),
+                        };
+                        let button = widgets::tool_button(ui, face, selected, TOOLBAR_WIDTH, label);
+                        if button.on_hover_text(label).clicked() {
                             clicked = Some(item);
                         }
                     }
                 }
-                ui.separator();
+                group_break(ui);
                 let lucide = match self.theme {
                     ThemeChoice::System => Lucide::Monitor,
                     ThemeChoice::Light => Lucide::Sun,
                     ThemeChoice::Dark => Lucide::Moon,
                 };
-                let button = egui::Button::image(
-                    lucide
-                        .size(ICON_SIZE)
-                        .color(ui.visuals().text_color())
-                        .stroke_width(1.75)
-                        .image(),
-                )
-                .min_size(Vec2::splat(TOOLBAR_WIDTH));
                 let tip = format!("Thème : {} (clic pour changer)", self.theme.label());
-                theme_clicked = ui.add(button).on_hover_text(tip).clicked();
+                let button =
+                    widgets::tool_button(ui, ToolFace::Icon(lucide), false, TOOLBAR_WIDTH, &tip);
+                theme_clicked = button.on_hover_text(tip).clicked();
             });
         });
         if theme_clicked {
@@ -1892,6 +1877,13 @@ fn draw_triad(ui: &egui::Ui, rect: Rect, (right, up, eye): ([f64; 3], [f64; 3], 
             color,
         );
     }
+}
+
+/// Le filet entre deux groupes d'outils, avec un peu d'air autour.
+fn group_break(ui: &mut egui::Ui) {
+    ui.add_space(theme::SPACE_S / 2.0);
+    ui.separator();
+    ui.add_space(theme::SPACE_S / 2.0);
 }
 
 /// Un panneau flottant, collé à `anchor` de la fenêtre.
