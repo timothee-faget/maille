@@ -159,14 +159,6 @@ fn dof_label(dof: DofDef) -> &'static str {
     }
 }
 
-fn with_unit(text: &str, unit: &str) -> String {
-    if unit.is_empty() {
-        text.to_string()
-    } else {
-        format!("{text} [{unit}]")
-    }
-}
-
 /// Liste déroulante des Sets ; garde le choix précédent s'il existe encore.
 fn set_picker(ui: &mut egui::Ui, id: &str, sets: &[&str], chosen: &mut String) {
     if !sets.contains(&chosen.as_str()) {
@@ -504,40 +496,57 @@ fn library_picker(
     taken
 }
 
+/// Une entrée d'une liste de BC ou de Load : son texte, et un bouton qui la retire (rend `true` au
+/// clic).
+fn listed(ui: &mut egui::Ui, text: String) -> bool {
+    ui.horizontal(|ui| {
+        ui.label(text);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.small_button("×").on_hover_text("Retirer").clicked()
+        })
+        .inner
+    })
+    .inner
+}
+
 /// Inspecteur « Encastrement » : les BC (déplacement imposé sur un Set ; 0 = bloqué).
 pub fn support_tool(ui: &mut egui::Ui, draft: &mut Draft, mesh: &MeshInfo, form: &mut ValueForm) {
     ui.label("Un déplacement imposé sur chaque Node d'un Set ; 0 bloque la direction.");
-    ui.separator();
-    if draft.bcs.is_empty() {
-        ui.weak("Aucune BC.");
-    }
-    let mut remove = None;
-    for (i, bc) in draft.bcs.iter().enumerate() {
-        ui.horizontal(|ui| {
-            ui.label(format!("{} · {} = {}", bc.set, dof_label(bc.dof), bc.value));
-            if ui.small_button("×").clicked() {
+    widgets::section(ui, "BC posées", |ui| {
+        if draft.bcs.is_empty() {
+            ui.weak("Aucune BC.");
+        }
+        let mut remove = None;
+        for (i, bc) in draft.bcs.iter().enumerate() {
+            if listed(
+                ui,
+                format!("{} · {} = {}", bc.set, dof_label(bc.dof), bc.value),
+            ) {
                 remove = Some(i);
             }
-        });
-    }
-    if let Some(i) = remove {
-        draft.bcs.remove(i);
-    }
-    ui.separator();
+        }
+        if let Some(i) = remove {
+            draft.bcs.remove(i);
+        }
+    });
     if mesh.sets.is_empty() {
         ui.weak("Maille d'abord, et crée des Sets (espace Maillage).");
         return;
     }
-    ui.label("Ajouter :");
-    ui.horizontal(|ui| {
-        set_picker(ui, "bc-set", mesh.sets, &mut form.set);
-        dof_picker(ui, "bc-dof", mesh.dofs(), &mut form.dof);
-    });
-    ui.horizontal(|ui| {
-        ui.label(with_unit("valeur", draft.units.length()));
-        ui.add(egui::DragValue::new(&mut form.value).speed(0.01));
-    });
-    ui.horizontal(|ui| {
+    widgets::section(ui, "Ajouter", |ui| {
+        widgets::field(ui, "Set", |ui| {
+            set_picker(ui, "bc-set", mesh.sets, &mut form.set)
+        });
+        widgets::field(ui, "Direction", |ui| {
+            dof_picker(ui, "bc-dof", mesh.dofs(), &mut form.dof)
+        });
+        widgets::field(ui, "Valeur", |ui| {
+            ui.add(
+                egui::DragValue::new(&mut form.value)
+                    .speed(0.01)
+                    .suffix(widgets::unit_suffix(draft.units.length())),
+            )
+        });
         if ui.button("Ajouter la BC").clicked() && !form.set.is_empty() {
             draft.bcs.push(ValueDef {
                 set: form.set.clone(),
@@ -564,61 +573,71 @@ pub fn load_tool(ui: &mut egui::Ui, draft: &mut Draft, mesh: &MeshInfo, forms: &
         return;
     }
     let units = draft.units.clone();
-    ui.label(with_unit(
-        "Pressure sur un bord (positive : elle comprime)",
-        units.stress(),
-    ));
-    let mut remove = None;
-    for (i, p) in draft.pressures.iter().enumerate() {
-        ui.horizontal(|ui| {
-            ui.label(format!("{} · {}", p.set, p.value));
-            if ui.small_button("×").clicked() {
+    widgets::section(ui, "Pressure sur un bord", |ui| {
+        ui.weak("Positive, elle comprime.");
+        let mut remove = None;
+        for (i, p) in draft.pressures.iter().enumerate() {
+            if listed(ui, format!("{} · {}", p.set, p.value)) {
                 remove = Some(i);
             }
+        }
+        if let Some(i) = remove {
+            draft.pressures.remove(i);
+        }
+        widgets::field(ui, "Set", |ui| {
+            set_picker(ui, "pressure-set", mesh.sets, &mut forms.pressure_set)
         });
-    }
-    if let Some(i) = remove.take() {
-        draft.pressures.remove(i);
-    }
-    ui.horizontal(|ui| {
-        set_picker(ui, "pressure-set", mesh.sets, &mut forms.pressure_set);
-        ui.add(egui::DragValue::new(&mut forms.pressure).speed(0.1));
+        widgets::field(ui, "Valeur", |ui| {
+            ui.add(
+                egui::DragValue::new(&mut forms.pressure)
+                    .speed(0.1)
+                    .suffix(widgets::unit_suffix(units.stress())),
+            )
+        });
+        if ui.button("Ajouter la Pressure").clicked() && !forms.pressure_set.is_empty() {
+            draft.pressures.push(PressureDef {
+                set: forms.pressure_set.clone(),
+                value: forms.pressure,
+            });
+        }
     });
-    if ui.button("Ajouter la Pressure").clicked() && !forms.pressure_set.is_empty() {
-        draft.pressures.push(PressureDef {
-            set: forms.pressure_set.clone(),
-            value: forms.pressure,
-        });
-    }
-    ui.separator();
     edge_load_form(ui, draft, mesh, forms);
-    ui.separator();
-    ui.label(with_unit("Load : effort par Node d'un Set", units.force()));
-    ui.weak("C'est une force par Node, pas la force totale.");
-    for (i, l) in draft.loads.iter().enumerate() {
-        ui.horizontal(|ui| {
-            ui.label(format!("{} · {} = {}", l.set, dof_label(l.dof), l.value));
-            if ui.small_button("×").clicked() {
+    widgets::section(ui, "Load par Node", |ui| {
+        ui.weak("C'est une force par Node, pas la force totale.");
+        let mut remove = None;
+        for (i, l) in draft.loads.iter().enumerate() {
+            if listed(
+                ui,
+                format!("{} · {} = {}", l.set, dof_label(l.dof), l.value),
+            ) {
                 remove = Some(i);
             }
+        }
+        if let Some(i) = remove {
+            draft.loads.remove(i);
+        }
+        let form = &mut forms.load;
+        widgets::field(ui, "Set", |ui| {
+            set_picker(ui, "load-set", mesh.sets, &mut form.set)
         });
-    }
-    if let Some(i) = remove {
-        draft.loads.remove(i);
-    }
-    let form = &mut forms.load;
-    ui.horizontal(|ui| {
-        set_picker(ui, "load-set", mesh.sets, &mut form.set);
-        dof_picker(ui, "load-dof", mesh.dofs(), &mut form.dof);
-        ui.add(egui::DragValue::new(&mut form.value).speed(0.1));
+        widgets::field(ui, "Direction", |ui| {
+            dof_picker(ui, "load-dof", mesh.dofs(), &mut form.dof)
+        });
+        widgets::field(ui, "Valeur", |ui| {
+            ui.add(
+                egui::DragValue::new(&mut form.value)
+                    .speed(0.1)
+                    .suffix(widgets::unit_suffix(units.force())),
+            )
+        });
+        if ui.button("Ajouter le Load").clicked() && !form.set.is_empty() {
+            draft.loads.push(ValueDef {
+                set: form.set.clone(),
+                dof: form.dof,
+                value: form.value,
+            });
+        }
     });
-    if ui.button("Ajouter le Load").clicked() && !form.set.is_empty() {
-        draft.loads.push(ValueDef {
-            set: form.set.clone(),
-            dof: form.dof,
-            value: form.value,
-        });
-    }
 }
 
 /// Force linéique sur un bord (2D) ou des arêtes (3D) : composantes fixes, par unité de longueur.
@@ -628,49 +647,52 @@ fn edge_load_form(ui: &mut egui::Ui, draft: &mut Draft, mesh: &MeshInfo, forms: 
         (force, length) => format!("{force}/{length}"),
     };
     let dim = mesh.dim();
-    ui.label(with_unit("Force linéique sur un bord ou des arêtes", &unit));
-    ui.weak(if dim == 2 {
-        "Force par longueur de bord, sur toute l'épaisseur : σ · épaisseur pour une contrainte σ."
-    } else {
-        "Force par longueur d'arête, composantes fixes. Les Sets d'arêtes se tirent avec « Arêtes → Set »."
-    });
-    let mut remove = None;
-    for (i, l) in draft.edge_loads.iter().enumerate() {
-        ui.horizontal(|ui| {
-            ui.label(format!("{} · {:?}", l.set, l.value));
-            if ui.small_button("×").clicked() {
+    widgets::section(ui, "Force linéique", |ui| {
+        ui.weak(if dim == 2 {
+            "Par longueur de bord, sur toute l'épaisseur : σ · épaisseur pour une contrainte σ."
+        } else {
+            "Par longueur d'arête, composantes fixes. Les Sets d'arêtes se tirent avec « Arêtes → Set »."
+        });
+        let mut remove = None;
+        for (i, l) in draft.edge_loads.iter().enumerate() {
+            if listed(ui, format!("{} · {:?}", l.set, l.value)) {
                 remove = Some(i);
             }
+        }
+        if let Some(i) = remove {
+            draft.edge_loads.remove(i);
+        }
+        if mesh.edge_sets.is_empty() {
+            ui.weak(if dim == 2 {
+                "Aucun Set de bord."
+            } else {
+                "Aucun Set d'arêtes : trace-en un avec l'outil « Arêtes → Set » (espace Maillage)."
+            });
+            return;
+        }
+        widgets::field(ui, "Set", |ui| {
+            set_picker(ui, "edge-load-set", mesh.edge_sets, &mut forms.edge_set)
         });
-    }
-    if let Some(i) = remove {
-        draft.edge_loads.remove(i);
-    }
-    if mesh.edge_sets.is_empty() {
-        ui.weak(if dim == 2 {
-            "Aucun Set de bord."
-        } else {
-            "Aucun Set d'arêtes : trace-en un avec l'outil « Arêtes → Set » (espace Maillage)."
-        });
-        return;
-    }
-    ui.horizontal(|ui| {
-        set_picker(ui, "edge-load-set", mesh.edge_sets, &mut forms.edge_set);
         for (axis, v) in ["x", "y", "z"]
             .iter()
             .zip(forms.edge_load.iter_mut())
             .take(dim)
         {
-            ui.label(*axis);
-            ui.add(egui::DragValue::new(v).speed(0.1));
+            widgets::field(ui, axis, |ui| {
+                ui.add(
+                    egui::DragValue::new(v)
+                        .speed(0.1)
+                        .suffix(widgets::unit_suffix(&unit)),
+                )
+            });
+        }
+        if ui.button("Ajouter la force linéique").clicked() && !forms.edge_set.is_empty() {
+            draft.edge_loads.push(EdgeLoadDef {
+                set: forms.edge_set.clone(),
+                value: forms.edge_load[..dim].to_vec(),
+            });
         }
     });
-    if ui.button("Ajouter la force linéique").clicked() && !forms.edge_set.is_empty() {
-        draft.edge_loads.push(EdgeLoadDef {
-            set: forms.edge_set.clone(),
-            value: forms.edge_load[..dim].to_vec(),
-        });
-    }
 }
 
 /// Ce que l'inspecteur « Calculer » demande à l'application.
