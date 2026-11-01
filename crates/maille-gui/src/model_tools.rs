@@ -3,7 +3,9 @@
 
 use std::path::PathBuf;
 
-use eframe::egui::{self, Color32};
+use eframe::egui;
+
+use crate::theme::Palette;
 use maille_io::materials::{Library, LibraryMaterial};
 use maille_io::model::{
     ContactDef, ContactKind, ConvectionDef, DofDef, EdgeLoadDef, HeatSourceDef, PlaneStateDef,
@@ -696,7 +698,7 @@ pub fn run_tool(
             ui.weak("Calcul annulé.");
         }
         ComputeState::Failed(why) => {
-            ui.colored_label(Color32::from_rgb(240, 110, 100), why);
+            ui.colored_label(Palette::of(ui.visuals()).error, why);
         }
         _ => {}
     }
@@ -749,9 +751,10 @@ pub fn progress_ui(ui: &mut egui::Ui, running: &crate::compute::Running) -> bool
 pub fn diagnostics_ui(ui: &mut egui::Ui, diags: &[Diagnostic], only: Option<Tool>) -> Option<Tool> {
     let mut go = None;
     for d in diags.iter().filter(|d| only.is_none_or(|t| d.tool == t)) {
+        let palette = Palette::of(ui.visuals());
         let (mark, color) = match d.severity {
-            Severity::Error => ("❌", Color32::from_rgb(240, 110, 100)),
-            Severity::Warning => ("⚠", Color32::from_rgb(230, 180, 80)),
+            Severity::Error => ("❌", palette.error),
+            Severity::Warning => ("⚠", palette.warn),
         };
         let response = ui.add(
             egui::Label::new(egui::RichText::new(format!("{mark} {}", d.message)).color(color))

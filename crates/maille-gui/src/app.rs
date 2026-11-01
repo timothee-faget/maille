@@ -5,9 +5,7 @@
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
-use eframe::egui::{
-    self, Align2, Color32, CornerRadius, Frame, Margin, Pos2, Rect, RichText, Sense, Stroke, Vec2,
-};
+use eframe::egui::{self, Align2, Color32, Frame, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use eframe::egui_wgpu::{wgpu, RenderState};
 use egui_lucide::Lucide;
 use maille_io::meshing::Source;
@@ -27,11 +25,9 @@ use crate::series::Series;
 use crate::sets::{self, PickFace};
 use crate::settings::{self, ThemeChoice};
 use crate::state::{Action, Item, Space, State, Status, Tool};
+use crate::theme::{self, Palette};
 use crate::triad;
 
-/// Fond des panneaux : translucide, la vue reste lisible derrière.
-const PANEL_DARK: Color32 = Color32::from_rgba_premultiplied(26, 28, 34, 224);
-const PANEL_LIGHT: Color32 = Color32::from_rgba_premultiplied(238, 239, 242, 230);
 const GAP: f32 = 12.0;
 const TOOLBAR_WIDTH: f32 = 36.0;
 const ICON_SIZE: f32 = 18.0;
@@ -471,17 +467,13 @@ impl App {
         };
         let dark = ui.visuals().dark_mode;
         let (Some(open), Some(gpu)) = (self.view_mut(), frame.wgpu_render_state()) else {
-            let fill = if dark {
-                Color32::from_rgb(37, 39, 43)
-            } else {
-                Color32::from_gray(204)
-            };
+            let fill = Palette::of(ui.visuals()).canvas;
             ui.painter().rect_filled(rect, 0.0, fill);
             ui.painter().text(
                 rect.center(),
                 Align2::CENTER_CENTER,
                 invitation,
-                egui::FontId::proportional(18.0),
+                egui::FontId::proportional(theme::SIZE_INVITATION),
                 ui.visuals().weak_text_color(),
             );
             return None;
@@ -554,15 +546,13 @@ impl App {
                     rect.min.y + (s[1] / f64::from(ppp)) as f32,
                 );
                 let band = Rect::from_two_pos(corner, h);
-                ui.painter().rect_filled(
-                    band,
-                    0.0,
-                    Color32::from_rgba_unmultiplied(255, 140, 0, 40),
-                );
+                let accent = Palette::of(ui.visuals()).accent;
+                ui.painter()
+                    .rect_filled(band, 0.0, accent.gamma_multiply(0.16));
                 ui.painter().rect_stroke(
                     band,
                     0.0,
-                    egui::Stroke::new(1.5, Color32::from_rgb(255, 140, 0)),
+                    egui::Stroke::new(1.5, accent),
                     egui::StrokeKind::Inside,
                 );
                 if response.drag_stopped_by(primary) {
@@ -604,6 +594,7 @@ impl App {
         panel("toolbar", Align2::RIGHT_CENTER, [-GAP, 0.0]).show(ctx, |ui| {
             floating(ui).show(ui, |ui| {
                 ui.set_width(TOOLBAR_WIDTH);
+                ui.spacing_mut().item_spacing.y = theme::SPACE_S;
                 for (g, group) in groups.iter().enumerate() {
                     if g > 0 {
                         ui.separator();
@@ -616,7 +607,7 @@ impl App {
                         let button = match item {
                             Item::Action(Action::View(axis)) => egui::Button::new(
                                 RichText::new(["X", "Y", "Z"][axis])
-                                    .color(AXIS_COLORS[axis])
+                                    .color(Palette::of(ui.visuals()).axes[axis])
                                     .strong(),
                             ),
                             _ => egui::Button::image(
@@ -876,7 +867,7 @@ impl App {
                 }
                 if let Some(e) = &self.error {
                     ui.add_space(6.0);
-                    ui.colored_label(Color32::from_rgb(240, 110, 100), e);
+                    ui.colored_label(Palette::of(ui.visuals()).error, e);
                 }
             });
         });
@@ -1460,7 +1451,7 @@ impl App {
             floating(ui).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.colored_label(
-                        Color32::from_rgb(230, 180, 80),
+                        Palette::of(ui.visuals()).warn,
                         "Résultats périmés : le modèle a changé depuis ce calcul.",
                     );
                     relaunch = ui.button("Relancer le calcul").clicked();
@@ -1809,12 +1800,12 @@ fn quality_tool(ui: &mut egui::Ui, mesh: &MeshUi) {
     ui.label(format!("Qualité moyenne : {:.2}", q.mean));
     if q.poor == 0 {
         ui.colored_label(
-            Color32::from_rgb(90, 200, 120),
+            Palette::of(ui.visuals()).ok,
             format!("Aucun Element sous {POOR}."),
         );
     } else {
         ui.colored_label(
-            Color32::from_rgb(240, 180, 70),
+            Palette::of(ui.visuals()).warn,
             format!(
                 "{} Element(s) sous {POOR} : le calcul y sera moins précis, réduire la taille h.",
                 q.poor
@@ -1823,13 +1814,6 @@ fn quality_tool(ui: &mut egui::Ui, mesh: &MeshUi) {
     }
     ui.weak("1 : triangle équilatéral ou tétraèdre régulier. La vue colore le défaut de forme (1 − qualité) : rouge pour un Element écrasé, au pire Element de chaque Node.");
 }
-
-/// Couleurs des axes x, y, z (rouge, vert, bleu, comme partout).
-const AXIS_COLORS: [Color32; 3] = [
-    Color32::from_rgb(226, 80, 80),
-    Color32::from_rgb(90, 190, 100),
-    Color32::from_rgb(80, 130, 235),
-];
 
 /// Bouton « Parcourir… » : le sélecteur de fichier du système, limité à ces extensions. Rend le
 /// fichier choisi, rien si on annule.
@@ -1892,10 +1876,11 @@ fn draw_triad(ui: &egui::Ui, rect: Rect, (right, up, eye): ([f64; 3], [f64; 3], 
             .iter()
             .position(|n| *n == axis.name)
             .unwrap_or(0);
+        let axes = Palette::of(ui.visuals()).axes;
         let color = if axis.toward < -0.05 {
-            AXIS_COLORS[index].gamma_multiply(0.45)
+            axes[index].gamma_multiply(0.45)
         } else {
-            AXIS_COLORS[index]
+            axes[index]
         };
         let tip = center + Vec2::new(axis.screen[0] as f32, axis.screen[1] as f32) * TRIAD_LENGTH;
         painter.line_segment([center, tip], Stroke::new(2.5, color));
@@ -1924,29 +1909,25 @@ fn panel(id: &str, anchor: Align2, offset: [f32; 2]) -> egui::Area {
 
 /// Cadre commun des panneaux flottants.
 fn floating(ui: &egui::Ui) -> Frame {
-    let dark = ui.visuals().dark_mode;
-    Frame::new()
-        .fill(if dark { PANEL_DARK } else { PANEL_LIGHT })
-        .corner_radius(CornerRadius::same(14))
-        .inner_margin(Margin::same(10))
-        .stroke(Stroke::new(
-            1.0,
-            if dark {
-                Color32::from_white_alpha(24)
-            } else {
-                Color32::from_black_alpha(36)
-            },
-        ))
+    theme::panel_frame(ui.visuals())
 }
 
 fn status_dot(ui: &mut egui::Ui, status: Status) {
-    let color = match status {
-        Status::Done => Color32::from_rgb(90, 200, 120),
-        Status::Warning => Color32::from_rgb(240, 180, 70),
-        Status::Missing => Color32::from_rgb(220, 90, 90),
-    };
+    let p = Palette::of(ui.visuals());
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
-    ui.painter().circle_filled(rect.center(), 4.5, color);
+    match status {
+        Status::Done => {
+            ui.painter().circle_filled(rect.center(), 4.5, p.ok);
+        }
+        Status::Warning => {
+            ui.painter().circle_filled(rect.center(), 4.5, p.warn);
+        }
+        // pas encore fait : un anneau neutre, le rouge reste pour les erreurs
+        Status::Missing => {
+            ui.painter()
+                .circle_stroke(rect.center(), 3.75, Stroke::new(1.5, p.pending));
+        }
+    }
 }
 
 /// Inspecteur des outils Champ, Déformée et Coupe : ils règlent la vue des résultats ouverts.

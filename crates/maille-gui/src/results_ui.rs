@@ -15,6 +15,7 @@ use crate::app::Open;
 use crate::mesh_pick::{self, SkinFace};
 use crate::results;
 use crate::series::{self, Series};
+use crate::theme::Palette;
 
 /// Couleurs des Sets, attribuées dans l'ordre des noms (la même couleur à chaque ouverture).
 const SET_COLORS: [[u8; 3]; 8] = [
@@ -469,12 +470,8 @@ fn plot(ui: &mut egui::Ui, points: &[[f64; 2]], marker: Option<f64>) {
     let width = ui.available_width();
     let (response, painter) = ui.allocate_painter(Vec2::new(width, PLOT_HEIGHT), Sense::hover());
     let rect = response.rect;
-    let dark = ui.visuals().dark_mode;
-    painter.rect_filled(
-        rect,
-        3.0,
-        Color32::from_black_alpha(if dark { 90 } else { 24 }),
-    );
+    let palette = Palette::of(ui.visuals());
+    painter.rect_filled(rect, 3.0, palette.inset());
     if points.len() < 2 {
         return;
     }
@@ -508,19 +505,12 @@ fn plot(ui: &mut egui::Ui, points: &[[f64; 2]], marker: Option<f64>) {
         let x = at([t, y0]).x;
         painter.line_segment(
             [Pos2::new(x, inner.min.y), Pos2::new(x, inner.max.y)],
-            Stroke::new(1.0, Color32::from_gray(150)),
+            Stroke::new(1.0, palette.text_weak),
         );
     }
     painter.add(egui::Shape::line(
         points.iter().map(|p| at(*p)).collect(),
-        Stroke::new(
-            1.6,
-            if dark {
-                Color32::from_rgb(120, 190, 255)
-            } else {
-                Color32::from_rgb(20, 90, 190)
-            },
-        ),
+        Stroke::new(1.6, palette.plot),
     ));
     let font = egui::FontId::monospace(10.0);
     let weak = ui.visuals().weak_text_color();
