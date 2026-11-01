@@ -11,9 +11,12 @@ use crate::state::Status;
 use crate::theme::{self, Palette};
 
 const ICON_SIZE: f32 = 16.0;
+/// Icône d'un bouton d'outil.
+const TOOL_ICON_SIZE: f32 = 18.0;
 /// Marge du texte d'une ligne à gauche, et diamètre de la pastille d'état.
 const ROW_PADDING: f32 = 8.0;
 const DOT: f32 = 10.0;
+const SEGMENT_HEIGHT: f32 = 28.0;
 
 /// L'en-tête d'un panneau : son titre, un bouton qui le ferme ou le masque (rend `true` au clic),
 /// puis un filet.
@@ -87,11 +90,6 @@ fn row(ui: &mut Ui, selected: bool, label: &str, status: Option<Status>) -> Resp
 
 /// La pastille d'état d'un espace ou d'une étape. « Pas encore fait » est un anneau neutre : le
 /// rouge reste pour les erreurs.
-pub fn status_dot(ui: &mut Ui, status: Status) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::splat(DOT), Sense::hover());
-    dot(ui, rect, status);
-}
-
 fn dot(ui: &Ui, rect: egui::Rect, status: Status) {
     let p = Palette::of(ui.visuals());
     let painter = ui.painter();
@@ -121,4 +119,92 @@ pub fn primary_button_enabled(ui: &mut Ui, enabled: bool, text: &str) -> Respons
         enabled,
         Button::new(RichText::new(text).color(p.on_accent)).fill(p.accent),
     )
+}
+
+/// Un onglet d'espace : sa pastille d'état et son libellé dans une même pastille, pleine d'accent
+/// quand l'espace est celui du moment.
+pub fn segment(ui: &mut Ui, selected: bool, status: Status, label: &str) -> Response {
+    let p = Palette::of(ui.visuals());
+    let ink = if selected { p.on_accent } else { p.text };
+    let galley =
+        ui.painter()
+            .layout_no_wrap(label.to_owned(), TextStyle::Body.resolve(ui.style()), ink);
+    let width = ROW_PADDING + DOT + 6.0 + galley.size().x + ROW_PADDING + 2.0;
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, SEGMENT_HEIGHT), Sense::click());
+    response.widget_info(|| WidgetInfo::selected(Role::Button, ui.is_enabled(), selected, label));
+    let fill = if selected {
+        p.accent
+    } else if response.hovered() {
+        p.control_hover
+    } else {
+        Color32::TRANSPARENT
+    };
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(theme::CONTROL_RADIUS), fill);
+    let x = rect.left() + ROW_PADDING;
+    dot(
+        ui,
+        egui::Rect::from_center_size(egui::pos2(x + DOT / 2.0, rect.center().y), Vec2::splat(DOT)),
+        status,
+    );
+    let text_at = egui::pos2(x + DOT + 6.0, rect.center().y - galley.size().y / 2.0);
+    ui.painter().galley(text_at, galley, ink);
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Ce que montre un bouton d'outil : une icône, ou la lettre d'un axe soulignée de sa couleur.
+pub enum ToolFace<'a> {
+    Icon(Lucide),
+    Axis(&'a str, Color32),
+}
+
+/// Un bouton de la barre d'outils : rien au repos, un fond discret au survol, un rond d'accent quand
+/// l'outil est actif.
+pub fn tool_button(
+    ui: &mut Ui,
+    face: ToolFace,
+    selected: bool,
+    size: f32,
+    label: &str,
+) -> Response {
+    let p = Palette::of(ui.visuals());
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+    response.widget_info(|| WidgetInfo::selected(Role::Button, ui.is_enabled(), selected, label));
+    let fill = if selected {
+        p.accent
+    } else if response.hovered() {
+        p.control_hover
+    } else {
+        Color32::TRANSPARENT
+    };
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same((size / 2.0) as u8), fill);
+    let ink = if selected { p.on_accent } else { p.text };
+    match face {
+        ToolFace::Icon(icon) => {
+            let image = icon
+                .size(TOOL_ICON_SIZE)
+                .color(ink)
+                .stroke_width(1.75)
+                .image();
+            image.paint_at(
+                ui,
+                egui::Rect::from_center_size(rect.center(), Vec2::splat(TOOL_ICON_SIZE)),
+            );
+        }
+        ToolFace::Axis(name, color) => {
+            let center = rect.center() - Vec2::new(0.0, 1.0);
+            ui.painter().text(
+                center,
+                Align2::CENTER_CENTER,
+                name,
+                TextStyle::Body.resolve(ui.style()),
+                ink,
+            );
+            let bar =
+                egui::Rect::from_center_size(center + Vec2::new(0.0, 10.0), Vec2::new(10.0, 2.0));
+            ui.painter().rect_filled(bar, CornerRadius::same(1), color);
+        }
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
