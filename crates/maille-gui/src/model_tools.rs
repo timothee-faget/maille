@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use eframe::egui;
 
 use crate::theme::Palette;
+use egui_lucide::Lucide;
 use maille_io::materials::{Library, LibraryMaterial};
 use maille_io::model::{
     ContactDef, ContactKind, ConvectionDef, DofDef, EdgeLoadDef, HeatSourceDef, PlaneStateDef,
@@ -695,6 +696,9 @@ fn edge_load_form(ui: &mut egui::Ui, draft: &mut Draft, mesh: &MeshInfo, forms: 
     });
 }
 
+/// Icône d'un diagnostic.
+const DIAG_ICON: f32 = 14.0;
+
 /// Ce que l'inspecteur « Calculer » demande à l'application.
 #[derive(Debug, Default)]
 pub struct RunRequest {
@@ -713,17 +717,29 @@ pub fn run_tool(
     compute: &ComputeState,
 ) -> RunRequest {
     let mut request = RunRequest::default();
-    match calculation {
-        Some(text) => ui.label(format!("Calcul déduit : {text}")),
-        None => ui.weak("Calcul déduit : pas encore (il manque des BC ou un chargement)."),
-    };
-    ui.separator();
-    request.goto = diagnostics_ui(ui, diags, None);
+    widgets::section(ui, "Calcul", |ui| {
+        match calculation {
+            Some(text) => ui.label(format!("Calcul déduit : {text}")),
+            None => ui.weak("Calcul déduit : pas encore (il manque des BC ou un chargement)."),
+        };
+    });
     let blocked = diags.iter().any(|d| d.severity == Severity::Error);
-    if diags.is_empty() {
-        ui.label("✅ Le modèle est prêt.");
-    }
-    ui.separator();
+    widgets::section(ui, "Diagnostics", |ui| {
+        request.goto = diagnostics_ui(ui, diags, None);
+        if diags.is_empty() {
+            ui.horizontal(|ui| {
+                ui.add(
+                    Lucide::CircleCheck
+                        .size(DIAG_ICON)
+                        .color(Palette::of(ui.visuals()).ok)
+                        .stroke_width(1.75)
+                        .image(),
+                );
+                ui.label("Le modèle est prêt.");
+            });
+        }
+    });
+    ui.add_space(theme::SPACE_M);
     let idle = !compute.is_running();
     request.run = widgets::primary_button_enabled(ui, !blocked && idle, "▶ Calculer")
         .on_hover_text("Enregistre le modèle puis lance le calcul de `maille solve`")
@@ -790,14 +806,19 @@ pub fn diagnostics_ui(ui: &mut egui::Ui, diags: &[Diagnostic], only: Option<Tool
     let mut go = None;
     for d in diags.iter().filter(|d| only.is_none_or(|t| d.tool == t)) {
         let palette = Palette::of(ui.visuals());
-        let (mark, color) = match d.severity {
-            Severity::Error => ("❌", palette.error),
-            Severity::Warning => ("⚠", palette.warn),
+        let (icon, color) = match d.severity {
+            Severity::Error => (Lucide::CircleX, palette.error),
+            Severity::Warning => (Lucide::TriangleAlert, palette.warn),
         };
-        let response = ui.add(
-            egui::Label::new(egui::RichText::new(format!("{mark} {}", d.message)).color(color))
-                .sense(egui::Sense::click()),
-        );
+        let response = ui
+            .horizontal(|ui| {
+                ui.add(icon.size(DIAG_ICON).color(color).stroke_width(1.75).image());
+                ui.add(
+                    egui::Label::new(egui::RichText::new(&d.message).color(color))
+                        .sense(egui::Sense::click()),
+                )
+            })
+            .inner;
         if response
             .on_hover_text("Aller à l'outil qui corrige")
             .clicked()
@@ -824,11 +845,10 @@ fn optional(ui: &mut egui::Ui, label: &str, value: &mut Option<f64>, default: f6
     });
 }
 
-/// Trois composantes (ou deux en 2D) d'un vecteur.
+/// Trois composantes (ou deux en 2D) d'un vecteur : une ligne libellé, valeurs à droite.
 fn vector(ui: &mut egui::Ui, label: &str, v: &mut [f64; 3], dim: usize) {
-    ui.horizontal(|ui| {
-        ui.label(label);
-        for c in v.iter_mut().take(dim) {
+    widgets::field(ui, label, |ui| {
+        for c in v.iter_mut().take(dim).rev() {
             ui.add(egui::DragValue::new(c).speed(0.05));
         }
     });
@@ -840,104 +860,104 @@ pub fn thermal_tool(ui: &mut egui::Ui, draft: &mut Draft, mesh: &MeshInfo, forms
         ui.weak("Maille d'abord, et crée des Sets (espace Maillage).");
         return;
     }
-    ui.label("Température imposée sur un Set :");
-    let mut remove = None;
-    for (i, b) in draft
-        .bcs
-        .iter()
-        .enumerate()
-        .filter(|(_, b)| b.dof == DofDef::T)
-    {
-        ui.horizontal(|ui| {
-            ui.label(format!("{} · T = {}", b.set, b.value));
-            if ui.small_button("×").clicked() {
+    widgets::section(ui, "Température imposée", |ui| {
+        let mut remove = None;
+        for (i, b) in draft
+            .bcs
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.dof == DofDef::T)
+        {
+            if listed(ui, format!("{} · T = {}", b.set, b.value)) {
                 remove = Some(i);
             }
+        }
+        if let Some(i) = remove {
+            draft.bcs.remove(i);
+        }
+        widgets::field(ui, "Set", |ui| {
+            set_picker(ui, "t-set", mesh.sets, &mut forms.temperature.set)
         });
-    }
-    if let Some(i) = remove.take() {
-        draft.bcs.remove(i);
-    }
-    ui.horizontal(|ui| {
-        set_picker(ui, "t-set", mesh.sets, &mut forms.temperature.set);
-        ui.add(egui::DragValue::new(&mut forms.temperature.value).speed(1.0));
+        widgets::field(ui, "T", |ui| {
+            ui.add(egui::DragValue::new(&mut forms.temperature.value).speed(1.0))
+        });
+        if ui.button("Ajouter la température").clicked() && !forms.temperature.set.is_empty() {
+            draft.bcs.push(ValueDef {
+                set: forms.temperature.set.clone(),
+                dof: DofDef::T,
+                value: forms.temperature.value,
+            });
+        }
     });
-    if ui.button("Ajouter la température").clicked() && !forms.temperature.set.is_empty() {
-        draft.bcs.push(ValueDef {
-            set: forms.temperature.set.clone(),
-            dof: DofDef::T,
-            value: forms.temperature.value,
-        });
-    }
-    ui.separator();
-    ui.label("HeatSource (puissance volumique) :");
-    for (i, h) in draft.heat_sources.iter().enumerate() {
-        ui.horizontal(|ui| {
-            ui.label(format!("{} · {}", h.set, h.value));
-            if ui.small_button("×").clicked() {
+    widgets::section(ui, "HeatSource (puissance volumique)", |ui| {
+        let mut remove = None;
+        for (i, h) in draft.heat_sources.iter().enumerate() {
+            if listed(ui, format!("{} · {}", h.set, h.value)) {
                 remove = Some(i);
             }
-        });
-    }
-    if let Some(i) = remove.take() {
-        draft.heat_sources.remove(i);
-    }
-    ui.horizontal(|ui| {
+        }
+        if let Some(i) = remove {
+            draft.heat_sources.remove(i);
+        }
         let mut sets = vec![maille_io::msh::DOMAIN_SET];
         sets.extend_from_slice(mesh.sets);
-        set_picker(ui, "heat-set", &sets, &mut forms.heat_set);
-        ui.add(egui::DragValue::new(&mut forms.heat).speed(0.1));
-    });
-    if ui.button("Ajouter la HeatSource").clicked() && !forms.heat_set.is_empty() {
-        draft.heat_sources.push(HeatSourceDef {
-            set: forms.heat_set.clone(),
-            value: forms.heat,
+        widgets::field(ui, "Set", |ui| {
+            set_picker(ui, "heat-set", &sets, &mut forms.heat_set)
         });
-    }
-    ui.separator();
-    ui.label("Convection h (T − T∞) sur un bord :");
-    for (i, c) in draft.convections.iter().enumerate() {
-        ui.horizontal(|ui| {
-            ui.label(format!("{} · h = {}, T∞ = {}", c.set, c.film, c.sink));
-            if ui.small_button("×").clicked() {
+        widgets::field(ui, "Puissance", |ui| {
+            ui.add(egui::DragValue::new(&mut forms.heat).speed(0.1))
+        });
+        if ui.button("Ajouter la HeatSource").clicked() && !forms.heat_set.is_empty() {
+            draft.heat_sources.push(HeatSourceDef {
+                set: forms.heat_set.clone(),
+                value: forms.heat,
+            });
+        }
+    });
+    widgets::section(ui, "Convection h (T − T∞) sur un bord", |ui| {
+        let mut remove = None;
+        for (i, c) in draft.convections.iter().enumerate() {
+            if listed(ui, format!("{} · h = {}, T∞ = {}", c.set, c.film, c.sink)) {
                 remove = Some(i);
             }
+        }
+        if let Some(i) = remove {
+            draft.convections.remove(i);
+        }
+        widgets::field(ui, "Set", |ui| {
+            set_picker(ui, "conv-set", mesh.sets, &mut forms.convection_set)
         });
-    }
-    if let Some(i) = remove {
-        draft.convections.remove(i);
-    }
-    set_picker(ui, "conv-set", mesh.sets, &mut forms.convection_set);
-    ui.horizontal(|ui| {
-        ui.label("h");
-        ui.add(egui::DragValue::new(&mut forms.film).speed(0.1));
-        ui.label("T∞");
-        ui.add(egui::DragValue::new(&mut forms.sink).speed(1.0));
+        widgets::field(ui, "h", |ui| {
+            ui.add(egui::DragValue::new(&mut forms.film).speed(0.1))
+        });
+        widgets::field(ui, "T∞", |ui| {
+            ui.add(egui::DragValue::new(&mut forms.sink).speed(1.0))
+        });
+        if ui.button("Ajouter la Convection").clicked() && !forms.convection_set.is_empty() {
+            draft.convections.push(ConvectionDef {
+                set: forms.convection_set.clone(),
+                film: forms.film,
+                sink: forms.sink,
+            });
+        }
     });
-    if ui.button("Ajouter la Convection").clicked() && !forms.convection_set.is_empty() {
-        draft.convections.push(ConvectionDef {
-            set: forms.convection_set.clone(),
-            film: forms.film,
-            sink: forms.sink,
-        });
-    }
-    ui.separator();
-    let mut coupled = draft.reference_temperature.is_some();
-    if ui
-        .checkbox(&mut coupled, "Dilater la pièce par les températures")
-        .on_hover_text(
-            "Couplage thermo-mécanique : le thermique, puis le mécanique avec α (T − T_ref)",
-        )
-        .changed()
-    {
-        draft.reference_temperature = coupled.then_some(20.0);
-    }
-    if let Some(reference) = &mut draft.reference_temperature {
-        ui.horizontal(|ui| {
-            ui.label("T_ref (sans contrainte)");
-            ui.add(egui::DragValue::new(reference).speed(1.0));
-        });
-    }
+    widgets::section(ui, "Couplage", |ui| {
+        let mut coupled = draft.reference_temperature.is_some();
+        if ui
+            .checkbox(&mut coupled, "Dilater la pièce par les températures")
+            .on_hover_text(
+                "Couplage thermo-mécanique : le thermique, puis le mécanique avec α (T − T_ref)",
+            )
+            .changed()
+        {
+            draft.reference_temperature = coupled.then_some(20.0);
+        }
+        if let Some(reference) = &mut draft.reference_temperature {
+            widgets::field(ui, "T_ref (sans contrainte)", |ui| {
+                ui.add(egui::DragValue::new(reference).speed(1.0))
+            });
+        }
+    });
 }
 
 /// Inspecteur « Contact » : Nodes d'un bord contre une surface rigide, dessinée dans la vue.
@@ -947,148 +967,152 @@ pub fn contact_tool(ui: &mut egui::Ui, draft: &mut Draft, mesh: &MeshInfo, form:
         return;
     }
     ui.label("Sans frottement, contre une surface rigide (pénalité). Elle est dessinée en orange.");
-    ui.separator();
-    let mut remove = None;
-    for (i, c) in draft.contacts.iter().enumerate() {
-        ui.horizontal(|ui| {
-            ui.label(format!("{} · {:?}", c.set, c.kind));
-            if ui.small_button("×").clicked() {
+    widgets::section(ui, "Contacts posés", |ui| {
+        if draft.contacts.is_empty() {
+            ui.weak("Aucun Contact.");
+        }
+        let mut remove = None;
+        for (i, c) in draft.contacts.iter().enumerate() {
+            if listed(ui, format!("{} · {:?}", c.set, c.kind)) {
                 remove = Some(i);
             }
-        });
-    }
-    if let Some(i) = remove {
-        draft.contacts.remove(i);
-    }
-    ui.separator();
-    ui.label("Ajouter :");
-    let dim = mesh.dim();
-    set_picker(ui, "contact-set", mesh.sets, &mut form.set);
-    let three_d = dim == 3;
-    ui.horizontal(|ui| {
-        ui.radio_value(&mut form.kind, ContactKind::Plane, "plan");
-        ui.radio_value(
-            &mut form.kind,
-            ContactKind::Cylinder,
-            if three_d { "cylindre" } else { "cercle" },
-        );
-        if three_d {
-            ui.radio_value(&mut form.kind, ContactKind::Sphere, "sphère");
+        }
+        if let Some(i) = remove {
+            draft.contacts.remove(i);
         }
     });
-    if !three_d && form.kind == ContactKind::Sphere {
-        form.kind = ContactKind::Cylinder;
-    }
-    match form.kind {
-        ContactKind::Plane => {
-            vector(ui, "point", &mut form.point, dim);
-            vector(ui, "normale (vers la pièce)", &mut form.normal, dim);
-        }
-        ContactKind::Cylinder => {
-            vector(
-                ui,
-                if three_d { "point de l'axe" } else { "centre" },
-                &mut form.point,
-                dim,
+    let dim = mesh.dim();
+    let three_d = dim == 3;
+    widgets::section(ui, "Ajouter", |ui| {
+        widgets::field(ui, "Set", |ui| {
+            set_picker(ui, "contact-set", mesh.sets, &mut form.set)
+        });
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut form.kind, ContactKind::Plane, "plan");
+            ui.radio_value(
+                &mut form.kind,
+                ContactKind::Cylinder,
+                if three_d { "cylindre" } else { "cercle" },
             );
             if three_d {
-                vector(ui, "axe", &mut form.axis, dim);
+                ui.radio_value(&mut form.kind, ContactKind::Sphere, "sphère");
             }
-        }
-        ContactKind::Sphere => vector(ui, "centre", &mut form.center, dim),
-    }
-    if form.kind != ContactKind::Plane {
-        ui.horizontal(|ui| {
-            ui.label("rayon");
-            ui.add(
-                egui::DragValue::new(&mut form.radius)
-                    .speed(0.05)
-                    .range(0.0..=f64::MAX),
-            );
         });
-    }
-    vector(ui, "déplacement à λ = 1", &mut form.motion, dim);
-    if ui.button("Ajouter le Contact").clicked() && !form.set.is_empty() {
-        draft.contacts.push(form.to_def(dim));
-    }
+        if !three_d && form.kind == ContactKind::Sphere {
+            form.kind = ContactKind::Cylinder;
+        }
+        match form.kind {
+            ContactKind::Plane => {
+                vector(ui, "point", &mut form.point, dim);
+                vector(ui, "normale (vers la pièce)", &mut form.normal, dim);
+            }
+            ContactKind::Cylinder => {
+                vector(
+                    ui,
+                    if three_d { "point de l'axe" } else { "centre" },
+                    &mut form.point,
+                    dim,
+                );
+                if three_d {
+                    vector(ui, "axe", &mut form.axis, dim);
+                }
+            }
+            ContactKind::Sphere => vector(ui, "centre", &mut form.center, dim),
+        }
+        if form.kind != ContactKind::Plane {
+            widgets::field(ui, "rayon", |ui| {
+                ui.add(
+                    egui::DragValue::new(&mut form.radius)
+                        .speed(0.05)
+                        .range(0.0..=f64::MAX),
+                )
+            });
+        }
+        vector(ui, "déplacement à λ = 1", &mut form.motion, dim);
+        if ui.button("Ajouter le Contact").clicked() && !form.set.is_empty() {
+            draft.contacts.push(form.to_def(dim));
+        }
+    });
 }
 
 /// Inspecteur « Step, Amplitude » : le quasi-statique (avec son amplitude) et le transitoire thermique.
 pub fn step_tool(ui: &mut egui::Ui, draft: &mut Draft) {
-    let mut on = draft.quasi_step.is_some();
-    if ui.checkbox(&mut on, "Step quasi-statique").changed() {
-        draft.quasi_step = on.then(Draft::default_quasi_step);
-    }
-    if let Some(step) = &mut draft.quasi_step {
-        ui.horizontal(|ui| {
-            ui.label("durée");
-            ui.add(
-                egui::DragValue::new(&mut step.duration)
-                    .speed(0.05)
-                    .range(0.0..=f64::MAX),
-            );
-            ui.label("incréments");
-            ui.add(egui::DragValue::new(&mut step.increments).range(1..=100_000));
-        });
-        let mut custom = step.amplitude.is_some();
-        if ui
-            .checkbox(&mut custom, "Amplitude λ(t) personnalisée")
-            .on_hover_text("Sans elle : une rampe de 0 à 1 sur la durée")
-            .changed()
-        {
-            step.amplitude = custom.then(|| vec![[0.0, 0.0], [step.duration, 1.0]]);
+    widgets::section(ui, "Quasi-statique", |ui| {
+        let mut on = draft.quasi_step.is_some();
+        if ui.checkbox(&mut on, "Step quasi-statique").changed() {
+            draft.quasi_step = on.then(Draft::default_quasi_step);
         }
-        if let Some(points) = &mut step.amplitude {
-            let mut remove = None;
-            for (i, p) in points.iter_mut().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.label("t");
-                    ui.add(egui::DragValue::new(&mut p[0]).speed(0.05));
-                    ui.label("λ");
-                    ui.add(egui::DragValue::new(&mut p[1]).speed(0.05));
-                    if ui.small_button("×").clicked() {
-                        remove = Some(i);
-                    }
-                });
+        if let Some(step) = &mut draft.quasi_step {
+            widgets::field(ui, "durée", |ui| {
+                ui.add(
+                    egui::DragValue::new(&mut step.duration)
+                        .speed(0.05)
+                        .range(0.0..=f64::MAX),
+                )
+            });
+            widgets::field(ui, "incréments", |ui| {
+                ui.add(egui::DragValue::new(&mut step.increments).range(1..=100_000))
+            });
+            let mut custom = step.amplitude.is_some();
+            if ui
+                .checkbox(&mut custom, "Amplitude λ(t) personnalisée")
+                .on_hover_text("Sans elle : une rampe de 0 à 1 sur la durée")
+                .changed()
+            {
+                step.amplitude = custom.then(|| vec![[0.0, 0.0], [step.duration, 1.0]]);
             }
-            if let Some(i) = remove {
-                points.remove(i);
-            }
-            if ui.button("Ajouter un point").clicked() {
-                let last = points.last().map_or(0.0, |p| p[0]);
-                points.push([last + 1.0, 1.0]);
+            if let Some(points) = &mut step.amplitude {
+                let mut remove = None;
+                for (i, p) in points.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label("t");
+                        ui.add(egui::DragValue::new(&mut p[0]).speed(0.05));
+                        ui.label("λ");
+                        ui.add(egui::DragValue::new(&mut p[1]).speed(0.05));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("×").on_hover_text("Retirer").clicked() {
+                                remove = Some(i);
+                            }
+                        });
+                    });
+                }
+                if let Some(i) = remove {
+                    points.remove(i);
+                }
+                if ui.button("Ajouter un point").clicked() {
+                    let last = points.last().map_or(0.0, |p| p[0]);
+                    points.push([last + 1.0, 1.0]);
+                }
             }
         }
-    }
-    ui.separator();
-    let mut thermal = draft.thermal_step.is_some();
-    if ui.checkbox(&mut thermal, "Transitoire thermique").changed() {
-        draft.thermal_step = thermal.then(Draft::default_thermal_step);
-    }
-    if let Some(t) = &mut draft.thermal_step {
-        ui.horizontal(|ui| {
-            ui.label("durée");
-            ui.add(
-                egui::DragValue::new(&mut t.duration)
-                    .speed(1.0)
-                    .range(0.0..=f64::MAX),
-            );
-            ui.label("incréments");
-            ui.add(egui::DragValue::new(&mut t.increments).range(1..=100_000));
-        });
-        ui.horizontal(|ui| {
-            ui.label("T initiale");
-            ui.add(egui::DragValue::new(&mut t.initial_temperature).speed(1.0));
-        });
-        let mut theta = t.theta.unwrap_or(1.0);
-        ui.horizontal(|ui| {
+    });
+    widgets::section(ui, "Transitoire thermique", |ui| {
+        let mut thermal = draft.thermal_step.is_some();
+        if ui.checkbox(&mut thermal, "Transitoire thermique").changed() {
+            draft.thermal_step = thermal.then(Draft::default_thermal_step);
+        }
+        if let Some(t) = &mut draft.thermal_step {
+            widgets::field(ui, "durée", |ui| {
+                ui.add(
+                    egui::DragValue::new(&mut t.duration)
+                        .speed(1.0)
+                        .range(0.0..=f64::MAX),
+                )
+            });
+            widgets::field(ui, "incréments", |ui| {
+                ui.add(egui::DragValue::new(&mut t.increments).range(1..=100_000))
+            });
+            widgets::field(ui, "T initiale", |ui| {
+                ui.add(egui::DragValue::new(&mut t.initial_temperature).speed(1.0))
+            });
+            let mut theta = t.theta.unwrap_or(1.0);
             ui.label("θ (1 : Euler implicite, 0,5 : Crank-Nicolson)");
             ui.add(
                 egui::DragValue::new(&mut theta)
                     .speed(0.05)
                     .range(0.0..=1.0),
             );
-        });
-        t.theta = ((theta - 1.0).abs() > f64::EPSILON).then_some(theta);
-    }
+            t.theta = ((theta - 1.0).abs() > f64::EPSILON).then_some(theta);
+        }
+    });
 }
